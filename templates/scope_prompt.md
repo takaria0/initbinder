@@ -1,0 +1,28 @@
+You are a protein design expert. Your task is to analyze the provided PDB metadata and propose a design scope for creating a binder against this target.
+
+Based on the metadata below, identify 1-3 potential epitopes. For each epitope, provide a list of residue ranges (e.g., "A:10-20") and a brief rationale for your choice.
+
+The final output must be a single YAML block.
+
+--- PDB METADATA ---
+{meta}
+
+{uniprot_context}
+--- END METADATA ---
+
+Propose a scope in the following YAML format:
+```yaml
+id: "PDB_ID_HERE"
+assembly_id: "1"
+target_name: "A descriptive name for the target protein"
+chains: ["A", "B"] # List the chains that make up the antigen target
+epitopes:
+  - name: "Epitope 1 Site"
+    residues: ["A:50-65", "A:80-88"] # Residue ranges for the epitope
+    rationale: "Rationale for choosing this epitope, based on function, literature, or structural features."
+  - name: "Epitope 2 Site"
+    residues: ["B:25-40"]
+    rationale: "Another rationale."
+  - name: "Epitope 3 Site"
+    residues: ["B:60-70"]
+    rationale: "Another rationale."

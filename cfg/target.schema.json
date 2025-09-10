@@ -1,0 +1,26 @@
+{
+    "type":"object",
+    "required":["id","assembly_id","chains","epitopes"],
+    "properties":{
+      "id":{"type":"string"},
+      "target_name":{"type":"string"},
+      "assembly_id":{"type":"string"},
+      "chains":{"type":"array","items":{"type":"string"}},
+      "design_form":{"type":"string","enum":["soluble","membrane"]},
+      "buffer_pH":{"type":["number","integer"]},
+      "keep_ligands":{"type":"array","items":{"type":"string"}},
+      "remove_glycans":{"type":"boolean"},
+      "disulfide_policy":{"type":"string","enum":["allow","forbid","require"]},
+      "epitopes":{"type":"array","items":{
+        "type":"object",
+        "required":["name","residues"],
+        "properties":{
+          "name":{"type":"string"},
+          "residues":{"type":"array","items":{"type":"string"}},
+          "rationale":{"type":"string"}
+        }
+      }},
+      "deliverables":{"type":"object"}
+    }
+  }
+  

@@ -1,0 +1,10 @@
+__pycache__/
+/results/
+targets/
+/tmp_download/
+/cache/
+*.pyc
+/slurm_logs/
+.DS_Store
+
+env.py
