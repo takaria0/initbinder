@@ -8,6 +8,11 @@ all necessary structure files and a PyMOL script that uses only relative
 filenames, so they can be executed on any workstation simply by running the
 script in PyMOL.
 
+This module also supports a 'remote' mode via the `pymol-remote` library,
+which sends visualization commands directly from the HPC to a PyMOL instance
+running on a local machine. This is controlled by the RFA_PYMOL_MODE
+environment variable.
+
 Usage patterns
 --------------
 
@@ -47,12 +52,19 @@ from typing import Dict, List, Tuple
 # We import ROOT and a few helpers from utils to locate files and parse residue keys.
 try:
     from utils import ROOT, parse_key
-    from env import RFA_LOCAL_PYMOL_DEST, RFA_LOCAL_PYMOL_SSH_OPTS
+    from env import (RFA_LOCAL_PYMOL_DEST, RFA_LOCAL_PYMOL_SSH_OPTS, RFA_PYMOL_MODE,
+                     RFA_PYMOL_REMOTE_HOST, RFA_PYMOL_REMOTE_PORT)
 except Exception:
     # In unit test environments utils may not be importable; the functions will
     # not be available.  Raise a descriptive error when used in that context.
     ROOT = None  # type: ignore
     parse_key = None  # type: ignore
+    # Fallback to os.getenv if env.py is not present
+    RFA_PYMOL_MODE = os.getenv("RFA_PYMOL_MODE", "bundle")
+    RFA_PYMOL_REMOTE_HOST = os.getenv("RFA_PYMOL_REMOTE_HOST", "localhost")
+    RFA_PYMOL_REMOTE_PORT = int(os.getenv("RFA_PYMOL_REMOTE_PORT", "9123"))
+    RFA_LOCAL_PYMOL_DEST = os.getenv("RFA_LOCAL_PYMOL_DEST")
+    RFA_LOCAL_PYMOL_SSH_OPTS = os.getenv("RFA_LOCAL_PYMOL_SSH_OPTS")
 
 
 def _keys_to_expr(prefix: str, keys: List[str]) -> str:
@@ -183,7 +195,53 @@ def _write_hotspot_pml(struct_name: str, epitopes: dict[str, dict[str, list[str]
     pml.append("zoom target\n")
     pml_path.write_text("".join(pml))
 
+# --- NEW: Remote visualization sender for hotspots ---
+def _send_hotspots_to_remote(prepared_pdb_path: Path, epitopes: dict[str, dict[str, list[str]]]) -> bool:
+    """Attempts to send hotspot visualization commands to a remote PyMOL."""
+    try:
+        from pymol_remote.client import PymolSession
+    except ImportError:
+        print("[warn] `pymol-remote` is not installed. `pip install pymol-remote` to use remote mode.")
+        return False
+    
+    try:
+        _print_pymol_remote_instructions(RFA_PYMOL_REMOTE_PORT)
+        
+        print(f"[info] Connecting to PyMOL at {RFA_PYMOL_REMOTE_HOST}:{RFA_PYMOL_REMOTE_PORT}...")
+        pymol = PymolSession(hostname=RFA_PYMOL_REMOTE_HOST, port=RFA_PYMOL_REMOTE_PORT)
 
+        pdb_content = prepared_pdb_path.read_text()
+        
+        # This mirrors the logic from _write_hotspot_pml
+        pml_path = Path(tempfile.mktemp(suffix=".pml"))
+        _write_hotspot_pml("target", epitopes, pml_path)
+        
+        # Execute line-by-line
+        pymol.do("reinitialize")
+        # --- FIX: Use set_state instead of load_pdb ---
+        pymol.set_state(pdb_content, object="target", format="pdb")
+        
+        for line in pml_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("load ") or line.startswith("reinitialize"):
+                continue
+            pymol.do(line)
+        
+        pml_path.unlink() # Clean up temp script
+        
+        print("[ok] Successfully sent hotspot visualization to remote PyMOL session.")
+        return True
+
+    except ConnectionRefusedError:
+        print("[error] Connection to PyMOL was refused.")
+        print("        Please ensure `pymol_remote` is running on your local machine and that")
+        print("        the SSH tunnel is active with the correct port.")
+        return False
+    except Exception as e:
+        print(f"[error] An unexpected error occurred with pymol-remote: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def export_hotspot_bundle(pdb_id: str) -> Path | None:
     """
@@ -220,17 +278,28 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
         if m:
             epi = m.group(1)
             var_label = m.group(2) or "A"
-            keys = json.loads(f.read_text())
+            try: keys = json.loads(f.read_text())
+            except json.JSONDecodeError: keys = []
             epitopes.setdefault(epi, {}).setdefault(var_label, []).extend(keys)
         else:
             # epitope mask
             epi = base
-            keys = json.loads(f.read_text())
+            try: keys = json.loads(f.read_text())
+            except json.JSONDecodeError: keys = []
             epitopes.setdefault(epi, {})["mask"] = keys
     if not epitopes:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
-    # Create temporary output directory
+    
+    # --- NEW: Mode Toggle ---
+    if RFA_PYMOL_MODE.lower() == 'remote':
+        success = _send_hotspots_to_remote(prepared_pdb, epitopes)
+        if success:
+            return None # Success in remote mode, no bundle created.
+        else:
+            print("[info] Falling back to 'bundle' mode due to remote error.")
+    
+    # --- Bundle Mode (Default or Fallback) ---
     bundle_dir = Path(tempfile.mkdtemp(prefix=f"{pdb_id_u}_prep_pymol_"))
     # Copy prepared structure with just its basename
     dest_pdb_name = prepared_pdb.name
@@ -337,12 +406,254 @@ def _maybe_scp_to_local(bundle_dir: Path) -> None:
         except Exception:
             print(f"[pymol_utils] Could not parse RFA_LOCAL_PYMOL_SSH_OPTS; ignoring")
             opts_list = []
+    
+    user = os.getenv('USER', 'your_user')
+    host = os.getenv('SLURM_SUBMIT_HOST')
+    
+    if not host:
+        print("[pymol_utils] Could not determine login node from SLURM_SUBMIT_HOST.")
+        print("              Please set RFA_LOCAL_PYMOL_DEST to a full scp target, e.g., user@hostname:/path")
+        return
+
+    # If dest is just a path, construct the full target
+    if ":" not in dest:
+        dest = f"{user}@{host}:{dest}"
+
     cmd = ["scp", "-r"] + opts_list + [str(bundle_dir), dest]
     try:
         print(f"[pymol_utils] Copying {bundle_dir} to {dest} via scp...")
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         print(f"[pymol_utils] Done copying to {dest}")
     except FileNotFoundError:
         print("[pymol_utils] scp command not found; cannot transfer bundle")
     except subprocess.CalledProcessError as e:
-        print(f"[pymol_utils] scp failed: {e}")
+        print(f"[pymol_utils] scp failed: {e.stderr}")
+
+
+def _write_rfdiff_crop_pml(
+    pml_path: Path,
+    full_pdb_name: str,
+    crop_pdb_name: str,
+    epitope_mask_keys: list[str],
+    hotspot_keys: list[str]
+) -> None:
+    """Writes a PyMOL script to compare a full and cropped PDB with highlights."""
+    
+    mask_sel = _keys_to_expr("target_full", epitope_mask_keys)
+    hot_sel = _keys_to_expr("target_full", hotspot_keys)
+    
+    crop_mask_sel = _keys_to_expr("target_crop", epitope_mask_keys)
+    crop_hot_sel = _keys_to_expr("target_crop", hotspot_keys)
+
+    pml = [
+        "reinitialize",
+        f"load {full_pdb_name}, target_full",
+        f"load {crop_pdb_name}, target_crop",
+        "align target_crop, target_full",
+        "",
+        "bg_color white",
+        "hide everything",
+        "show cartoon, target_full",
+        "color gray80, target_full",
+        "set cartoon_transparency, 0.5, target_full",
+        "show cartoon, target_crop",
+        "color lightorange, target_crop",
+        "",
+        "set stick_radius, 0.25",
+        "set sphere_scale, 0.6",
+        "",
+    ]
+    
+    if mask_sel:
+        pml.append(f"select mask_full, {mask_sel}")
+        pml.append("show sticks, mask_full")
+        pml.append("color yellow, mask_full")
+    if hot_sel:
+        pml.append(f"select hot_full, {hot_sel}")
+        pml.append("show spheres, hot_full")
+        pml.append("color red, hot_full")
+        
+    if crop_mask_sel:
+        pml.append(f"select mask_crop, {crop_mask_sel}")
+        pml.append("show sticks, mask_crop")
+        pml.append("color paleyellow, mask_crop")
+    if crop_hot_sel:
+        pml.append(f"select hot_crop, {crop_hot_sel}")
+        pml.append("show spheres, hot_crop")
+        pml.append("color tv_red, hot_crop")
+        
+    pml.extend([
+        "",
+        "group highlights_full, mask_full hot_full",
+        "group highlights_crop, mask_crop hot_crop",
+        "",
+        "# Scenes for easy viewing",
+        "scene full_view, store",
+        "disable target_crop, highlights_crop",
+        "scene full_only, store",
+        "enable target_crop, highlights_crop",
+        "disable target_full, highlights_full",
+        "scene crop_only, store",
+        "enable target_full, highlights_full",
+        "scene full_view, recall",
+        "zoom vis",
+    ])
+    
+    pml_path.write_text("\n".join(pml))
+
+def _print_pymol_remote_instructions(port: int):
+    """Prints detailed, auto-populating setup instructions for the user."""
+    user = os.getenv("USER", "your_user")
+    # SLURM_SUBMIT_HOST is the most reliable way to get the login node hostname
+    host = os.getenv("SLURM_SUBMIT_HOST")
+    
+    ssh_command = f"ssh -R {port}:localhost:{port} {user}@"
+    if host:
+        ssh_command += host
+        host_source_msg = f"      (Auto-detected your login node: {host})"
+    else:
+        ssh_command += "hpc_login_node"
+        host_source_msg = "      (Could not auto-detect login node. Please replace 'hpc_login_node' with your login node address)"
+
+    print("\n" + "="*70)
+    print("PyMOL Remote Mode: Instructions")
+    print("="*70)
+    print("To view structures in real-time, please follow these steps:")
+    print("\n1. ON YOUR LOCAL LAPTOP (in a terminal):")
+    print("   a) Make sure you have pymol and pymol-remote installed in a conda env.")
+    print("      (e.g., `conda activate pymol; pip install pymol-remote`)")
+    print("   b) Start the PyMOL RPC server:")
+    print(f"      PYMOL_RPC_PORT={port} pymol_remote")
+    print("      (A PyMOL window should open and be waiting for commands.)")
+    print("\n2. ON YOUR LOCAL LAPTOP (in a NEW terminal):")
+    print("   a) Set up an SSH tunnel to the HPC cluster. This forwards commands")
+    print("      from the cluster back to your laptop. Use this exact command:")
+    print(f"      {ssh_command}")
+    print(host_source_msg)
+    print("      (Keep this SSH session running.)")
+    print("\n3. ON THE HPC CLUSTER (where you are running this script):")
+    print("   a) Make sure `pymol-remote` is installed in your Python environment.")
+    print("      (e.g., `pip install pymol-remote`)")
+    print("   b) Ensure the following environment variable is set before running:")
+    print("      export RFA_PYMOL_MODE=remote")
+    print("\nThis script will now attempt to connect and send data...")
+    print("="*70 + "\n")
+
+
+def _send_rfdiff_crop_to_remote(
+    full_pdb_path: Path,
+    crop_pdb_path: Path,
+    epitope_mask_keys: list[str],
+    hotspot_keys: list[str],
+) -> bool:
+    """Attempts to send the RFdiffusion crop visualization to a remote PyMOL."""
+    try:
+        from pymol_remote.client import PymolSession
+    except ImportError:
+        print("[warn] `pymol-remote` is not installed on the cluster. `pip install pymol-remote` to use remote mode.")
+        return False
+
+    try:
+        _print_pymol_remote_instructions(RFA_PYMOL_REMOTE_PORT)
+        
+        print(f"[info] Connecting to PyMOL at {RFA_PYMOL_REMOTE_HOST}:{RFA_PYMOL_REMOTE_PORT}...")
+        pymol = PymolSession(hostname=RFA_PYMOL_REMOTE_HOST, port=RFA_PYMOL_REMOTE_PORT)
+
+        full_pdb_content = full_pdb_path.read_text()
+        crop_pdb_content = crop_pdb_path.read_text()
+
+        pymol.do("reinitialize")
+        # --- FIX: Use set_state instead of load_pdb ---
+        pymol.set_state(full_pdb_content, object="target_full", format="pdb")
+        pymol.set_state(crop_pdb_content, object="target_crop", format="pdb")
+
+        # Replicate visualization commands from _write_rfdiff_crop_pml
+        commands = [
+            "align target_crop, target_full",
+            "bg_color white", "hide everything", "show cartoon, target_full",
+            "color gray80, target_full", "set cartoon_transparency, 0.5, target_full",
+            "show cartoon, target_crop", "color lightorange, target_crop",
+            "set stick_radius, 0.25", "set sphere_scale, 0.6",
+        ]
+
+        mask_sel = _keys_to_expr("target_full", epitope_mask_keys)
+        if mask_sel:
+            commands.extend([f"select mask_full, {mask_sel}", "show sticks, mask_full", "color yellow, mask_full"])
+        
+        hot_sel = _keys_to_expr("target_full", hotspot_keys)
+        if hot_sel:
+            commands.extend([f"select hot_full, {hot_sel}", "show spheres, hot_full", "color red, hot_full"])
+
+        crop_mask_sel = _keys_to_expr("target_crop", epitope_mask_keys)
+        if crop_mask_sel:
+            commands.extend([f"select mask_crop, {crop_mask_sel}", "show sticks, mask_crop", "color paleyellow, mask_crop"])
+
+        crop_hot_sel = _keys_to_expr("target_crop", hotspot_keys)
+        if crop_hot_sel:
+            commands.extend([f"select hot_crop, {crop_hot_sel}", "show spheres, hot_crop", "color tv_red, hot_crop"])
+
+        commands.extend(["zoom vis"])
+        
+        for cmd in commands:
+            pymol.do(cmd)
+            
+        print("[ok] Successfully sent visualization to remote PyMOL session.")
+        return True
+
+    except ConnectionRefusedError:
+        print("[error] Connection to PyMOL was refused.")
+        print("        Please ensure `pymol_remote` is running on your local machine and that")
+        print("        the SSH tunnel is active with the correct port.")
+        return False
+    except Exception as e:
+        print(f"[error] An unexpected error occurred with pymol-remote: {e}")
+        return False
+
+def export_rfdiff_crop_bundle(
+    full_pdb_path: Path,
+    crop_pdb_path: Path,
+    epitope_mask_keys: list[str],
+    hotspot_keys: list[str],
+    pdb_id: str,
+    epitope_name: str,
+    hotspot_variant: str,
+) -> Path | None:
+    """
+    Creates a bundle to visualize the RFdiffusion cropped target vs the full one.
+    If RFA_PYMOL_MODE is 'remote', it sends commands directly. Otherwise, it
+    creates a downloadable bundle.
+    """
+    if ROOT is None:
+        raise RuntimeError("pymol_utils requires utils.ROOT")
+
+    if not full_pdb_path.exists() or not crop_pdb_path.exists():
+        print("[pymol_utils] Missing PDB files for crop visualization bundle.")
+        return None
+    
+    # --- Mode Toggle ---
+    if RFA_PYMOL_MODE.lower() == 'remote':
+        success = _send_rfdiff_crop_to_remote(full_pdb_path, crop_pdb_path, epitope_mask_keys, hotspot_keys)
+        if success:
+            return None  # Success in remote mode means no bundle path is returned.
+        else:
+            print("[info] Falling back to 'bundle' mode due to remote error.")
+
+    # --- Bundle Mode (Default or Fallback) ---
+    sanitized_epitope = epitope_name.replace(" ", "_").replace("/", "_")
+    prefix = f"{pdb_id}_{sanitized_epitope}_hs{hotspot_variant}_crop_pymol_"
+    bundle_dir = Path(tempfile.mkdtemp(prefix=prefix))
+    
+    shutil.copy(str(full_pdb_path), str(bundle_dir / full_pdb_path.name))
+    shutil.copy(str(crop_pdb_path), str(bundle_dir / crop_pdb_path.name))
+    
+    pml_path = bundle_dir / "visualize_crop.pml"
+    _write_rfdiff_crop_pml(
+        pml_path,
+        full_pdb_name=full_pdb_path.name,
+        crop_pdb_name=crop_pdb_path.name,
+        epitope_mask_keys=epitope_mask_keys,
+        hotspot_keys=hotspot_keys,
+    )
+    
+    _maybe_scp_to_local(bundle_dir)
+    return bundle_dirs

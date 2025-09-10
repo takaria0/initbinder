@@ -3,6 +3,7 @@ from pathlib import Path
 from utils import _ensure_dir, ROOT, SCHEMA, RFANTIBODY_REPO_PATH, SINGULARITY_IMAGE_PATH, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE
 from jsonschema import validate
 from utils import crop_pdb_by_hotspots
+from scripts.pymol_utils import export_rfdiff_crop_bundle
 
 def make_rfa_rfdiffusion_command(
     pdb_id: str, epitope: str, num_designs: int, designs_per_task: int,
@@ -65,6 +66,36 @@ def make_rfa_rfdiffusion_command(
         target_pdb_for_inference = Path(crop_out["out_pdb"])
         print(f"[ok] Cropped PDB for RFdiffusion: {target_pdb_for_inference.name} "
               f"(radius={crop_radius}Å, pad=±{crop_pad}, keep_glycans={crop_keep_glycans})")
+
+        # --- PyMOL Visualization Bundle Export ---
+        try:
+            mask_path = prep_dir / f"epitope_{name_sanitized}.json"
+            epitope_mask_keys = json.loads(mask_path.read_text()) if mask_path.exists() else []
+            
+            bundle_dir = export_rfdiff_crop_bundle(
+                full_pdb_path=prep_pdb,
+                crop_pdb_path=target_pdb_for_inference,
+                epitope_mask_keys=epitope_mask_keys,
+                hotspot_keys=hs_list,
+                pdb_id=pdb_id,
+                epitope_name=epitope,
+                hotspot_variant=hotspot_variant
+            )
+            if bundle_dir:
+                print(f"[ok] Generated PyMOL crop visualization bundle: {bundle_dir}")
+                try:
+                    import socket
+                    host = socket.gethostname() or os.uname()[1]
+                except Exception:
+                    host = os.uname()[1] if hasattr(os, 'uname') else ''
+                user = os.getenv('USER', '')
+                port = os.getenv('RFA_SCP_PORT', '6000')
+                if user and host:
+                     print(f"[info] To download, run from your local machine:\n"
+                           f"  scp -r -P {port} {user}@{host}:{bundle_dir} ~/Downloads/")
+
+        except Exception as e:
+            print(f"[warn] Failed to generate PyMOL visualization bundle for RFdiffusion crop: {e}")
 
     output_dir = run_dir
     _ensure_dir(output_dir)

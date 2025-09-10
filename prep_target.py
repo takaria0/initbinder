@@ -103,7 +103,8 @@ def suggest_pipeline_command(pdb_id: str):
     print(f"  --total {total} \\")
     print(f"  --designs_per_task {designs_per_task} \\")
     print(f"  --num_seq {num_seq} --temp {temp} \\")
-    print(f"  --binder_chain_id {shlex.quote(binder_chain_id)}")
+    print(f"  --binder_chain_id {shlex.quote(binder_chain_id)} \\")
+    print(f"  --run_tag {datetime.datetime.now().strftime('%Y%m%d_%H%M')}")
     print("===============================================\n")
 
     one_liner_arms = " ".join(f'--arm "{a}"' for a in arms[:total])
@@ -111,7 +112,7 @@ def suggest_pipeline_command(pdb_id: str):
         f'python manage_rfa.py pipeline {pdb_id.upper()} '
         f'{one_liner_arms} '
         f'--total {total} --designs_per_task {designs_per_task} '
-        f'--num_seq {num_seq} --temp {temp} --binder_chain_id {shlex.quote(binder_chain_id)}'
+        f'--num_seq {num_seq} --temp {temp} --binder_chain_id {shlex.quote(binder_chain_id)} --run_tag {datetime.datetime.now().strftime("%Y%m%d_%H%M")}'
     )
     print("[tip] One-liner:")
     print(one_liner + "\n")
@@ -382,7 +383,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     # scp port defaults to 22 but can be overridden by setting
     # RFA_SCP_PORT in the environment (e.g. 6000 for the hpc3 cluster).
     try:
-        from Projects.initbinder.utils.pymol_utils import export_hotspot_bundle  # type: ignore
+        from scripts.pymol_utils import export_hotspot_bundle  # type: ignore
         bdir = export_hotspot_bundle(pdb_id)
         if bdir:
             print(f"[prep_target] Hotspot visualisation bundle created at: {bdir}")

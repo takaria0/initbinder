@@ -6,6 +6,7 @@ conda activate takashi
 Testing right now: 8AX9
 RBD: 6M17
 Flu HA: 8SK7
+Flu HA: 5VLI
 RBD: 6M17
 
 =========================  QUICK START (ARM-AWARE PIPELINE)  =========================
@@ -19,12 +20,12 @@ python manage_rfa.py target-generation \
 
 1) Initialize a target directory (also writes a skeleton target.yaml if missing)
 python manage_rfa.py init-target 8SK7
-
+python manage_rfa.py init-target 5VLI
 python manage_rfa.py init-target 4DOH
 
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
-
+python manage_rfa.py decide-scope 5VLI
 python manage_rfa.py decide-scope 4DOH
 
 Local GPT-OSS GPU version with GPU access:
@@ -32,8 +33,23 @@ python manage_rfa.py decide-scope 8SK7 --submit --time_h 1 --mem_gb 24
 
 3) Prepare structure + generate epitope masks and hotspot variants (A/B/C)
 python manage_rfa.py prep-target 8SK7 --sasa_cutoff 10.0
-
+python manage_rfa.py prep-target 5VLI --sasa_cutoff 10.0
 python manage_rfa.py prep-target 4DOH --sasa_cutoff 10.0
+
+python manage_rfa.py pipeline 5VLI \
+  --arm "Conserved Stem Groove@A" \
+  --arm "Conserved Stem Groove@B" \
+  --arm "Conserved Stem Groove@C" \
+  --arm "Receptor Binding Site@A" \
+  --arm "Receptor Binding Site@B" \
+  --arm "Receptor Binding Site@C" \
+  --total 120 \
+  --designs_per_task 20 \
+  --num_seq 1 --temp 0.1 \
+  --binder_chain_id H \
+  --run_tag 20250910_0558
+
+python manage_rfa.py assess-rfa-all 5VLI --binder_chain_id H --run_label v1 --include_keyword "20250910"
 
 python manage_rfa.py pipeline 8SK7 \
   --arm "Validated Globular Head Site@A" \
@@ -53,6 +69,8 @@ python manage_rfa.py pipeline 8SK7 \
   
   
 python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 20250908 --include_keyword "20250904"
+
+
   
 python scripts/ipsae.py \
     /dfs6/pub/inagakit/Projects/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_confidences.json \

@@ -6,7 +6,7 @@ Usage (standalone):
   python target_generation.py --instruction "interleukin" \
       --max_targets 3 --species human --prefer_tags biotin,his --soluble_only true
 
-  python target_generation.py --instruction "top 10 targets that people should design binders for therapeutic purposes" \
+python target_generation.py --instruction "top 10 targets that people should design binders for therapeutic purposes" \
       --max_targets 10 --species human --prefer_tags biotin,his --soluble_only true
 
 
@@ -58,9 +58,10 @@ TARGETS_DIR = ROOT / "targets"
 for p in (CACHE_DIR, CATALOG_DIR, TARGETS_DIR):
     p.mkdir(parents=True, exist_ok=True)
 
-
+DEBUG_PDB = True
 # -------------------- Optional LLM (Google GenAI) --------------------
 USE_LLM = True
+MIN_IDENTITY_SOFT = 0.30 
 try:
     from env import GOOGLE_API_KEY, MODEL
     import google.generativeai as genai
@@ -172,15 +173,6 @@ from datetime import datetime
 
 # ---------- Product page fetch & parse ----------
 def _best_vendor_coverage(uniprot_seq: str, entry_json: dict, antigen_opts: List[AntigenOption]) -> Optional[dict]:
-    """
-    For a single PDB entry, find the vendor antigen (with parsed bounds) and entity
-    mapping that maximizes coverage of the vendor AA interval.
-
-    Returns dict with keys:
-      vendor, catalog, v_start, v_end, v_len,
-      entity_id, u_start, u_end, identity, coverage (0..1), full (bool)
-    or None if nothing could be mapped.
-    """
     if not uniprot_seq or not entry_json:
         return None
 
@@ -196,9 +188,14 @@ def _best_vendor_coverage(uniprot_seq: str, entry_json: dict, antigen_opts: List
     for ent_id in _entity_ids(entry_json):
         ent = _polymer_entity_json(pid, ent_id)
         ent_seq = _entity_seq_can(ent)
-        u_s, u_e, ident = _map_entity_to_uniprot(uniprot_seq, ent_seq)
+        u_s, u_e, ident, ent_len, uni_len, cov_ent, cov_uni = _map_entity_to_uniprot(uniprot_seq, ent_seq)
         if u_s is None or u_e is None:
+            if DEBUG_PDB:
+                print(f"[map] {pid} ent{ent_id}: no mapping")
             continue
+
+        if DEBUG_PDB:
+            print(f"[map] {pid} ent{ent_id}: U{u_s}-U{u_e} | ident={ident:.3f} | cov_ent={cov_ent:.3f} | ent_len={ent_len} | uni_len={uni_len}")
 
         for vendor, catalog, v_s, v_e in vendor_items:
             v_len = v_e - v_s + 1
@@ -218,10 +215,19 @@ def _best_vendor_coverage(uniprot_seq: str, entry_json: dict, antigen_opts: List
                 identity=float(ident),
                 coverage=float(cov),
                 full=bool(full),
+                ent_len=ent_len, uni_len=uni_len, cov_ent=cov_ent, cov_uni=cov_uni,
             )
+
+            if DEBUG_PDB:
+                status = "FULL" if full else ("PART" if cov > 0 else "MISS")
+                print(f"  [vendor] {vendor}:{catalog} bounds={v_s}-{v_e} | cover={cov:.3f} ({status}) | ident={ident:.3f}")
+
             if (best is None) or (rec["coverage"] > best["coverage"]) or \
                (rec["coverage"] == best["coverage"] and rec["identity"] > best["identity"]):
                 best = rec
+
+    if best and DEBUG_PDB and best["identity"] < MIN_IDENTITY_SOFT:
+        print(f"[warn] best vendor↔entity mapping has low identity ({best['identity']:.3f}) for {pid} ent{best['entity_id']}")
     return best
 
 
@@ -310,66 +316,81 @@ def _entity_seq_can(entity_json: dict) -> str:
     except Exception:
         return ""
 
-def _map_entity_to_uniprot(uniprot_seq: str, entity_seq: str) -> Tuple[Optional[int], Optional[int], float]:
+def _map_entity_to_uniprot(uniprot_seq: str, entity_seq: str) -> Tuple[Optional[int], Optional[int], float, int, int, float, float]:
     """
-    Return (u_start, u_end, identity) where u_* are UniProt indices (1-based) that best align
-    the entity sequence. Uses Biopython if available, otherwise difflib/substring heuristics.
+    Return (u_start, u_end, identity, ent_len, uni_len, cov_entity_in_uniprot, cov_uniprot_by_entity-window)
+      - identity: matches / aligned-length
+      - cov_entity_in_uniprot: (u_end - u_start + 1) / ent_len  ∈ [0,1]
+      - cov_uniprot_by_entity-window: (u_end - u_start + 1) / uni_len  ∈ [0,1]
     """
     if not uniprot_seq or not entity_seq:
-        return None, None, 0.0
+        return None, None, 0.0, len(entity_seq or ""), len(uniprot_seq or ""), 0.0, 0.0
 
-    # Try Biopython globalxx (no penalties) if available
+    uni_len = len(uniprot_seq)
+    ent_len = len(entity_seq)
+
     try:
         from Bio import pairwise2
         alns = pairwise2.align.globalms(uniprot_seq, entity_seq, 2, -1, -5, -1, one_alignment_only=True)
         if alns:
             a1, a2, score, begin, end = alns[0]
-            # compute identity over aligned columns
             matches = sum(1 for x, y in zip(a1, a2) if x == y and x != "-" and y != "-")
-            length = sum(1 for x, y in zip(a1, a2) if x != "-" and y != "-")
-            ident = (matches / max(1, length))
-            # find first/last non-gap in a2 to project to UniProt coords
+            aligned_len = sum(1 for x, y in zip(a1, a2) if x != "-" and y != "-")
+            ident = matches / max(1, aligned_len)
+
+            # project entity first/last non-gap to UniProt coordinates
             u_idx = 0
             u_start = None
-            pos = 0
             for x, y in zip(a1, a2):
                 if x != "-":
                     u_idx += 1
-                pos += 1
                 if y != "-" and u_start is None:
                     u_start = u_idx
                     break
-            # find u_end scanning from end
+
+            u_idx2 = uni_len + 1
             u_end = None
-            u_idx2 = len(uniprot_seq) + 1
             for x, y in zip(reversed(a1), reversed(a2)):
                 if x != "-":
                     u_idx2 -= 1
                 if y != "-":
                     u_end = u_idx2
                     break
-            return u_start, u_end, ident
+
+            win = 0
+            if u_start is not None and u_end is not None and u_end >= u_start:
+                win = (u_end - u_start + 1)
+            cov_ent = win / max(1, ent_len)
+            cov_uni = win / max(1, uni_len)
+            return u_start, u_end, ident, ent_len, uni_len, cov_ent, cov_uni
     except Exception:
         pass
 
-    # Fallback 1: direct substring
+    # fallback 1: exact substring
     idx = uniprot_seq.find(entity_seq)
     if idx != -1:
-        return idx + 1, idx + len(entity_seq), 1.0
+        u_start = idx + 1
+        u_end = idx + ent_len
+        win = ent_len
+        cov_ent = 1.0
+        cov_uni = win / max(1, len(uniprot_seq))
+        return u_start, u_end, 1.0, ent_len, len(uniprot_seq), cov_ent, cov_uni
 
-    # Fallback 2: difflib to find best window
+    # fallback 2: difflib window
     s = difflib.SequenceMatcher(a=uniprot_seq, b=entity_seq)
     blocks = s.get_matching_blocks()
     if blocks:
-        # take the largest block as anchor
         i = max(blocks, key=lambda b: b.size)
-        # estimate coverage region around anchor
         u_start = i.a + 1
-        u_end = min(len(uniprot_seq), u_start + len(entity_seq) - 1)
-        ident = i.size / max(1, len(entity_seq))
-        return u_start, u_end, ident
+        u_end = min(len(uniprot_seq), u_start + ent_len - 1)
+        ident = i.size / max(1, ent_len)
+        win = max(0, u_end - u_start + 1)
+        cov_ent = win / max(1, ent_len)
+        cov_uni = win / max(1, len(uniprot_seq))
+        return u_start, u_end, ident, ent_len, len(uniprot_seq), cov_ent, cov_uni
 
-    return None, None, 0.0
+    return None, None, 0.0, ent_len, len(uniprot_seq), 0.0, 0.0
+
 
 # ---------- Method/recency scoring from earlier suggestion ----------
 def _method_from_entry(entry: dict) -> str:
@@ -781,16 +802,6 @@ def score_impact(uniprot_entry: dict) -> float:
 
 def choose_best_pdb(pdb_ids: List[str], uniprot_acc: str, uniprot_seq: str,
                     antigen_opts: List[AntigenOption]) -> Tuple[Optional[str], Optional[float], Optional[dict], Optional[dict]]:
-    """
-    Return (pid, res, entry, best_cov_info) where best_cov_info comes from _best_vendor_coverage.
-
-    Selection rule:
-      1) Prefer entries with FULL coverage (vendor AA range fully inside mapped entity to UniProt).
-         Among those, maximize (resolution score, recency) with mapping bonus.
-      2) If none fully cover, pick the one with the highest coverage; break ties by quality.
-
-    Prints per-PDB debug lines showing coverage & scores.
-    """
     full_cov_candidates = []
     partial_candidates = []
 
@@ -800,43 +811,50 @@ def choose_best_pdb(pdb_ids: List[str], uniprot_acc: str, uniprot_seq: str,
         rel = _release_date(entry) if entry else None
         rel_str = rel.date().isoformat() if rel else "NA"
 
-        mapped = False
+        # entities that claim to map to this UniProt
+        mapped_chains = []
         try:
-            mapped = bool(pdb_chains_for_uniprot(entry, uniprot_acc))
+            mapped_chains = pdb_chains_for_uniprot(entry, uniprot_acc)
         except Exception:
-            mapped = False
+            mapped_chains = []
+        mapped = bool(mapped_chains)
 
+        # best vendor coverage (also prints detailed mapping if DEBUG_PDB)
         best_cov = _best_vendor_coverage(uniprot_seq, entry, antigen_opts) if entry else None
+
         cov = (best_cov or {}).get("coverage", 0.0)
         full = bool((best_cov or {}).get("full", False))
-        map_bonus = 0.6 if mapped else -0.6
+        ident = (best_cov or {}).get("identity", 0.0)
+
+        # Quality term with a mapping identity nudge
         res_s = _resolution_score(res, method)
         rec_s = _recency_score(rel)
-        qual = (2.0 * res_s) + (0.5 * rec_s) + map_bonus
+        map_bonus = 0.6 if mapped else -0.6
+        ident_nudge = (ident - 0.3) * 0.5  # gentle push toward ≥0.5 identity; negative if low
+        qual = (2.0 * res_s) + (0.5 * rec_s) + map_bonus + ident_nudge
 
-        # Debug print (one line per PDB)
         vendor_tag = f"{best_cov['vendor']}:{best_cov['catalog']}" if best_cov else "NA"
         bounds_tag = f"{best_cov['v_start']}-{best_cov['v_end']}" if best_cov else "NA"
         ent_tag = f"ent{best_cov['entity_id']}@U{best_cov['u_start']}-{best_cov['u_end']}" if best_cov else "NA"
+
         print(f"[score] PDB {pid} | res={res or 'NA'}Å | method={method} | rel={rel_str} | "
-              f"mapped={mapped} | vendor={vendor_tag} bounds={bounds_tag} "
-              f"| ent={ent_tag} | cov={cov:.3f} full={full} | qual={qual:.3f}")
+              f"mapped={mapped} chains={','.join(mapped_chains) if mapped_chains else '—'} | "
+              f"vendor={vendor_tag} bounds={bounds_tag} | ent={ent_tag} | "
+              f"ident={ident:.3f} | cov={cov:.3f} full={full} | qual={qual:.3f}")
+
+        # soft warning if identity is very low
+        if ident and ident < MIN_IDENTITY_SOFT:
+            print(f"[warn] {pid} chosen-vendor mapping identity is low: {ident:.3f}")
 
         record = (pid, res, entry, best_cov, cov, qual)
-        if full:
-            full_cov_candidates.append(record)
-        else:
-            partial_candidates.append(record)
+        (full_cov_candidates if full else partial_candidates).append(record)
 
     def _best(records):
-        # Among given records, choose max coverage; break ties by quality
-        # Each record is (pid, res, entry, best_cov, cov, qual)
         if not records:
             return None
-        records.sort(key=lambda r: (r[4], r[5]), reverse=True)
+        records.sort(key=lambda r: (r[4], r[5]), reverse=True)  # by coverage then quality
         return records[0]
 
-    # Prefer full coverage first
     chosen = _best(full_cov_candidates) or _best(partial_candidates)
     if not chosen:
         return None, None, None, None
@@ -1132,6 +1150,8 @@ def write_summary(cands: List[Candidate], prefix: str = "targets_summary") -> No
     print(f"[ok] Wrote summary: {out}")
 
 
+
+
 # -------------------- Public API (CLI integration) --------------------
 
 
@@ -1219,6 +1239,10 @@ def run_target_generation(
 
     print("[done] target-generation complete.")
     return cands
+
+
+
+
 
 # -------------------- Standalone entry --------------------
 if __name__ == "__main__":
