@@ -23,6 +23,9 @@ python manage_rfa.py init-target 7FJD \
     --chain e --target_name "T-cell surface glycoprotein CD3 epsilon chain" \
     --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
 
+python manage_rfa.py init-target 7FJD \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
+
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
 python manage_rfa.py decide-scope 4DOH
