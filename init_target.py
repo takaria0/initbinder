@@ -251,17 +251,8 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
     print(f"  - Selected PDB Chain:             '{target_chain_id}'")
     print(f"  - PDB Chain Mapped Range:         {u_start}-{u_end} (Identity: {identity:.2%})")
     print(f"  - Vendor Product Canonical Range:   {v_start}-{v_end}")
+    print(f"  - Vendor Product Accession:        {accession}")
     print(f"  - Overlap (Intersection):           {intersection_len} residues from {intersection_start} to {intersection_end}")
     print(f"  - PDB Coverage of Vendor Product:   {pdb_coverage_of_vendor:.2%}")
     
     return intersection_start, intersection_end, target_chain_id
-
-    # if identity < 0.98 or pdb_coverage_of_vendor < 0.80:
-    #     print("\n[RESULT: FAILURE] The PDB structure is not a good match for the vendor antigen.")
-    #     return None
-    # else:
-    #     if pdb_coverage_of_vendor < 0.95:
-    #          print("\n[RESULT: WARNING] Partial overlap. The PDB covers most of the antigen, but manual review is advised.")
-    #     else:
-    #          print("\n[RESULT: SUCCESS] Excellent match. The PDB structure is highly compatible with the vendor antigen.")
-    #     return intersection_start, intersection_end, target_chain_id
