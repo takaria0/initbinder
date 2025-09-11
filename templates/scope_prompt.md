@@ -8,6 +8,8 @@ The final output must be a single YAML block.
 {meta}
 
 {uniprot_context}
+
+{chain_constraints}
 --- END METADATA ---
 
 Propose a scope in the following YAML format:

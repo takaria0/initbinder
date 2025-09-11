@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 """
 conda activate takashi
 
@@ -19,12 +18,16 @@ python manage_rfa.py target-generation \
 
 1) Initialize a target directory (also writes a skeleton target.yaml if missing)
 python manage_rfa.py init-target 8SK7
-python manage_rfa.py init-target 8ES8 --chain D --target_name "T-cell surface glycoprotein CD3 epsilon chain"
+# Example with verification:
+python manage_rfa.py init-target 7FJD \
+    --chain e --target_name "T-cell surface glycoprotein CD3 epsilon chain" \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
 
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
 python manage_rfa.py decide-scope 4DOH
 python manage_rfa.py decide-scope 8ES8
+python manage_rfa.py decide-scope 7FJD
 
 Local GPT-OSS GPU version with GPU access:
 python manage_rfa.py decide-scope 8SK7 --submit --time_h 1 --mem_gb 24
@@ -33,6 +36,10 @@ python manage_rfa.py decide-scope 8SK7 --submit --time_h 1 --mem_gb 24
 python manage_rfa.py prep-target 8SK7 --sasa_cutoff 10.0
 python manage_rfa.py prep-target 4DOH --sasa_cutoff 10.0
 python manage_rfa.py prep-target 8ES8 --sasa_cutoff 10.0
+python manage_rfa.py prep-target 7FJD --sasa_cutoff 10.0
+
+
+
 
 python manage_rfa.py pipeline 8SK7 \
   --arm "Validated Globular Head Site@A" \
@@ -326,6 +333,7 @@ def main():
     p_init.add_argument("pdb", help="4-letter PDB ID.")
     p_init.add_argument("--chain", help="Optional: Specify a target chain ID to focus on (e.g., 'A').")
     p_init.add_argument("--target_name", help="Optional: Specify the exact name of the target protein.")
+    p_init.add_argument("--antigen_url", help="Optional: URL to a Sino Biological antigen page for verification.")
 
     p_scope = sub.add_parser("decide-scope", help="Use an LLM to help define the project scope.")
     p_scope.add_argument("pdb", help="Target PDB ID.")
@@ -451,7 +459,7 @@ def main():
                     init_target(c.chosen_pdb)
 
     elif args.cmd == "init-target":
-        init_target(args.pdb, chain_id=args.chain, target_name=args.target_name)
+        init_target(args.pdb, chain_id=args.chain, target_name=args.target_name, antigen_url=args.antigen_url)
 
     elif args.cmd == "decide-scope":
         if getattr(args, "submit", False):
