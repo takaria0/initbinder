@@ -751,7 +751,7 @@ def assess_rfa_all(
     run_label: str | None = None,
     # 追加：高速化オプション
     skip_pml: bool = True,          # 各デザインの個別PML生成をスキップ（最後にギャラリーだけ作る）
-    skip_seq: bool = True,          # binder配列抽出をスキップ（Bio.PDBのI/Oを抑える）
+    skip_seq: bool = False,          # binder配列抽出をスキップ（Bio.PDBのI/Oを抑える）
     progress_every: int = 200,      # 進捗ログの間引き
     include_keyword: Optional[Iterable[str] | str] = None,   # <-- NEW
 ):
@@ -849,8 +849,9 @@ def assess_rfa_all(
 
                 # binder配列（既定はスキップ）
                 mpnn_pdb = mpnn_dir / f"{design_name}.pdb"
+                # print(f"[debug] Looking for MPNN PDB at {mpnn_pdb}")
                 if not mpnn_pdb.exists():
-                    cand = list(mpnn_dir.glob(f"{design_name}*.pdb"))
+                    cand = list(mpnn_dir.rglob(f"{design_name}*.pdb"))
                     mpnn_pdb = cand[0] if cand else None
                 binder_seq = ""
                 if (not skip_seq) and mpnn_pdb and mpnn_pdb.exists():
@@ -858,6 +859,7 @@ def assess_rfa_all(
                         binder_seq = _extract_chain_seq_from_pdb(mpnn_pdb, binder_chain_id)
                     except Exception:
                         binder_seq = ""
+                        print(f"[warn] Could not extract seq from {mpnn_pdb}")
 
                 # AF3サマリ
                 af3_rank = af3_iptm = af3_ptm = None

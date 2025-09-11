@@ -6,7 +6,6 @@ conda activate takashi
 Testing right now: 8AX9
 RBD: 6M17
 Flu HA: 8SK7
-Flu HA: 5VLI
 RBD: 6M17
 
 =========================  QUICK START (ARM-AWARE PIPELINE)  =========================
@@ -20,36 +19,20 @@ python manage_rfa.py target-generation \
 
 1) Initialize a target directory (also writes a skeleton target.yaml if missing)
 python manage_rfa.py init-target 8SK7
-python manage_rfa.py init-target 5VLI
-python manage_rfa.py init-target 4DOH
+python manage_rfa.py init-target 8ES8 --chain D --target_name "T-cell surface glycoprotein CD3 epsilon chain"
 
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
-python manage_rfa.py decide-scope 5VLI
 python manage_rfa.py decide-scope 4DOH
+python manage_rfa.py decide-scope 8ES8
 
 Local GPT-OSS GPU version with GPU access:
 python manage_rfa.py decide-scope 8SK7 --submit --time_h 1 --mem_gb 24
 
 3) Prepare structure + generate epitope masks and hotspot variants (A/B/C)
 python manage_rfa.py prep-target 8SK7 --sasa_cutoff 10.0
-python manage_rfa.py prep-target 5VLI --sasa_cutoff 10.0
 python manage_rfa.py prep-target 4DOH --sasa_cutoff 10.0
-
-python manage_rfa.py pipeline 5VLI \
-  --arm "Conserved Stem Groove@A" \
-  --arm "Conserved Stem Groove@B" \
-  --arm "Conserved Stem Groove@C" \
-  --arm "Receptor Binding Site@A" \
-  --arm "Receptor Binding Site@B" \
-  --arm "Receptor Binding Site@C" \
-  --total 120 \
-  --designs_per_task 20 \
-  --num_seq 1 --temp 0.1 \
-  --binder_chain_id H \
-  --run_tag 20250910_0558
-
-python manage_rfa.py assess-rfa-all 5VLI --binder_chain_id H --run_label v1 --include_keyword "20250910"
+python manage_rfa.py prep-target 8ES8 --sasa_cutoff 10.0
 
 python manage_rfa.py pipeline 8SK7 \
   --arm "Validated Globular Head Site@A" \
@@ -67,11 +50,43 @@ python manage_rfa.py pipeline 8SK7 \
   --binder_chain_id H \
   --run_tag 20250904_900_runs
   
+python manage_rfa.py pipeline 8ES8 \
+  --arm "Ig-like Domain Loop 1@A" \
+  --arm "Ig-like Domain Loop 1@B" \
+  --arm "Ig-like Domain Loop 1@C" \
+  --arm "Ig-like Domain Loop 2@A" \
+  --arm "Ig-like Domain Loop 2@B" \
+  --arm "Ig-like Domain Loop 2@C" \
+  --arm "Membrane-Proximal Stalk Region@A" \
+  --arm "Membrane-Proximal Stalk Region@B" \
+  --arm "Membrane-Proximal Stalk Region@C" \
+  --total 900 \
+  --designs_per_task 100 \
+  --num_seq 1 --temp 0.1 \
+  --binder_chain_id H \
+  --run_tag 20250910_0409
   
 python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 20250908 --include_keyword "20250904"
-
-
+python manage_rfa.py assess-rfa-all 8ES8 --binder_chain_id H --run_label 20250910 --include_keyword "20250910"
+python plot_rankings.py \
+    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --out_dir ./results/8ES8_20250910 \
+    --img_format png --dpi 150 \
+    --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
+    --topN 50 --max_categories 12
+python decide_go_no_go.py \
+  --rankings_tsv  /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+  --out_dir ./out_passthrough \
+  --passthrough --top_n 32 \
+  --idt_template_xlsx "plate-upload-template (1).xlsx" \
+  --idt_plate_xlsx ./out_passthrough/idt_8ES8_plate.xlsx \
+  --idt_plate_csv ./out_passthrough/idt_8ES8_plate.csv \
+  --prefix_raw  "TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA" \
+  --suffix_raw  "gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg" \
+  --use_dnachisel --codon_host yeast --dnachisel_species s_cerevisiae \
+  --gc_target 0.45 --gc_window 100
   
+
 python scripts/ipsae.py \
     /dfs6/pub/inagakit/Projects/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_confidences.json \
     /dfs6/pub/inagakit/Projects/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_model.cif 10 10  
@@ -206,8 +221,6 @@ tar -czf /data/homezvol1/inagakit/Projects/initbinder/targets/6M17_snapshot.tar.
 
 """
 
-
-
 import argparse
 import json
 import os
@@ -272,8 +285,6 @@ def _sbatch(path: Path, extra_env: dict[str,str] = None, dep: str | None = None)
     print(f"[submit] {path.name} → job {jid}{' (dep='+dep+')' if dep else ''}")
     return jid
 
-
-
 def _split_even(total: int, n: int) -> List[int]:
     q, r = divmod(total, n)
     return [q + 1 if i < r else q for i in range(n)]
@@ -291,7 +302,6 @@ def _latest_assess_tsv(tdir: Path) -> Path | None:
     cands = sorted(assess_root.glob("*/af3_rankings.tsv"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0] if cands else None
-
 
 def main():
     ap = argparse.ArgumentParser(
@@ -314,6 +324,8 @@ def main():
 
     p_init = sub.add_parser("init-target", help="Download PDB data and create project folder.")
     p_init.add_argument("pdb", help="4-letter PDB ID.")
+    p_init.add_argument("--chain", help="Optional: Specify a target chain ID to focus on (e.g., 'A').")
+    p_init.add_argument("--target_name", help="Optional: Specify the exact name of the target protein.")
 
     p_scope = sub.add_parser("decide-scope", help="Use an LLM to help define the project scope.")
     p_scope.add_argument("pdb", help="Target PDB ID.")
@@ -326,7 +338,6 @@ def main():
     p_prep.add_argument("pdb", help="Target PDB ID.")
     p_prep.add_argument("--sasa_cutoff", type=float, default=10, help="SASA cutoff for epitope definition.")
 
-  
     # --- RFdiffusion (multi-epitope, split-by-default) ---
     p_rfd = sub.add_parser("make-rfa-rfdiffusion", help="Run RFdiffusion for one or more arms (Epitope[@Variant]).")
     p_rfd.add_argument("pdb")
@@ -345,7 +356,6 @@ def main():
     p_rfd.add_argument("--crop_keep_glycans", action="store_true",
         help="If set, keep glycans when cropping.")
 
-
     # --- ProteinMPNN (multi-epitope/variant) ---
     p_mpnn = sub.add_parser("make-rfa-proteinmpnn", help="Run ProteinMPNN for one or more arms.")
     p_mpnn.add_argument("pdb")
@@ -359,11 +369,7 @@ def main():
     p_af3.add_argument("--binder_chain_id", default="H")
     p_af3.add_argument("--seed_idx", type=int, default=0)
 
-
-
     # --- Assessment Commands ---
-
-    # Single design deep-dive (kept)
     p_assess_one = sub.add_parser("assess-rfa-design", help="Assess ONE design (RF2/AF3). If --seed/--sample_idx are omitted, auto-pick best AF3 sample.")
     p_assess_one.add_argument("pdb", help="Target PDB ID.")
     p_assess_one.add_argument("--epitope", required=True, help="Name of the target epitope.")
@@ -371,7 +377,6 @@ def main():
     p_assess_one.add_argument("--seed", type=int, default=None, help="AF3 seed to inspect (optional).")
     p_assess_one.add_argument("--sample_idx", type=int, default=None, help="AF3 sample index to inspect (optional).")
 
-    # All designs (new) — ranks across ALL epitopes & designs
     p_assess_all = sub.add_parser("assess-rfa-all", help="Assess ALL designs for a target across ALL epitopes and rank by AF3.")
     p_assess_all.add_argument("pdb", help="Target PDB ID.")
     p_assess_all.add_argument("--binder_chain_id", default="H", help="Binder chain ID in MPNN PDBs (default: H).")
@@ -389,7 +394,6 @@ def main():
 
     p_report = sub.add_parser("report-scope", help="Generate a Markdown report of the project scope.")
     p_report.add_argument("pdb")
-
 
     p_pipe = sub.add_parser("pipeline", help="Generate & submit RFdiffusion→MPNN→AF3 for multiple arms with dependencies.")
     p_pipe.add_argument("pdb")
@@ -447,7 +451,7 @@ def main():
                     init_target(c.chosen_pdb)
 
     elif args.cmd == "init-target":
-        init_target(args.pdb)
+        init_target(args.pdb, chain_id=args.chain, target_name=args.target_name)
 
     elif args.cmd == "decide-scope":
         if getattr(args, "submit", False):
@@ -459,9 +463,8 @@ def main():
     elif args.cmd == "prep-target":
         prep_target(args.pdb, args.sasa_cutoff)
 
-
     elif args.cmd == "make-rfa-rfdiffusion":
-        arms = [ _parse_arm(s) for s in args.arm ]  # list[(epitope, variant)]
+        arms = [ _parse_arm(s) for s in args.arm ]
         if args.total is not None:
             allocs = _split_even(int(args.total), len(arms))
         else:
@@ -473,9 +476,9 @@ def main():
                 args.pdb, ep, n, args.designs_per_task,
                 args.framework_pdb, args.cdr_h1, args.cdr_h2, args.cdr_h3,
                 hotspot_variant=var,
-                crop_radius=args.crop_radius,             # ADD
-                crop_pad=args.crop_pad,                   # ADD
-                crop_keep_glycans=args.crop_keep_glycans  # ADD
+                crop_radius=args.crop_radius,
+                crop_pad=args.crop_pad,
+                crop_keep_glycans=args.crop_keep_glycans
             )
 
     elif args.cmd == "make-rfa-proteinmpnn":
@@ -489,22 +492,17 @@ def main():
             make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id,
                                 seed_idx=args.seed_idx, hotspot_variant=var)
 
-
     elif args.cmd == "make-rfa-rf2":
-        # make_rfa_rf2_command(args.pdb, args.epitope)
         pass
 
-
     elif args.cmd == "assess-rfa-design":
-        # assess_rfa_design(args.pdb, args.epitope, args.design_name, seed=args.seed, sample_idx=args.sample_idx)
         pass
 
     elif args.cmd == "assess-rfa-all":
         assess_rfa_all(args.pdb, binder_chain_id=args.binder_chain_id, seed=args.seed, sample_idx=args.sample_idx, rank_by=args.rank_by,
-                       run_label=args.run_label, skip_pml=args.skip_pml, skip_seq=args.skip_seq, include_keyword=args.include_keyword)
+                       run_label=args.run_label, skip_pml=args.skip_pml, skip_seq=False, include_keyword=args.include_keyword)
 
     elif args.cmd == "report-scope":
-        # report_scope(args.pdb)
         pass
 
     elif args.cmd == "pipeline":
@@ -512,40 +510,29 @@ def main():
         allocs = _split_even(args.total, len(arms)) if args.total is not None else [args.num_designs]*len(arms)
         print("[plan] pipeline:", ", ".join(f"{e}@{v}={n}" for (e,v),n in zip(arms,allocs)))
 
-        # 1) Generate all scripts & keep paths
-        rfd_scripts = {}
-        mpnn_scripts = {}
-        af3_scripts = {}
+        rfd_scripts, mpnn_scripts, af3_scripts = {}, {}, {}
         for (ep, var), n in zip(arms, allocs):
             rfd = make_rfa_rfdiffusion_command(
                 args.pdb, ep, n, args.designs_per_task,
                 args.framework_pdb, args.cdr_h1, args.cdr_h2, args.cdr_h3,
                 hotspot_variant=var,
-                crop_radius=args.crop_radius,             # ADD
-                crop_pad=args.crop_pad,                   # ADD
-                crop_keep_glycans=args.crop_keep_glycans,  # ADD
-                run_tag=args.run_tag                       # ADD
+                crop_radius=args.crop_radius,
+                crop_pad=args.crop_pad,
+                crop_keep_glycans=args.crop_keep_glycans,
+                run_tag=args.run_tag
             )
             mpn = make_rfa_proteinmpnn_command(args.pdb, ep, args.num_seq, args.temp, hotspot_variant=var, run_tag=args.run_tag)
             af3 = make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id,
                                     seed_idx=0, hotspot_variant=var, run_tag=args.run_tag)
             arm_key = f"{ep}@{var}"
-            rfd_scripts[arm_key] = rfd
-            mpnn_scripts[arm_key] = mpn
-            af3_scripts[arm_key] = af3
+            rfd_scripts[arm_key], mpnn_scripts[arm_key], af3_scripts[arm_key] = rfd, mpn, af3
 
-        # 2) Submit per-arm with dependencies (RFD → MPNN → AF3_1 → AF3_2)
-        # 2) Submit per-arm with dependencies
         if args.submit:
-            job_table = []
-            seed_jid = None
-
-            # まず最初の arm の Stage1（seed）だけ投げる
+            job_table, seed_jid = [], None
             first_arm = next(iter(rfd_scripts.keys()))
             jid_rfd = _sbatch(rfd_scripts[first_arm]["script"])
             jid_mpnn = _sbatch(mpnn_scripts[first_arm]["script"], dep=f"afterok:{jid_rfd}")
             seed_jid = _sbatch(af3_scripts[first_arm]["script_stage1"], dep=f"afterok:{jid_mpnn}")
-            # Stage2 は seed と MPNN の両方に依存
             jid_af3s2 = _sbatch(
                 af3_scripts[first_arm]["script_stage2"],
                 extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
@@ -553,7 +540,6 @@ def main():
             )
             job_table.append((first_arm, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
 
-            # 残りの arm は Stage1 を投げない。Stage2 を seed にも依存させる
             for arm_key in [k for k in rfd_scripts.keys() if k != first_arm]:
                 jid_rfd = _sbatch(rfd_scripts[arm_key]["script"])
                 jid_mpnn = _sbatch(mpnn_scripts[arm_key]["script"], dep=f"afterok:{jid_rfd}")
@@ -564,46 +550,36 @@ def main():
                 )
                 job_table.append((arm_key, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
 
-
-            # Write a tiny jobs ledger
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
             tsv = led/f"jobs_{args.pdb}_{ts}.tsv"
             with tsv.open("w") as f:
                 f.write("arm\trfd_jid\tmpnn_jid\taf3_stage1_jid\taf3_stage2_jid\n")
                 for row in job_table:
-                    f.write("\t".join(row) + "\n")
+                    f.write("\t".join(map(str, row)) + "\n")
             print(f"[ok] Submitted pipeline; job ledger at {tsv}")
         else:
-            # generate a one-shot launcher script you can run with bash
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
             launch = led/f"launch_pipeline_{args.pdb}_{ts}.sh"
-
             lines = ["#!/bin/bash", "set -euo pipefail"]
-
-            # ---- 共有seed: 最初のarmでのみ Stage1 を提出 ----
-            first_arm = next(iter(rfd_scripts))  # dict挿入順を利用
-            lines.append(f'echo "[LAUNCH] {first_arm} (with shared AF3 seed)"')
-            lines.append(f'jid_rfd_0=$(sbatch {rfd_scripts[first_arm]["script"]} | awk \'{{print $4}}\')')
-            lines.append(f'jid_mpnn_0=$(sbatch --dependency=afterok:${{jid_rfd_0}} {mpnn_scripts[first_arm]["script"]} | awk \'{{print $4}}\')')
-            lines.append(f'jid_seed=$(sbatch --dependency=afterok:${{jid_mpnn_0}} {af3_scripts[first_arm]["script_stage1"]} | awk \'{{print $4}}\')')
-
-            # first_arm の Stage2 は MPNN と seed の両方に依存
-            lines.append(f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')')
-
-            # ---- 残りのarmは Stage1を投げない。Stage2のみ、各MPNN + 共有seedに依存 ----
-            idx = 1
-            for arm_key in [k for k in rfd_scripts.keys() if k != first_arm]:
-                lines.append(f'echo "[LAUNCH] {arm_key} (reuse shared AF3 seed)"')
-                lines.append(f'jid_rfd_{idx}=$(sbatch {rfd_scripts[arm_key]["script"]} | awk \'{{print $4}}\')')
-                lines.append(f'jid_mpnn_{idx}=$(sbatch --dependency=afterok:${{jid_rfd_{idx}}} {mpnn_scripts[arm_key]["script"]} | awk \'{{print $4}}\')')
-                lines.append(f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')')
-                idx += 1
-
+            first_arm = next(iter(rfd_scripts))
+            lines.extend([
+                f'echo "[LAUNCH] {first_arm} (with shared AF3 seed)"',
+                f'jid_rfd_0=$(sbatch {rfd_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'jid_mpnn_0=$(sbatch --dependency=afterok:${{jid_rfd_0}} {mpnn_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'jid_seed=$(sbatch --dependency=afterok:${{jid_mpnn_0}} {af3_scripts[first_arm]["script_stage1"]} | awk \'{{print $4}}\')',
+                f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')'
+            ])
+            for idx, arm_key in enumerate([k for k in rfd_scripts.keys() if k != first_arm], start=1):
+                lines.extend([
+                    f'echo "[LAUNCH] {arm_key} (reuse shared AF3 seed)"',
+                    f'jid_rfd_{idx}=$(sbatch {rfd_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+                    f'jid_mpnn_{idx}=$(sbatch --dependency=afterok:${{jid_rfd_{idx}}} {mpnn_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')'
+                ])
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")
-
 
     elif args.cmd == "followup":
         tdir = Path("targets")/args.pdb.upper()
@@ -611,7 +587,6 @@ def main():
         if not tsv or not tsv.exists():
             raise FileNotFoundError("No af3_rankings.tsv found. Run assess first or pass --assess_tsv.")
 
-        # --- Pick top arms by score ---
         by_arm = defaultdict(list)
         with tsv.open() as f:
             r = csv.DictReader(f, delimiter="\t")
@@ -619,22 +594,18 @@ def main():
                 arm = row.get("arm") or f"{row.get('epitope')}@{row.get('hotspot_variant','A')}"
                 val = float(row.get(args.rank_by) or 0.0)
                 by_arm[arm].append(val)
-
+        
         def top_decile_median(vals):
             vs = sorted(vals, reverse=True); k = max(1, len(vs)//10); import numpy as _np
             return float(_np.median(vs[:k]))
 
         scored = sorted(((a, top_decile_median(vs)) for a,vs in by_arm.items()), key=lambda x:x[1], reverse=True)
         picks = [scored[i][0] for i in range(min(args.topk, len(scored)))]
-        if not picks:
-            raise RuntimeError("No arms found in assessment TSV.")
+        if not picks: raise RuntimeError("No arms found in assessment TSV.")
         allocs = _split_even(args.total, len(picks))
         print("[followup] picks:", picks, "allocs:", allocs)
 
-        # --- Generate scripts for each picked arm ---
-        rfd_scripts = {}
-        mpnn_scripts = {}
-        af3_scripts  = {}
+        rfd_scripts, mpnn_scripts, af3_scripts  = {}, {}, {}
         for (arm, n) in zip(picks, allocs):
             ep, var = _parse_arm(arm)
             rfd = make_rfa_rfdiffusion_command(args.pdb, ep, n, args.designs_per_task,
@@ -642,21 +613,14 @@ def main():
                                             hotspot_variant=var)
             mpn = make_rfa_proteinmpnn_command(args.pdb, ep, args.num_seq, args.temp, hotspot_variant=var)
             af3 = make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id, seed_idx=0, hotspot_variant=var)
-            rfd_scripts[arm] = rfd
-            mpnn_scripts[arm] = mpn
-            af3_scripts[arm]  = af3
+            rfd_scripts[arm], mpnn_scripts[arm], af3_scripts[arm] = rfd, mpn, af3
 
-        # --- Submit now with dependencies, or write a one-shot launcher ---
         if args.submit:
             job_table = []
             for arm in picks:
-                # RFD
                 jid_rfd = _sbatch(rfd_scripts[arm]["script"])
-                # MPNN after RFD
                 jid_mpnn = _sbatch(mpnn_scripts[arm]["script"], dep=f"afterok:{jid_rfd}")
-                # AF3 Stage1 after MPNN
                 jid_af3s1 = _sbatch(af3_scripts[arm]["script_stage1"], dep=f"afterok:{jid_mpnn}")
-                # AF3 Stage2 after Stage1 (pass through designs_per_task if needed)
                 jid_af3s2 = _sbatch(af3_scripts[arm]["script_stage2"],
                                     extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
                                     dep=f"afterok:{jid_af3s1}")
@@ -664,30 +628,27 @@ def main():
 
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            tsv = led/f"jobs_followup_{args.pdb}_{ts}.tsv"
-            with tsv.open("w") as f:
+            tsv_path = led/f"jobs_followup_{args.pdb}_{ts}.tsv"
+            with tsv_path.open("w") as f:
                 f.write("arm\trfd_jid\tmpnn_jid\taf3_stage1_jid\taf3_stage2_jid\n")
                 for row in job_table:
-                    f.write("\t".join(row) + "\n")
-            print(f"[ok] Submitted follow-up; job ledger at {tsv}")
+                    f.write("\t".join(map(str, row)) + "\n")
+            print(f"[ok] Submitted follow-up; job ledger at {tsv_path}")
         else:
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
             launch = led/f"launch_followup_{args.pdb}_{ts}.sh"
             lines = ["#!/bin/bash", "set -euo pipefail"]
             for arm in picks:
-                lines.append(f'echo "[LAUNCH] {arm}"')
-                lines.append(f'jid_rfd=$(sbatch {rfd_scripts[arm]["script"]} | awk \'{{print $4}}\')')
-                lines.append(f'jid_mpnn=$(sbatch --dependency=afterok:${{jid_rfd}} {mpnn_scripts[arm]["script"]} | awk \'{{print $4}}\')')
-                lines.append(f'jid_af3s1=$(sbatch --dependency=afterok:${{jid_mpnn}} {af3_scripts[arm]["script_stage1"]} | awk \'{{print $4}}\')')
-                lines.append(f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2=$(sbatch --dependency=afterok:${{jid_af3s1}} {af3_scripts[arm]["script_stage2"]} | awk \'{{print $4}}\')')
+                lines.extend([
+                    f'echo "[LAUNCH] {arm}"',
+                    f'jid_rfd=$(sbatch {rfd_scripts[arm]["script"]} | awk \'{{print $4}}\')',
+                    f'jid_mpnn=$(sbatch --dependency=afterok:${{jid_rfd}} {mpnn_scripts[arm]["script"]} | awk \'{{print $4}}\')',
+                    f'jid_af3s1=$(sbatch --dependency=afterok:${{jid_mpnn}} {af3_scripts[arm]["script_stage1"]} | awk \'{{print $4}}\')',
+                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2=$(sbatch --dependency=afterok:${{jid_af3s1}} {af3_scripts[arm]["script_stage2"]} | awk \'{{print $4}}\')'
+                ])
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote follow-up launcher: {launch}\nRun: bash {launch}")
 
-
-
-
 if __name__ == "__main__":
     main()
-
-

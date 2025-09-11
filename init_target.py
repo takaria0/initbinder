@@ -18,28 +18,20 @@ def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
     parser = MMCIFParser(QUIET=True)
     struct = parser.get_structure("cif", str(cif_path))
 
-    # Allowed single-char IDs for PDB format (room for many chains)
     id_pool = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz")
-    used_new = set()
-    mapping = {}
+    used_new, mapping = set(), {}
 
-    # First pass: reserve single-char if already valid & unused; else assign next
     for model in struct:
         for chain in model:
             old = str(chain.id)
             if len(old) == 1 and old not in used_new and old not in mapping.values():
                 new = old
             else:
-                # assign a fresh single-char id
-                while id_pool and id_pool[0] in used_new:
-                    id_pool.pop(0)
-                if not id_pool:
-                    raise RuntimeError("Ran out of single-character chain IDs during CIF→PDB conversion.")
+                while id_pool and id_pool[0] in used_new: id_pool.pop(0)
+                if not id_pool: raise RuntimeError("Ran out of single-character chain IDs.")
                 new = id_pool.pop(0)
-            mapping[old] = new
-            used_new.add(new)
+            mapping[old], used_new = new, used_new | {new}
 
-    # Second pass: mutate structure in-place to new chain IDs
     for model in struct:
         for chain in model:
             chain.id = mapping[str(chain.id)]
@@ -53,7 +45,7 @@ def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
 
     return mapping
 
-def init_target(pdb_id: str):
+def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | None = None):
     """Downloads PDB data and creates the initial directory structure."""
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     tdir = ROOT/"targets"/pdb_id.upper()
@@ -70,35 +62,22 @@ def init_target(pdb_id: str):
         except Exception as e:
             print(f"[warn] Fetch failed {url}: {e}")
 
-    # Fallback: if raw PDB is missing, try mmCIF instead
     raw_dir = tdir / "raw"
     raw_pdb = raw_dir / f"{pdb_id}.pdb"
-    raw_cif = raw_dir / f"{pdb_id}.cif"
-    pdb_u = pdb_id.upper()
     if not raw_pdb.exists():
         try:
-            cif_url = f"https://files.rcsb.org/download/{pdb_u}.cif"
+            raw_cif = raw_dir / f"{pdb_id}.cif"
+            cif_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.cif"
             r = requests.get(cif_url, timeout=20); r.raise_for_status()
             raw_cif.write_bytes(r.content)
             print(f"[ok] Downloaded {raw_cif.name}")
-            # Convert CIF → PDB (handles long chain IDs via remap)
+            
             chainmap_json = raw_dir / "chainmap.json"
-            try:
-                mapping = convert_cif_to_pdb_with_chainmap(raw_cif, raw_pdb, chainmap_json)
-                print(f"[ok] Converted {raw_cif.name} → {raw_pdb.name}")
-                if mapping:
-                    # Small, readable preview in logs
-                    preview = ", ".join(f"{k}->{v}" for k, v in list(mapping.items())[:8])
-                    print(f"[info] Chain remap (old→new): {preview}{' ...' if len(mapping)>8 else ''}")
-            except Exception as e:
-                print(f"[warn] CIF fallback failed: {e}")
-
-            # Convert CIF → PDB
-            parser = MMCIFParser(QUIET=True)
-            struct = parser.get_structure(pdb_u, str(raw_cif))
-            io = PDBIO(); io.set_structure(struct)
-            io.save(str(raw_pdb))
+            mapping = convert_cif_to_pdb_with_chainmap(raw_cif, raw_pdb, chainmap_json)
             print(f"[ok] Converted {raw_cif.name} → {raw_pdb.name}")
+            if mapping:
+                preview = ", ".join(f"{k}->{v}" for k, v in list(mapping.items())[:8])
+                print(f"[info] Chain remap (old→new): {preview}{' ...' if len(mapping)>8 else ''}")
         except Exception as e:
             print(f"[warn] CIF fallback failed: {e}")
 
@@ -106,7 +85,16 @@ def init_target(pdb_id: str):
         "id": pdb_id.upper(), "target_name": "", "assembly_id": "1", "chains": [],
         "epitopes": [], "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}}
     }
+    if chain_id:
+        skel["chains"] = [chain_id.upper()]
+    if target_name:
+        skel["target_name"] = target_name
+
     yml = tdir/"target.yaml"
     if not yml.exists():
         yml.write_text(yaml.safe_dump(skel, sort_keys=False))
         print(f"[ok] Wrote skeleton to {yml}")
+        if chain_id:
+            print(f"[info] Pre-populated target.yaml with chain: {chain_id.upper()}")
+        if target_name:
+            print(f"[info] Pre-populated target.yaml with target_name: '{target_name}'")

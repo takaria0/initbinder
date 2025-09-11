@@ -35,6 +35,14 @@ python plot_rankings.py \
     --img_format png --dpi 150 \
     --iptm_thresholds 0.4 0.5 0.6 0.7 0.8 0.9 \
     --topN 50 --max_categories 12
+    
+/pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv
+python plot_rankings.py \
+    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --out_dir ./results/8ES8_20250910 \
+    --img_format png --dpi 150 \
+    --iptm_thresholds 0.4 0.5 0.6 0.7 0.8 0.9 \
+    --topN 50 --max_categories 12
 """
 
 import argparse
