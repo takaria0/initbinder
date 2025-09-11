@@ -232,15 +232,17 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     tdir = ROOT/"targets"/pdb_id.upper()
     _ensure_dir(tdir/"reports")
 
-    # Load target.yaml to check for pre-defined chains and target name
+    # Load target.yaml to check for pre-defined chains, target name, and allowed range
     yml_path = tdir / "target.yaml"
     cfg_from_yaml = yaml.safe_load(yml_path.read_text()) if yml_path.exists() else {}
 
-    # === Generate Target Focus Prompt ===
-    target_focus_prompt = ""
+    # === Generate Constraint Prompts ===
     target_chains = cfg_from_yaml.get("chains", [])
     target_name_from_yaml = cfg_from_yaml.get("target_name", "")
+    allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
 
+    # 1. Target Chain and Name Constraint
+    target_focus_prompt = ""
     if target_chains and target_name_from_yaml and all(isinstance(c, str) for c in target_chains):
         chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
         target_focus_prompt = textwrap.dedent(f"""
@@ -250,22 +252,38 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
             - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
             - ALL proposed epitopes and their `residues` fields MUST be on the specified chain(s): {chain_list_str}.
             - Ignore all other polymer entities in the PDB file for the purpose of defining the target and epitopes. They are context only.
-            Failure to follow this instruction will result in an invalid output.
             --- END CRITICAL INSTRUCTION ---
         """)
 
+    # 2. Allowed Residue Range Constraint (from antigen verification)
+    range_constraint_prompt = ""
+    if allowed_range_str:
+        range_constraint_prompt = textwrap.dedent(f"""
+            --- CRITICAL INSTRUCTION: ALLOWED RESIDUE RANGE ---
+            Based on verification against a commercial antigen, all epitope `residues` you propose for the target chain(s) MUST be ENTIRELY within the inclusive residue range of {allowed_range_str}.
+            For example, if the range is 100-200, a residue selection of "A:150-160" is valid, but "A:195-205" is NOT.
+            Any residue or range outside these boundaries is invalid and will be rejected. This is a hard constraint.
+            --- END CRITICAL INSTRUCTION ---
+        """)
+    
+    # === Build Final Prompt ===
     meta = json.loads((tdir/"raw"/"entry.json").read_text())
     bundle = fetch_uniprot_bundle_for_pdb(pdb_id, meta, max_accessions=max_accessions)
     uniprot_context_str = build_uniprot_context(bundle, constrain_epitope=enforce_epitope_constraints)
-    
     target_acc = target or choose_target_accession(bundle, prefer_human=prefer_human, prefer_reviewed=prefer_reviewed)
 
     prompt_template = (ROOT/"templates"/"scope_prompt.md").read_text()
-    prompt = (target_focus_prompt + "\n\n" if target_focus_prompt else "") + prompt_template.format(
-        meta=json.dumps(meta, indent=2),
-        uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else "")
+    
+    # Prepend all constraints to the main template
+    final_prompt = (
+        f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n"
+        + prompt_template.format(
+            meta=json.dumps(meta, indent=2),
+            uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else ""),
+            chain_constraints="" # This placeholder is now handled by the prepended prompts
+        )
     )
-    (tdir/"reports"/"scope_prompt.md").write_text(prompt)
+    (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
 
     # === Call LLM ===
     if _llm_provider != "gemini":
@@ -275,7 +293,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         import google.generativeai as genai
         genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel(model_name=MODEL, system_instruction="You are a protein design assistant. Output exactly one YAML block.")
-        response = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
+        response = model.generate_content(final_prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
         draft = (response.text or "").strip()
 
     m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
