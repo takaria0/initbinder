@@ -4,3 +4,4 @@ rank	uniprot	gene	protein_name	organism	chosen_pdb	resolution_A	easiness	impact	
 3	P18627	LAG3	Lymphocyte activation gene 3 protein	Homo sapiens	7UM3	2.40	0.80	0.30	True	False	False	7TZG,7TZH,7UM3,8SO3,8SR0,9BF9
 4	Q15116	PDCD1	Programmed cell death protein 1	Homo sapiens	6UMU	1.18	0.60	0.30	False	False	False	2M2D,3RRQ,4ZQK,5B8C,5GGR,5GGS,5IUS,5JXE,5WT9,6HIG,6J14,6J15,6JBT,6JJP,6K0Y,6R5G,6ROY,6ROZ,6UMT,6UMU,6UMV,6XKR,7BXA,7CGW,7CU5,7E9B,7VUX,7WSL,7WVM,8AS0,8EQ6,8GY5,8U31,8U32,9HK1
 5	Q8TDQ0	HAVCR2	Hepatitis A virus cellular receptor 2	Homo sapiens	7M3Z	1.40	0.60	0.30	False	False	False	5DZL,5F71,6DHB,6TXZ,7KQL,7M3Y,7M3Z,7M41,8HGJ,8TBB,8TFT
+0	P01579	IFNG	Interferon gamma	Homo sapiens	1HIG	X-ray	1992-04-15	3.50	0.70	0.50	False	False	False	1EKU,1FG9,1FYH,1HIG,3BES,6E3K,6E3L	Sino Biological	50709-MNAH	https://www.sinobiological.com/recombinant-proteins/mouse-interferon-gamma-50709-mnah		None	Sino Biological	90008-CNAE	24-165	142	1	U24-U161	1.000	0.972	False

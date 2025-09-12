@@ -1,74 +1,3 @@
-#!/usr/bin/env python3
-"""
-Vendor connectors for purchasable antigen harvesting.
-
-This module provides a common interface plus concrete connectors for:
-  - Sino Biological (proteins)
-  - ACROBiosystems (proteins)
-
-Design goals
-------------
-- **No external vendor APIs required**: uses public web pages.
-- **Two backends** per connector:
-    1) **headless** (Playwright) — renders JS-heavy pages reliably.
-    2) **xhr** (optional): tries direct JSON/HTML endpoints if available.
-- **Polite & robust**: rate-limited, retries, user-agent, robots.txt check, per-site throttling.
-- **Normalized output** aligned with target-generation needs.
-
-Installation
-------------
-
-```bash
-pip install playwright beautifulsoup4 lxml fake-useragent tenacity httpx
-python -m playwright install --with-deps chromium
-```
-
-Quick usage
------------
-
-```python
-from vendors.connectors import SinoBioConnector, ACROConnector
-
-sino = SinoBioConnector(mode="headless")
-rows = sino.search_proteins("PD-1", species_preference=["Human"])  # list[dict]
-for r in rows[:5]:
-    print(r["sku"], r["tags"], r["species"], r["url"]) 
-```
-
-Output schema (per row)
------------------------
-Each connector returns a `list[dict]` with the following keys (some may be empty if not on the page):
-
-- vendor: str ("Sino Biological" | "ACROBiosystems")
-- gene_symbol: str | None
-- protein_name: str | None
-- sku: str
-- url: str (product URL)
-- species: list[str]
-- expression_host: str | None
-- sequence: str | None  (often "ECD"/"full length"/domain notes)
-- tags: list[str]  (e.g., ["His", "Fc", "Avi", "Biotin"])
-- has_biotin: bool
-- has_his: bool
-- has_fc: bool
-- has_avi: bool
-- macs_ready: bool   (heuristic: Avi/Biotin or Avi+Fc or explicit "Biotinylated")
-
-Integrating with `target_generation.py`
---------------------------------------
-You can create `antigen_options.csv` by concatenating rows from multiple connectors
-and writing a CSV. Keep your business logic (e.g., scoring MACS-ready constructs)
-in `target_generation.py`.
-
-Notes & caveats
----------------
-- Please respect each site's Terms and robots.txt.
-- Some pages use anti-bot measures (e.g., Cloudflare). The headless backend sets a
-  realistic UA and viewport; if still blocked, consider manual cookie export or
-  slower throttling.
-- The ACRO selectors are best-effort and may need minor tweaks if their markup
-  changes. The scraping logic is isolated so adjustments are trivial.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -334,6 +263,9 @@ class SinoBioConnector(BaseVendorConnector):
 
                 desc_li = ul.select_one("li[data-col='description']")
                 protein_name = _norm_whitespace(desc_li.get_text()) if desc_li else None
+                # --- MODIFIED: Check full description text for biotin ---
+                description_full_text = (desc_li.get_text(" ", strip=True) if desc_li else "").lower()
+
 
                 sp_li = ul.select_one("li[data-col='species']")
                 species_txt = _norm_whitespace(sp_li.get_text()) if sp_li else ""
@@ -353,6 +285,11 @@ class SinoBioConnector(BaseVendorConnector):
                         parts = key.split("|")
                         if len(parts) >= 2:
                             raw_tag_keys.append(parts[1])
+                
+                # --- MODIFIED: Add biotin to tags if found in description ---
+                if "biotin" in description_full_text:
+                    raw_tag_keys.append("biotin")
+
                 tags = _map_tags(raw_tag_keys)
                 flags = _flags_from_tags(tags)
 
@@ -419,6 +356,8 @@ class SinoBioConnector(BaseVendorConnector):
 
             desc_li = ul.select_one("li[data-col='description']")
             protein_name = _norm_whitespace(desc_li.get_text()) if desc_li else None
+            # --- MODIFIED: Check full description text for biotin ---
+            description_full_text = (desc_li.get_text(" ", strip=True) if desc_li else "").lower()
 
             sp_li = ul.select_one("li[data-col='species']")
             species_txt = _norm_whitespace(sp_li.get_text()) if sp_li else ""
@@ -439,6 +378,11 @@ class SinoBioConnector(BaseVendorConnector):
                     parts = key.split("|")
                     if len(parts) >= 2:
                         raw_tag_keys.append(parts[1])
+
+            # --- MODIFIED: Add biotin to tags if found in description ---
+            if "biotin" in description_full_text:
+                raw_tag_keys.append("biotin")
+            
             tags = _map_tags(raw_tag_keys)
             flags = _flags_from_tags(tags)
 
@@ -899,5 +843,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# python connectors.py "PD-1" --vendor both --mode headless --species Human --out antigen_options.csv
