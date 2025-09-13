@@ -202,7 +202,11 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
         with yml_path.open() as f:
             config = yaml.safe_load(f)
             chains = config.get("chains", [])
-            if chains: user_chain_id = chains[0]
+            print(f"[info] User-specified chains in target.yaml: {chains}")
+            print(f"[debug] target.yaml path: {yml_path.resolve()}")
+            print(f"[debug] available PDB chains: {list(pdb_sequences.keys())}")
+            if chains: 
+                user_chain_id = chains[0]
 
     best_match = None
     if user_chain_id and user_chain_id in pdb_sequences:

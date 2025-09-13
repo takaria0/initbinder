@@ -26,6 +26,14 @@ python manage_rfa.py init-target 7FJD \
 python manage_rfa.py init-target 7FJD \
     --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
 
+5WT9, https://www.sinobiological.com/recombinant-proteins/human-pd-1-10377-h41h-b
+python manage_rfa.py init-target 5WT9 \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-pd-1-10377-h41h-b"
+
+6BGT, https://www.sinobiological.com/recombinant-proteins/human-her2-erbb2-10004-h27h-b
+python manage_rfa.py init-target 6BGT \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-her2-erbb2-10004-h27h-b"
+
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
 python manage_rfa.py decide-scope 4DOH
