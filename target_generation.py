@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Target generation module for the RFAntibody pipeline.
+Target generation module for the RFAntibody pipeline, enhanced with LLM intelligence.
+
+This script identifies suitable protein targets for antibody design by aligning
+PDB structures with commercially available antigens.
+
+UPDATED (2025-09-13):
+- Added rich DEBUG logging to a per-run logfile (includes prompts, parsed HTML body text, LLM outputs).
+- Prints ALL found PDB IDs for each UniProt entry.
+- Prints ALL biotin-positive antigen catalog numbers.
+- Prints LLMAnalysisResult for each antigen.
+- LLM calls are now BATCHED per target (single Gemini Flash call per protein) to respect RPM limits.
+- Prompt/HTML size trimmed aggressively (body-text only, scripts/styles removed) to reduce tokens.
+- Sleep between targets (not between pages) to further respect rate limits.
+- Kept per-item LLM path as a fallback when batch call fails.
 
 Usage (standalone):
-  python target_generation.py --instruction "interleukin" \
-      --max_targets 10 --species human --prefer_tags biotin --soluble_only true
+  # Use a high-level instruction
+  python target_generation.py --instruction "human interleukin receptors" \
+      --max_targets 10 --species human --prefer_tags biotin
 
-# cluster of differentiation antigens
-  python target_generation.py --instruction "cluster of differentiation antigens" \
-      --max_targets 5 --species human --prefer_tags biotin --soluble_only true
+  python target_generation.py --instruction "top 10 targets that we should design antibodies for therapeutic use" \
+      --max_targets 10 --species human --prefer_tags biotin
 
-This module aligns candidate PDB structures against purchasable antigens from vendor websites
-and enforces *strict* biotinylation checking.
-
-CRITICAL FIX (2025-09-12):
-- Biotinylation is now determined **only** from:
-  (1) Product Title, and
-  (2) "Protein Construction" block (Sino Biological)
-  We IGNORE assay text, images, related products, and any other page content to avoid false positives
-  like "tested with biotinylated receptor" when the product itself is not biotinylated.
+  # Provide specific genes
+  python target_generation.py --instruction "IL6,IL1B,TNF" \
+      --max_targets 3 --species human
 """
 
 from __future__ import annotations
@@ -30,29 +38,51 @@ import os
 import re
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
 from datetime import datetime
+import time
+import logging
+from pprint import pformat
 
 import difflib
 from bs4 import BeautifulSoup
 import requests
 import yaml
 
-# --- Vendor connectors (fallback to local connectors.py if vendors package not available) ---
+# --- LLM Configuration (Google Gemini) ---
+# Ensure you have your GOOGLE_API_KEY in an `env.py` file or set as an environment variable.
+USE_LLM = True
 try:
-    from vendors.connectors import SinoBioConnector, ACROConnector  # type: ignore
+    from env import GOOGLE_API_KEY
+    import google.generativeai as genai
+    from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
+    genai.configure(api_key=GOOGLE_API_KEY)
+    # Model names are compatible aliases — adjust to your account's available names if needed
+    LLM_PRO_MODEL_NAME = "gemini-2.5-pro"    # For complex instruction interpretation
+    LLM_FLASH_MODEL_NAME = "gemini-2.0-flash"  # For structured data extraction (HTML)
+    # Throttling
+    SLEEP_PER_TARGET_SEC = 6  # single batch LLM call per target; keep RPM < ~10
+    MAX_BODY_CHARS_PER_PAGE = 10_000  # trim per page
+    MAX_BODY_TOTAL_CHARS = 1_000_000    # cap across all antigen pages in a target
+    print(f"[info] Google GenAI configured with models: PRO={LLM_PRO_MODEL_NAME}, FLASH={LLM_FLASH_MODEL_NAME}")
+except Exception as e:
+    print(f"[warn] Google GenAI not configured; LLM-based features will be disabled. Error: {e}")
+    USE_LLM = False
+
+# --- Vendor connectors ---
+try:
+    from vendors.connectors import SinoBioConnector
 except Exception:
     try:
-        from connectors import SinoBioConnector, ACROConnector  # type: ignore
+        from connectors import SinoBioConnector
         print("[warn] Using local 'connectors.py' instead of 'vendors.connectors'.")
     except Exception as e:
         print(f"[warn] Could not import vendor connectors: {e}")
-        SinoBioConnector = None  # type: ignore
-        ACROConnector = None  # type: ignore
+        SinoBioConnector = None
 
-# --- Import Playwright for robust page fetching ---
+# --- Playwright for page fetching ---
 from playwright.sync_api import sync_playwright
 
 # -------------------- Paths & Caching --------------------
@@ -60,21 +90,43 @@ ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / "cache" / "target_generation"
 CATALOG_DIR = ROOT / "targets_catalog"
 TARGETS_DIR = ROOT / "targets"
-for p in (CACHE_DIR, CATALOG_DIR, TARGETS_DIR):
+LOG_DIR = CACHE_DIR / "logs"
+for p in (CACHE_DIR, CATALOG_DIR, TARGETS_DIR, LOG_DIR):
     p.mkdir(parents=True, exist_ok=True)
 
-DEBUG_PDB = True
-# -------------------- Optional LLM (Google GenAI) --------------------
-USE_LLM = True
+RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_TAG = f"run_{RUN_TS}"
+LOG_PATH = LOG_DIR / f"{RUN_TAG}.log"
+
+# -------------------- Logger --------------------
+_logger = logging.getLogger("target_generation")
+_logger.setLevel(logging.DEBUG)
+# File handler (full verbose)
+_fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(message)s"))
+_logger.addHandler(_fh)
+# Console handler (info-level, concise)
+_ch = logging.StreamHandler(sys.stdout)
+_ch.setLevel(logging.INFO)
+_ch.setFormatter(logging.Formatter(fmt="%(message)s"))
+_logger.addHandler(_ch)
+
+def log_info(msg: str):
+    _logger.info(msg)
+
+def log_debug(msg: str):
+    _logger.debug(msg)
+
+log_info(f"[ok] Logging started. File: {LOG_PATH}")
+
+# -------------------- Constants --------------------
 MIN_IDENTITY_SOFT = 0.95
-try:
-    from env import GOOGLE_API_KEY, MODEL
-    import google.generativeai as genai
-    from google.generativeai import types
-    genai.configure(api_key=GOOGLE_API_KEY)
-except Exception:
-    print("[warn] Google GenAI not configured; falling back to no LLM assistance.")
-    USE_LLM = False
+UNIPROT_GET = "https://rest.uniprot.org/uniprotkb/{acc}"
+UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
+RCSB_ENTRY = "https://data.rcsb.org/rest/v1/core/entry/{pdb}"
+
+
 
 # -------------------- HTTP Helpers with Caching --------------------
 def _cache_key(url: str, params: Optional[dict] = None) -> Path:
@@ -88,52 +140,65 @@ def http_json(url: str, params: Optional[dict] = None, headers: Optional[dict] =
     key = _cache_key(url, params) if cache else None
     if cache and key and key.exists():
         try:
-            return json.loads(key.read_text())
+            data = json.loads(key.read_text())
+            log_debug(f"[cache] HIT {url} params={params}")
+            return data
         except Exception:
             pass
-    r = requests.get(url, params=params, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    if cache and key is not None:
-        key.write_text(json.dumps(data))
-    return data
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+        if cache and key is not None:
+            key.write_text(json.dumps(data))
+        log_debug(f"[cache] SAVE {url} params={params}")
+        return data
+    except requests.RequestException as e:
+        log_info(f"[error] HTTP request failed for {url}: {e}")
+        log_debug(f"[error] HTTP details url={url} params={params} headers={headers}")
+        return {}
 
 # -------------------- Data Models --------------------
+@dataclass
+class LLMAnalysisResult:
+    is_target_match: bool = False
+    is_biotinylated: bool = False
+    biotin_evidence: Optional[str] = None
+    accession: Optional[str] = None
+    aa_start: Optional[int] = None
+    aa_end: Optional[int] = None
+    error: Optional[str] = None
+
+    def pretty(self) -> str:
+        """
+        One-line representation for logging.
+        - Keep Python-like dict style (keys quoted, None/False などそのまま)
+        - Collapse newlines/extra spaces to a single space
+        """
+        from pprint import pformat
+        from dataclasses import asdict
+        s = pformat(asdict(self), width=100, compact=True)
+        return " ".join(s.split())
+
 @dataclass
 class AntigenOption:
     vendor: str
     catalog: str
-    construct: str
-    conjugation: str
-    species: str = "human"
-    macs_ready: bool = False  # legacy coarse tag-based hint
+    species: str
     url: Optional[str] = None
-    notes: Optional[str] = None
-    aa_start: Optional[int] = None
-    aa_end: Optional[int] = None
-    accession: Optional[str] = None
+    llm_analysis: Optional[LLMAnalysisResult] = None
     page_html_cache: Optional[str] = None
-    # strict verification
-    biotin_verified: Optional[bool] = None
-    biotin_evidence: Optional[str] = None
-    product_title: Optional[str] = None
-    protein_construction_text: Optional[str] = None
+    body_text: Optional[str] = None  # filled during fetch
 
 @dataclass
 class Candidate:
     uniprot: str
     gene: str
     protein_name: str
-    subunit_name: Optional[str]
     organism: str
     pdb_ids: List[str]
-    chosen_pdb: Optional[str]
-    resolution: Optional[float]
-    has_tm: bool
-    has_signal_peptide: bool
-    glyco_sites: List[str]
-    antigen_options: List[AntigenOption]
-    scoring: Dict[str, float]
+    chosen_pdb: Optional[str] = None
+    resolution: Optional[float] = None
     pdb_matched_chain: Optional[str] = None
     vendor_product_accession: Optional[str] = None
     vendor_product_range: Optional[str] = None
@@ -148,14 +213,347 @@ class Candidate:
     biotinylated: bool = False
     antigen_catalog: Optional[str] = None
     antigen_url: Optional[str] = None
+    subunit_name: Optional[str] = None
+    antigen_options: List[AntigenOption] = field(default_factory=list)
 
-    def macs_ready_any(self) -> bool:
-        return any(o.macs_ready for o in self.antigen_options)
+# -------------------- Utility --------------------
+def _slugify(text: str, maxlen: int = 24) -> str:
+    s = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return s[:maxlen].strip('_') or "instruction"
 
-# -------------------- External API Endpoints --------------------
-UNIPROT_GET = "https://rest.uniprot.org/uniprotkb/{acc}"
-UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
-RCSB_ENTRY = "https://data.rcsb.org/rest/v1/core/entry/{pdb}"
+# -------------------- LLM-Powered Instruction Expansion --------------------
+def expand_instruction_to_queries(instruction: str, species: str, max_targets: int) -> List[str]:
+    """
+    Uses a powerful LLM (Gemini Pro) to convert a high-level instruction
+    into a concrete list of gene symbols.
+    """
+    # If instruction is a simple comma-separated list, just use it directly.
+    if "," in instruction and len(instruction.split(",")[0]) < 15:
+        items = [q.strip() for q in instruction.split(",") if q.strip()][:max_targets]
+        log_info(f"[info] Instruction treated as explicit gene list: {', '.join(items)}")
+        return items
+    
+    if not USE_LLM:
+        log_info("[warn] LLM is disabled. Treating instruction as a single query term.")
+        return [instruction.strip()]
+
+    try:
+        model = genai.GenerativeModel(LLM_PRO_MODEL_NAME)
+        prompt = textwrap.dedent(
+            f"""
+            Your task is to act as a bioinformatician and generate a list of official gene symbols based on a user's request.
+
+            **User Request:** "{instruction}"
+            **Species:** {species}
+            **Maximum number of targets:** {max_targets}
+
+            **Instructions:**
+            1. Interpret the user's request.
+            2. Identify the most relevant proteins or protein families.
+            3. Return a list of their official gene symbols for the specified species.
+            4. Format the output as a simple, newline-separated list of gene symbols ONLY. No extra text.
+
+            Example:
+            TNFRSF1A
+            TNFRSF1B
+            TNFRSF9
+            TNFRSF10A
+            TNFRSF10B
+            """
+        ).strip()
+        log_debug("[LLM PRO] expand_instruction_to_queries PROMPT:\n" + prompt)
+
+        response = model.generate_content(prompt, generation_config=GenerationConfig(temperature=0.1))
+        text = (getattr(response, "text", None) or "").strip()
+        log_debug("[LLM PRO] expand_instruction_to_queries RAW RESPONSE:\n" + text)
+
+        items = [s.strip() for s in text.splitlines() if s.strip()]
+        if not items:
+            raise ValueError("LLM returned an empty list.")
+        items = items[:max_targets]
+        log_info(f"[info] LLM generated gene list: {', '.join(items)}")
+        return items
+        
+    except Exception as e:
+        log_info(f"[warn] LLM expansion failed: {e}. Falling back to using the instruction as a single query.")
+        return [instruction.strip()]
+
+# -------------------- Vendor Page Caching & Fetching --------------------
+def _vendor_page_cache_path(url: str) -> Path:
+    h = hashlib.sha256(url.encode()).hexdigest()[:20]
+    p = CACHE_DIR / "vendor_pages"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{h}.html"
+
+def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_selector: str = "#main_left") -> str:
+    """
+    Extract readable text from HTML.
+    - Prefer text inside `css_selector` (default: "#main_left") and ignore outer text.
+    - If not found, fall back to <body> (previous behavior).
+    - Strip noisy tags (script/style/header/footer/nav/noscript).
+    - De-duplicate blank lines.
+    - Trim to an effective cap (slightly larger than caller's cap to avoid over-cropping).
+
+    NOTE: Minimal patch:
+      * Signature is backward-compatible (existing call sites unchanged).
+      * Effective per-page cap is max(max_chars, 12000).
+      * Emits DEBUG logs about which selector was used and lengths.
+    """
+    from bs4 import BeautifulSoup  # local import to keep function self-contained
+    sel_used = "body-fallback"
+    soup = BeautifulSoup(html, "lxml")
+
+    # 1) Try CSS selector (e.g., "#main_left")
+    container = None
+    try:
+        container = soup.select_one(css_selector)
+    except Exception:
+        container = None
+
+    # 2) Fallback: id lookup if css_selector was "#id"
+    if container is None and css_selector.startswith("#"):
+        try:
+            container = soup.find(id=css_selector.lstrip("#"))
+        except Exception:
+            container = None
+
+    # 3) Final fallback: <body> or whole doc
+    if container is None:
+        container = soup.body or soup
+    else:
+        sel_used = css_selector
+
+    # Remove noisy tags within the chosen container only
+    try:
+        for tag in container.find_all(["script", "style", "header", "footer", "nav", "noscript"]):
+            tag.decompose()
+    except Exception:
+        pass
+
+    # Get text
+    try:
+        text = container.get_text(separator="\n", strip=True)
+    except Exception:
+        text = soup.get_text(separator="\n", strip=True)
+
+    # Normalize blank lines
+    lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    text_norm = "\n".join(lines)
+
+    # Effective cap: allow a bit more than upstream default to avoid losing key details
+    effective_max = max(max_chars, 12000)
+    original_len = len(text_norm)
+    if original_len > effective_max:
+        text_norm = text_norm[:effective_max]
+
+    # Debug logs
+    try:
+        log_debug(f"[_extract_body_text] selector_used={sel_used}  original_len={original_len}  effective_max={effective_max}  final_len={len(text_norm)}")
+    except Exception:
+        # logger not available in some contexts; ignore
+        pass
+
+    return text_norm
+
+def fetch_product_html(url: str, timeout: int = 45) -> Optional[str]:
+    if not url: 
+        return None
+    out_path = _vendor_page_cache_path(url)
+    if out_path.exists():
+        log_debug(f"[fetch] cache hit: {url} -> {out_path}")
+        return str(out_path)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            html = page.content()
+            browser.close()
+        out_path.write_text(html, encoding="utf-8", errors="ignore")
+        log_debug(f"[fetch] saved: {url} -> {out_path}")
+        return str(out_path)
+    except Exception as e:
+        log_info(f"[warn] Playwright failed to fetch {url}: {e}")
+        return None
+
+# -------------------- LLM-Powered Page Analysis --------------------
+def _llm_flash_json(prompt: str) -> Optional[dict]:
+    """Call Gemini Flash and parse JSON. Return dict or None."""
+    if not USE_LLM:
+        return None
+    try:
+        model = genai.GenerativeModel(LLM_FLASH_MODEL_NAME)
+        log_debug("[LLM FLASH] PROMPT (JSON expected):\n" + prompt)
+        response = model.generate_content(
+            prompt,
+            generation_config=GenerationConfig(temperature=0.0, response_mime_type="application/json"),
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+        text = (getattr(response, "text", None) or "").strip()
+        log_debug("[LLM FLASH] RAW RESPONSE:\n" + text)
+        return json.loads(text)
+    except Exception as e:
+        log_info(f"[error] LLM Flash JSON parse failed: {e}")
+        return None
+
+def analyze_product_page_with_llm(body_text: str, target_gene: str, target_protein_name: str) -> LLMAnalysisResult:
+    """
+    Single-page analysis (fallback). Uses Gemini Flash to extract structured data.
+    """
+    if not USE_LLM or not body_text:
+        return LLMAnalysisResult(error="LLM disabled or empty body_text")
+
+    prompt = textwrap.dedent(f"""
+        You are an expert biochemist analyzing a vendor's protein product page. Extract specific information based *only* on the provided text.
+
+        Target:
+        - Gene: "{target_gene}"
+        - Protein: "{target_protein_name}"
+
+        Product Page Text:
+        ```
+        {body_text}
+        ```
+
+        Output a JSON object with fields:
+        {{
+          "is_target_match": boolean,
+          "is_biotinylated": boolean,
+          "biotin_evidence": "short quote or null",
+          "accession": "e.g., NP_000408.1 or null",
+          "aa_start": integer_or_null,
+          "aa_end": integer_or_null
+        }}
+    """).strip()
+
+    data = _llm_flash_json(prompt)
+    if not data:
+        return LLMAnalysisResult(error="LLM flash failed")
+    return LLMAnalysisResult(
+        is_target_match=bool(data.get("is_target_match", False)),
+        is_biotinylated=bool(data.get("is_biotinylated", False)),
+        biotin_evidence=data.get("biotin_evidence"),
+        accession=data.get("accession"),
+        aa_start=data.get("aa_start"),
+        aa_end=data.get("aa_end"),
+    )
+
+def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: str, protein_name: str):
+    """
+    NEW: Single batch LLM call per target to respect RPM limits.
+    - Fetch all pages (cached).
+    - Extract body text only and trim lengths.
+    - Build one prompt listing all items with indices.
+    - Ask LLM to return a JSON list with one result per index.
+    - Map back to options and attach LLMAnalysisResult.
+    """
+    # Fetch HTML and extract body text for each antigen
+    total_chars = 0
+    items_for_prompt = []
+    for idx, opt in enumerate(options):
+        if not opt.url:
+            opt.llm_analysis = LLMAnalysisResult(error="Missing URL")
+            continue
+        html_path = fetch_product_html(opt.url)
+        if not html_path:
+            opt.llm_analysis = LLMAnalysisResult(error="Failed to fetch HTML")
+            continue
+        opt.page_html_cache = html_path
+        html_content = Path(html_path).read_text(encoding="utf-8", errors="ignore")
+        body = _extract_body_text(html_content, max_chars=MAX_BODY_CHARS_PER_PAGE)
+        opt.body_text = body
+        # Respect total cap
+        if total_chars + len(body) <= MAX_BODY_TOTAL_CHARS:
+            items_for_prompt.append({"index": idx, "catalog": opt.catalog, "text": body})
+            total_chars += len(body)
+        else:
+            # If we exceed, still include a truncated slice
+            keep = max(0, MAX_BODY_TOTAL_CHARS - total_chars)
+            if keep > 500:  # include if meaningful slice remains
+                body_trunc = body[:keep]
+                items_for_prompt.append({"index": idx, "catalog": opt.catalog, "text": body_trunc})
+                total_chars += len(body_trunc)
+            else:
+                log_info(f"[warn] Skipping text for {opt.catalog} due to global token cap; will require fallback if needed.")
+
+    # Build batch prompt
+    # We allow LLM to return either a list (ordered by index) or a dict keyed by index.
+    # Each element must have the schema from single-page analysis.
+    prompt_parts = [
+        "You are an expert biochemist analyzing multiple vendor protein product pages. For EACH item, extract the fields.",
+        f'Target gene: "{gene}"',
+        f'Target protein: "{protein_name}"',
+        "",
+        "Return JSON with this shape:",
+        "[",
+        '  {"index": int, "catalog": "string", "is_target_match": bool, "is_biotinylated": bool, '
+        '"biotin_evidence": "string|null", "accession": "string|null", "aa_start": int|null, "aa_end": int|null},',
+        "  ...",
+        "]",
+        "",
+        "Items:"
+    ]
+    for it in items_for_prompt:
+        prompt_parts.append("\n---")
+        prompt_parts.append(f'index: {it["index"]}, catalog: {it["catalog"]}\nTEXT:\n{it["text"]}')
+    batch_prompt = "\n".join(prompt_parts)
+    log_debug("[LLM FLASH] BATCH PROMPT (truncated log below follows):")
+    # For the logfile, we keep the full prompt but mark the section start
+    log_debug(batch_prompt)
+
+    data = _llm_flash_json(batch_prompt)
+
+    if not data or not isinstance(data, (list, tuple)):
+        log_info("[warn] Batch LLM failed or returned non-list. Falling back to per-item LLM calls (slower).")
+        # Fallback: per-item calls (still body-text only)
+        for idx, opt in enumerate(options):
+            if opt.llm_analysis is not None:
+                continue
+            if not opt.body_text:
+                opt.llm_analysis = LLMAnalysisResult(error="Missing body_text")
+                continue
+            res = analyze_product_page_with_llm(opt.body_text, gene, protein_name)
+            opt.llm_analysis = res
+            # Print & log each result
+            log_info(f"[LLM] {opt.catalog} -> {res.pretty()}")
+        return
+
+    # Map the batch results
+    # We accept that some LLMs might omit fields; default accordingly.
+    index_map: Dict[int, dict] = {}
+    try:
+        for elem in data:
+            if not isinstance(elem, dict): 
+                continue
+            index_map[int(elem.get("index"))] = elem
+    except Exception:
+        log_info("[warn] Batch LLM returned malformed indices; attempting best-effort mapping by order.")
+        for i, elem in enumerate(data):
+            if isinstance(elem, dict):
+                index_map[i] = elem
+
+    # Attach to options
+    for idx, opt in enumerate(options):
+        elem = index_map.get(idx)
+        if not elem:
+            opt.llm_analysis = LLMAnalysisResult(error="No batch result for this index")
+            continue
+        opt.llm_analysis = LLMAnalysisResult(
+            is_target_match=bool(elem.get("is_target_match", False)),
+            is_biotinylated=bool(elem.get("is_biotinylated", False)),
+            biotin_evidence=elem.get("biotin_evidence"),
+            accession=elem.get("accession"),
+            aa_start=elem.get("aa_start"),
+            aa_end=elem.get("aa_end"),
+        )
+        # Print & log each result explicitly
+        log_info(f"[LLM] {opt.catalog} -> {opt.llm_analysis.pretty()}")
 
 # -------------------- Sequence & PDB Helpers --------------------
 def _get_ncbi_sequence(accession: str) -> str:
@@ -165,8 +563,11 @@ def _get_ncbi_sequence(accession: str) -> str:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         lines = r.text.strip().split('\n')
-        return "".join(line.strip() for line in lines if not line.startswith('>'))
-    except requests.RequestException:
+        seq = "".join(line.strip() for line in lines if not line.startswith('>'))
+        log_debug(f"[ncbi] fetched {accession}, len={len(seq)}")
+        return seq
+    except requests.RequestException as e:
+        log_info(f"[warn] NCBI fetch failed for {accession}: {e}")
         return ""
 
 def _entity_ids(entry_json: dict) -> List[str]:
@@ -182,406 +583,37 @@ def _entity_seq_can(entity_json: dict) -> str:
     except Exception:
         return ""
 
-def _method_from_entry(entry: dict) -> str:
-    return ((entry.get("exptl") or [{}])[0].get("method", "")).upper()
-
-def _release_date(entry: dict) -> Optional[datetime]:
-    d_str = (entry.get("rcsb_accession_info", {})).get("initial_release_date")
-    return datetime.fromisoformat(d_str.replace("Z", "+00:00")) if d_str else None
-
 def rcsb_quality(pdb_id: str) -> Tuple[Optional[float], dict]:
     entry = http_json(RCSB_ENTRY.format(pdb=pdb_id))
     try:
         res = float((entry.get("rcsb_entry_info", {})).get("resolution_combined")[0])
-    except (TypeError, IndexError, ValueError):
+    except (TypeError, IndexError, ValueError, KeyError):
         res = None
     return res, entry
 
-# -------------------- Vendor Page Caching & Fetching --------------------
-def _vendor_page_cache_path(url: str) -> Path:
-    h = hashlib.sha256(url.encode()).hexdigest()[:20]
-    p = CACHE_DIR / "vendor_pages"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / f"{h}.html"
-
-def fetch_product_html(url: str, timeout: int = 30) -> Optional[str]:
-    """
-    Fetch product page HTML via headless Chromium.
-    If 'url' is a local .html path (or file://), return path directly.
-    """
-    if not url:
-        return None
-
-    # local file support
-    local = url
-    if local.startswith("file://"):
-        local = local[len("file://") :]
-    if Path(local).exists() and local.lower().endswith(".html"):
-        return str(Path(local).resolve())
-
-    out_path = _vendor_page_cache_path(url)
-    if out_path.exists():
-        return str(out_path)
-
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch()
-            page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-            html = page.content()
-            browser.close()
-        out_path.write_text(html, encoding="utf-8", errors="ignore")
-        return str(out_path)
-    except Exception as e:
-        print(f"[warn] Playwright failed to fetch {url}: {e}")
-        return None
-
-# -------------------- STRICT Biotin Detection (scoped) --------------------
-_POS = re.compile(r"\b(biotin|biotinylated|biotinylation|avi[-\s]?tag|avitag)\b", re.I)
-_NEG = re.compile(r"\b(non[-\s]?biotinylated|unbiotinylated|without\s+biotin|biotin[-\s]?free|debiotinylated)\b", re.I)
-
-def _text_has_biotin(text: str) -> bool:
-    return bool(_POS.search(text or "")) and not bool(_NEG.search(text or ""))
-
-def _sino_extract_scoped_fields(soup: BeautifulSoup) -> Tuple[Optional[str], Optional[str]]:
-    # Product Title
-    title_text = None
-    h1 = soup.find("h1")
-    if h1:
-        title_text = h1.get_text(separator=" ", strip=True)
-
-    # NEW: Sino often repeats the product name in the Product Information panel header
-    if not title_text:
-        panel_h3 = soup.select_one("div.panel-heading h3.panel-title") or soup.select_one("h3.panel-title")
-        if panel_h3:
-            title_text = panel_h3.get_text(separator=" ", strip=True)
-
-    # Fallback to <title>
-    if not title_text:
-        tt = soup.find("title")
-        if tt:
-            title_text = tt.get_text(separator=" ", strip=True)
-
-    # Protein Construction (unchanged)
-    pc_text = None
-    label = soup.find("div", class_="col-md-3", string=re.compile(r"^\s*Protein Construction\s*$", re.I))
-    if label:
-        val = label.find_next_sibling("div")
-        if val:
-            pc_text = val.get_text(separator=" ", strip=True)
-
-    return title_text, pc_text
-
-def _detect_biotin_scoped_sino(html_text: str) -> Tuple[Optional[bool], str, Optional[str], Optional[str]]:
-    """
-    Sino Biological pages: decide biotin **only** from [Product Title] and [Protein Construction].
-    Returns (biotin?, evidence, title_text, pc_text)
-    """
-    soup = BeautifulSoup(html_text, "lxml")
-    # remove noisy tags to avoid false positives in title extraction
-    for t in soup(["script", "style", "noscript"]):
-        t.decompose()
-
-    title_text, pc_text = _sino_extract_scoped_fields(soup)
-
-    # Decision: prefer explicit positives in title/PC, with negatives overriding
-    fields_checked = []
-    evidence_bits = []
-
-    if title_text:
-        fields_checked.append("title")
-        if _NEG.search(title_text):
-            return (False, "Title indicates non-biotin", title_text, pc_text)
-        if _POS.search(title_text):
-            return (True, "Title indicates biotin", title_text, pc_text)
-
-    if pc_text:
-        fields_checked.append("protein_construction")
-        if _NEG.search(pc_text):
-            return (False, "Protein Construction indicates non-biotin", title_text, pc_text)
-        if _POS.search(pc_text):
-            return (True, "Protein Construction indicates biotin", title_text, pc_text)
-
-    # Neither field contains biotin keywords -> treat as not biotinylated
-    where = "/".join(fields_checked) if fields_checked else "title/protein_construction"
-    return (False, f"No biotin keywords in {where}", title_text, pc_text)
-
-def _detect_biotin_from_option_fields(o: AntigenOption) -> Tuple[Optional[bool], Optional[str]]:
-    """
-    Quick hints before HTML:
-      - connector tags/conjugation
-      - catalog naming patterns like '-B'
-    """
-    if o.macs_ready or ("biotin" in (o.conjugation or "").lower()):
-        return True, "Connector tags/conjugation indicate Biotin"
-    cat_lower = (o.catalog or "").lower()
-    if "biotin" in cat_lower or cat_lower.endswith("-b"):
-        return True, "Catalog code/name suggests Biotinylated (-B/biotin)"
-    return None, None
-
-def verify_biotin_via_html(o: AntigenOption) -> None:
-    """
-    STRICT RULE: Only product title + 'Protein Construction' are considered for biotin.
-    We DO NOT scan the rest of the page to avoid false positives like
-    'tested with biotinylated receptor'.
-    """
-    # Structured hints (kept, but lower priority than strict page parse)
-    hint, why = _detect_biotin_from_option_fields(o)
-
-    # Load HTML
-    path = None
-    if o.url:
-        path = fetch_product_html(o.url)
-    if not path and o.page_html_cache:
-        path = o.page_html_cache
-    o.page_html_cache = path
-
-    if path and Path(path).exists():
-        try:
-            html = Path(path).read_text(encoding="utf-8", errors="ignore")
-            # Vendor-specific strict parse
-            if o.url and "sinobiological" in o.url.lower():
-                biotin, evidence, title_text, pc_text = _detect_biotin_scoped_sino(html)
-                o.product_title = title_text
-                o.protein_construction_text = pc_text
-                o.biotin_verified = biotin
-                o.biotin_evidence = evidence
-                return
-            else:
-                # If vendor unknown, fall back to conservative: require title to mention biotin
-                soup = BeautifulSoup(html, "lxml")
-                for t in soup(["script", "style", "noscript"]):
-                    t.decompose()
-                title_text = None
-                h1 = soup.find("h1")
-                if h1:
-                    title_text = h1.get_text(separator=" ", strip=True)
-                if not title_text:
-                    tt = soup.find("title")
-                    if tt:
-                        title_text = tt.get_text(separator=" ", strip=True)
-                o.product_title = title_text
-                if title_text and _text_has_biotin(title_text):
-                    o.biotin_verified = True
-                    o.biotin_evidence = "Title indicates biotin (generic vendor)"
-                else:
-                    o.biotin_verified = False
-                    o.biotin_evidence = "No biotin in title (generic vendor)"
-                return
-        except Exception as e:
-            # If HTML parse fails, fall back to hint if present, else default False
-            o.biotin_verified = bool(hint) if hint is not None else False
-            o.biotin_evidence = f"HTML parse failed; fallback to hint={hint} ({why or 'no-hint'})"
-            return
-
-    # No HTML available: fallback to hint if any, else False
-    o.biotin_verified = bool(hint) if hint is not None else False
-    o.biotin_evidence = why or "No HTML available; default non-biotin"
-
-
-import itertools
-
-def _normalize_soft(s: str) -> str:
-    # lower, collapse hyphen/underscore/em dashes to spaces, collapse spaces
-    s = s.lower()
-    s = re.sub(r"[\u00a0\u2010-\u2015\-_]+", " ", s)  # hyphen family + underscores -> space
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def _gene_variants(gene: str) -> List[str]:
-    """
-    Build simple variants for symbols like 'IL12B' -> 'il12b', 'il-12b', 'il 12b'.
-    Works for TNFRSF9, CXCL10, etc. (letters+numbers+letters patterns).
-    """
-    parts = re.findall(r"[A-Za-z]+|\d+", gene)
-    parts = [p.lower() for p in parts]
-    if not parts:
-        return [gene.lower()]
-    combos = {
-        "".join(parts),              # il12b
-        "-".join(parts),             # il-12b
-        " ".join(parts),             # il 12b
-    }
-    return list(combos)
-
-def _title_matches_target(title: Optional[str], gene_symbol: str, uni_full: Optional[dict]) -> bool:
-    """
-    Minimal, conservative check:
-    - Require the product title to contain the gene symbol (any variant).
-    - If available, also accept an exact substring match of UniProt recommended/short names.
-    """
-    if not title:
-        return False
-    t = _normalize_soft(title)
-
-    # 1) Gene symbol variants (fast + robust)
-    for v in _gene_variants(gene_symbol):
-        if v in t:
-            return True
-
-    # 2) UniProt names (optional, still strict 'in' on normalized title)
-    if uni_full:
-        pd = (uni_full.get("proteinDescription") or {})
-        names = []
-
-        # recommended full name
-        rec = ((pd.get("recommendedName") or {}).get("fullName") or {})
-        if isinstance(rec, dict) and rec.get("value"):
-            names.append(rec["value"])
-
-        # recommended short names (list or dict)
-        rec_short = (pd.get("recommendedName") or {}).get("shortName")
-        if isinstance(rec_short, list):
-            names.extend([d.get("value") for d in rec_short if isinstance(d, dict) and d.get("value")])
-        elif isinstance(rec_short, dict) and rec_short.get("value"):
-            names.append(rec_short["value"])
-
-        # alternative names
-        for alt in (pd.get("alternativeNames") or []):
-            for key in ("fullName", "shortName"):
-                val = alt.get(key)
-                if isinstance(val, list):
-                    names.extend([d.get("value") for d in val if isinstance(d, dict) and d.get("value")])
-                elif isinstance(val, dict) and val.get("value"):
-                    names.append(val["value"])
-
-        # normalize and check containment
-        for nm in names:
-            nm_norm = _normalize_soft(nm)
-            if nm_norm and nm_norm in t:
-                return True
-
-    return False
-
-# -------------------- Vendor Page Parsing (Accession/Range) --------------------
-def enrich_antigen_details(options: List[AntigenOption]) -> None:
-    """
-    Parse vendor HTML to fill aa_start, aa_end, accession; and run STRICT biotin verification.
-    """
-    for o in options:
-        # STRICT biotin check first
-        verify_biotin_via_html(o)
-
-        # Sino Biological: Accession & residue range (Protein Construction)
-        try:
-            path = o.page_html_cache or (o.url and fetch_product_html(o.url))
-            if not path:
-                continue
-            if not Path(path).exists():
-                continue
-            html = Path(path).read_text(encoding="utf-8", errors="ignore")
-            soup = BeautifulSoup(html, "lxml")
-
-            # Accession
-            acc_label = soup.find("div", class_="col-md-3", string=re.compile(r"^\s*Accession#\s*$", re.I))
-            if acc_label:
-                val = acc_label.find_next_sibling("div")
-                if val:
-                    o.accession = val.get_text(separator=" ", strip=True)
-
-            # Protein Construction -> residue range like (His21-Thr153) or (21-153)
-            pc_label = soup.find("div", class_="col-md-3", string=re.compile(r"^\s*Protein Construction\s*$", re.I))
-            if pc_label:
-                val = pc_label.find_next_sibling("div")
-                if val:
-                    pc_text = val.get_text(separator=" ", strip=True)
-                    o.protein_construction_text = o.protein_construction_text or pc_text
-                    m = re.search(r'\((?:[A-Za-z]{3})?(\d+)\s*-\s*(?:[A-Za-z]{3})?(\d+)\)', pc_text)
-                    if m:
-                        try:
-                            o.aa_start, o.aa_end = int(m.group(1)), int(m.group(2))
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"[warn] Failed to parse details from vendor page: {e}")
-
-# -------------------- LLM / UniProt helpers --------------------
-def expand_instruction_to_queries(instruction: str, species: str, max_targets: int) -> List[str]:
-    if USE_LLM:
-        try:
-            model = genai.GenerativeModel(model_name=MODEL, system_instruction="You extract concise protein target lists.")
-            prompt = textwrap.dedent(
-                f"Target protein category: {instruction}\nSpecies: {species}\n"
-                f"Task: Return a newline-separated list of {max_targets} protein targets (prefer gene symbols or UniProt names). "
-                f"Only list the names, no numbering, no extra text."
-            )
-            resp = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
-            items = [s.strip() for s in (resp.text or "").splitlines() if s.strip()]
-            return items[:max_targets]
-        except Exception as e:
-            print(f"[warn] LLM expansion failed: {e}")
-    return [it.strip() for it in re.split(r"[;,\n]", instruction) if it.strip()][:max_targets]
-
-def lookup_uniprot_best(term: str, species: str) -> Optional[dict]:
-    org_filter = {"human": "(organism_id:9606)", "mouse": "(organism_id:10090)"}.get(species.lower(), "")
-    params = {"query": f"{term} {org_filter}".strip(), "fields": "accession,protein_name,gene_primary,organism_name,reviewed", "format": "json", "size": 5}
-    data = http_json(UNIPROT_SEARCH, params=params)
-    return data.get("results", [])[0] if data.get("results") else None
-
+# -------------------- UniProt / Vendor Search --------------------
 def fetch_uniprot_entry(accession: str) -> dict:
     return http_json(UNIPROT_GET.format(acc=accession), headers={"Accept": "application/json"})
 
 def pdb_list_from_uniprot_entry(entry: dict) -> List[str]:
     xrefs = entry.get("uniProtKBCrossReferences", [])
     pdbs = [x.get("id") for x in xrefs if x.get("database") == "PDB" and x.get("id")]
-    return sorted({p.strip().upper() for p in pdbs if p})
-
-def parse_uniprot_features(entry: dict) -> Tuple[bool, bool, List[str]]:
-    feats = entry.get("features", [])
-    has_tm = any(f.get("type") == "TRANSMEM" for f in feats)
-    has_signal = any(f.get("type") == "SIGNAL" for f in feats)
-    gly = [str(f.get("location", {}).get("start", {}).get("value")) for f in feats if f.get("type") == "GLYCOSYLATION" and f.get("location", {}).get("start", {}).get("value")]
-    return has_tm, has_signal, gly
-
-def _canon_species_label(species: str) -> str:
-    return species.capitalize()
-
-def _infer_conjugation(tags: List[str]) -> str:
-    if "Biotin" in tags and "Avi" in tags:
-        return "Biotin (AviTag)"
-    if "Biotin" in tags:
-        return "Biotin"
-    if "Avi" in tags:
-        return "AviTag"
-    return "None"
-
-def _rows_to_antigen_options(rows: List[Dict[str, Any]], default_species: str) -> List[AntigenOption]:
-    out = []
-    for r in rows:
-        tags_list = [t.strip() for t in (r.get("tags") or "").split(",") if t.strip()]
-        out.append(
-            AntigenOption(
-                vendor=r.get("vendor", ""),
-                catalog=r.get("sku", ""),
-                construct=f"{r.get('sequence', '')}, tags: {','.join(tags_list)}",
-                conjugation=_infer_conjugation(tags_list),
-                species=(r.get("species") or default_species),
-                macs_ready=("Biotin" in tags_list),
-                url=r.get("url"),
-                notes=f"host={r.get('expression_host')}; gene={r.get('gene_symbol')}",
-            )
-        )
+    out = sorted({p.strip().upper() for p in pdbs if p})
     return out
 
-def fetch_vendor_antigens(query_term: str, species: str, limit: int = 60) -> List[AntigenOption]:
-    opts: List[AntigenOption] = []
-    species_pref = [_canon_species_label(species)]
+def fetch_vendor_antigens(query_term: str, species: str, limit: int = 40) -> List[AntigenOption]:
+    if SinoBioConnector is None:
+        log_info("[error] SinoBioConnector is not available.")
+        return []
     try:
-        if SinoBioConnector is None:
-            raise RuntimeError("SinoBioConnector unavailable")
         sino = SinoBioConnector(mode="headless")
-        opts.extend(_rows_to_antigen_options(sino.search_proteins(query_term, species_preference=species_pref, limit=limit), default_species=species))
+        results = sino.search_proteins(query_term, species_preference=[species.capitalize()], limit=limit)
+        opts = [AntigenOption(vendor="Sino Biological", catalog=r.get("sku",""), species=r.get("species", species), url=r.get("url")) for r in results]
+        log_info(f"[info] Vendor search {query_term} ({species}) -> {len(opts)} candidates")
+        return opts
     except Exception as e:
-        print(f"[warn] Sino connector failed for '{query_term}': {e}")
-    # ACRO optional (disabled by default)
-    # try:
-    #     if ACROConnector is None:
-    #         raise RuntimeError("ACROConnector unavailable")
-    #     acro = ACROConnector(mode="headless")
-    #     opts.extend(_rows_to_antigen_options(acro.search_proteins(query_term, species_preference=species_pref, limit=limit), default_species=species))
-    # except Exception as e:
-    #     print(f"[warn] ACRO connector failed for '{query_term}': {e}")
-    return list({(o.vendor, o.catalog): o for o in opts}.values())
+        log_info(f"[warn] Sino connector failed for '{query_term}': {e}")
+        return []
 
 # -------------------- PDB x Antigen Matching --------------------
 def _find_best_pdb_antigen_match(
@@ -593,38 +625,40 @@ def _find_best_pdb_antigen_match(
     best_match = None
     best_score = -1.0
 
-    viable_antigens_all = [o for o in antigen_options if o.accession and o.aa_start and o.aa_end]
+    viable_antigens = [
+        o for o in antigen_options 
+        if o.llm_analysis and o.llm_analysis.is_target_match and o.llm_analysis.accession and o.llm_analysis.aa_start and o.llm_analysis.aa_end
+    ]
 
+    log_info(f"[debug] Antigens with target match & accession & aa-range: {len(viable_antigens)}/{len(antigen_options)}")
     if require_biotinylated:
-        viable_antigens = [o for o in viable_antigens_all if o.biotin_verified is True]
-        if not viable_antigens:
-            print("[warn] No verified-biotin antigen options with accession and boundaries found.")
-            return None
-    else:
-        viable_antigens = viable_antigens_all
-
+        pre_filter_count = len(viable_antigens)
+        viable_antigens = [o for o in viable_antigens if o.llm_analysis and o.llm_analysis.is_biotinylated]
+        log_info(f"[info] Filtering for biotinylation: kept {len(viable_antigens)} of {pre_filter_count}")
+    
     if not viable_antigens:
-        print("[warn] No viable antigen options with accession and boundaries found for verification.")
+        log_info("[warn] No viable antigen options remained after LLM-based filtering.")
         return None
 
     for antigen in viable_antigens:
-        ncbi_seq = _get_ncbi_sequence(antigen.accession)
+        analysis = antigen.llm_analysis
+        ncbi_seq = _get_ncbi_sequence(analysis.accession)
         if not ncbi_seq:
-            print(f"[warn] Could not fetch NCBI sequence for {antigen.accession}, skipping antigen {antigen.catalog}.")
+            log_info(f"[warn] Could not fetch NCBI sequence for {analysis.accession}, skipping antigen {antigen.catalog}.")
             continue
 
-        v_start, v_end = antigen.aa_start, antigen.aa_end
+        v_start, v_end = analysis.aa_start, analysis.aa_end
         vendor_len = v_end - v_start + 1
 
         for pdb_id in pdb_ids:
             res, entry_json = rcsb_quality(pdb_id)
-            if not entry_json:
+            if not entry_json: 
                 continue
 
             for entity_id in _entity_ids(entry_json):
                 entity_json = _polymer_entity_json(pdb_id, entity_id)
                 pdb_seq = _entity_seq_can(entity_json)
-                if not pdb_seq:
+                if not pdb_seq: 
                     continue
 
                 s = difflib.SequenceMatcher(a=ncbi_seq, b=pdb_seq, autojunk=False)
@@ -642,24 +676,22 @@ def _find_best_pdb_antigen_match(
 
                 resolution_score = (4.0 - (res or 4.0)) / 2.0
                 score = (coverage * 100) + (identity * 10) + resolution_score
-
-                if antigen.biotin_verified:
-                    score += 1500.0
-                elif antigen.macs_ready:
-                    score += 1000.0
+                
+                if analysis.is_biotinylated:
+                    score += 1500.0  # strong bonus for biotin
 
                 if score > best_score:
                     best_score = score
-                    subunit_name = (entity_json.get("rcsb_polymer_entity", {}) or {}).get("pdbx_description", "N/A")
+                    release_date_str = (entry_json.get("rcsb_accession_info", {})).get("initial_release_date")
                     best_match = {
                         "pdb_id": pdb_id,
                         "resolution": res,
-                        "method": _method_from_entry(entry_json),
-                        "release_date": _release_date(entry_json),
+                        "method": ((entry_json.get("exptl") or [{}])[0].get("method", "")).upper(),
+                        "release_date": datetime.fromisoformat(release_date_str.replace("Z", "+00:00")) if release_date_str else None,
                         "matched_chain": (entity_json.get("rcsb_polymer_entity_container_identifiers", {}).get("auth_asym_ids") or ["?"])[0],
                         "antigen_catalog": antigen.catalog,
                         "antigen_url": antigen.url,
-                        "vendor_accession": antigen.accession,
+                        "vendor_accession": analysis.accession,
                         "vendor_range": f"{v_start}-{v_end}",
                         "pdb_map_range": f"{u_start}-{u_end}",
                         "identity": identity,
@@ -667,94 +699,80 @@ def _find_best_pdb_antigen_match(
                         "intersection": f"{intersection_start}-{intersection_end}" if intersection_len > 0 else "None",
                         "accession_sequence": ncbi_seq,
                         "pdb_sequence": pdb_seq,
-                        "subunit_name": subunit_name
+                        "subunit_name": (entity_json.get("rcsb_polymer_entity", {}) or {}).get("pdbx_description", "N/A"),
+                        "is_biotinylated": analysis.is_biotinylated
                     }
+
     if best_match:
-        print(f"\n[info] Best PDB-Antigen match found with score {best_score:.2f}:")
+        log_info(f"\n[info] Best PDB-Antigen match score {best_score:.2f}:")
         for k, v in best_match.items():
             if k in ["accession_sequence", "pdb_sequence"] and isinstance(v, str) and len(v) > 70:
-                print(f"  - {k}: {v[:70]}...")
+                log_info(f"  - {k}: {v[:70]}...")
             else:
-                print(f"  - {k}: {v}")
+                log_info(f"  - {k}: {v}")
     return best_match
 
 # -------------------- Core Pipeline & Output --------------------
-def get_uniprot_sequence(entry: dict) -> str:
-    try:
-        return (entry.get("sequence") or {}).get("value", "").replace("\n", "").strip()
-    except Exception:
-        return ""
-
-def parse_uniprot_features(entry: dict) -> Tuple[bool, bool, List[str]]:
-    feats = entry.get("features", [])
-    has_tm = any(f.get("type") == "TRANSMEM" for f in feats)
-    has_signal = any(f.get("type") == "SIGNAL" for f in feats)
-    gly = [str(f.get("location", {}).get("start", {}).get("value")) for f in feats if f.get("type") == "GLYCOSYLATION" and f.get("location", {}).get("start", {}).get("value")]
-    return has_tm, has_signal, gly
-
 def build_candidate(term: str, species: str, *, require_biotinylated: bool = False) -> Optional[Candidate]:
-    uni_search = lookup_uniprot_best(term, species)
+    org_id = "9606" if species.lower() == "human" else "10090"  # default Mouse for non-human
+    params = {"query": f'gene:"{term}" AND organism_id:{org_id}', "fields": "accession,protein_name,gene_primary,organism_name", "format": "json"}
+    uni_search_data = http_json(UNIPROT_SEARCH, params=params)
+    uni_search = uni_search_data.get("results", [])[0] if uni_search_data.get("results") else None
     if not uni_search:
+        log_info(f"[warn] UniProt search returned no results for term '{term}' ({species})")
         return None
 
     acc = uni_search["primaryAccession"]
     uni_full = fetch_uniprot_entry(acc)
-
     gene_name = (uni_search.get("genes", [{}])[0].get("geneName", {}) or {}).get("value") or term
+    protein_name = (uni_search.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", ""))
+
+    log_info(f"\n[info] Evaluating candidate '{gene_name}' (UniProt: {acc})...")
 
     antigen_options = fetch_vendor_antigens(gene_name, species)
-    enrich_antigen_details(antigen_options)
-    # After: enrich_antigen_details(antigen_options)
-
-    # NEW: drop antigens whose catalog title doesn't match the requested gene/protein
-    before_n = len(antigen_options)
-    antigen_options = [
-        o for o in antigen_options
-        if _title_matches_target(o.product_title, gene_name, uni_full)
-    ]
-    after_n = len(antigen_options)
-    if after_n == 0:
-        print(f"[warn] All antigen options filtered by title mismatch for {gene_name} (kept 0/{before_n}).")
-    else:
-        print(f"[info] Title match filter kept {after_n}/{before_n} antigen options for {gene_name}.")
-
-    pdbs = pdb_list_from_uniprot_entry(uni_full)
-
-    print(f"\n[info] Evaluating candidate '{gene_name}' (UniProt: {acc}) with {len(pdbs)} PDBs and {len(antigen_options)} antigen options...")
-    print(f"[debug] PDB IDs: {', '.join(pdbs)}")
-    print(f"[debug] First 5 antigen catalogs: {[o.catalog for o in antigen_options[:5]]}")
-
-    if not pdbs:
-        print(f"[warn] No PDBs found for UniProt {acc}.")
+    if not antigen_options:
+        log_info(f"[warn] No vendor antigens found for {gene_name}.")
         return None
+    
+    # Batch LLM enrichment (single call)
+    enrich_antigen_details_with_llm_batch(antigen_options, gene_name, protein_name)
 
+    # Print all LLMAnalysisResult (explicit requirement)
+    log_info(f"[debug] LLM analysis results for {gene_name}:")
+    for o in antigen_options:
+        log_info(f"  - {o.catalog}: {o.llm_analysis.pretty() if o.llm_analysis else 'None'}")
+
+    # Collect biotin-positive catalog list and print
+    biotin_cats = [o.catalog for o in antigen_options if (o.llm_analysis and o.llm_analysis.is_biotinylated)]
+    if biotin_cats:
+        log_info(f"[info] Biotin-positive antigen catalogs ({len(biotin_cats)}): {', '.join(biotin_cats)}")
+    else:
+        log_info("[info] No biotin-positive antigens identified by LLM.")
+
+    # PDBs
+    pdbs = pdb_list_from_uniprot_entry(uni_full)
+    if not pdbs:
+        log_info(f"[warn] No PDBs found for UniProt {acc}.")
+        return None
+    # Print ALL found PDB IDs
+    log_info(f"[info] Found PDB IDs ({len(pdbs)}): {', '.join(pdbs)}")
+
+    log_info(f"[info] Aligning {len(pdbs)} PDBs with {len(antigen_options)} antigen options for {gene_name} (biotin_required={require_biotinylated})...")
     best_match_info = _find_best_pdb_antigen_match(pdbs, antigen_options, require_biotinylated=require_biotinylated)
-    has_tm, has_signal, gly = parse_uniprot_features(uni_full)
 
     if not best_match_info:
-        msg = "suitable and verifiable PDB/antigen match"
-        if require_biotinylated:
-            msg = "biotin-verified antigen with a suitable and verifiable PDB match"
-        print(f"[fail] Could not find a {msg} for {term}.")
+        log_info(f"[fail] Could not find a suitable and verifiable PDB/antigen match for {gene_name}.")
         return None
 
-    chosen_antigen = next((o for o in antigen_options if o.catalog == best_match_info.get("antigen_catalog")), None)
-    is_biotinylated = bool(chosen_antigen and chosen_antigen.biotin_verified)
-
-    return Candidate(
+    cand = Candidate(
         uniprot=acc,
         gene=gene_name,
-        protein_name=(uni_search.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", "")),
-        subunit_name=best_match_info.get("subunit_name"),
+        protein_name=protein_name,
         organism=(uni_search.get("organism", {})).get("scientificName", ""),
         pdb_ids=pdbs,
         chosen_pdb=best_match_info["pdb_id"],
         resolution=best_match_info["resolution"],
-        has_tm=has_tm,
-        has_signal_peptide=has_signal,
-        glyco_sites=gly,
-        antigen_options=antigen_options,
-        scoring={},
+        subunit_name=best_match_info.get("subunit_name"),
         pdb_matched_chain=best_match_info["matched_chain"],
         vendor_product_accession=best_match_info["vendor_accession"],
         vendor_product_range=best_match_info["vendor_range"],
@@ -768,116 +786,79 @@ def build_candidate(term: str, species: str, *, require_biotinylated: bool = Fal
         pdb_sequence=best_match_info.get("pdb_sequence"),
         antigen_catalog=best_match_info.get("antigen_catalog"),
         antigen_url=best_match_info.get("antigen_url"),
-        biotinylated=is_biotinylated,
+        biotinylated=best_match_info.get("is_biotinylated", False),
+        antigen_options=antigen_options,
     )
+    return cand
 
-def write_candidate_outputs(c: Candidate) -> None:
-    if not c.chosen_pdb:
-        return
-    tdir = TARGETS_DIR / c.chosen_pdb.upper()
-    tdir.mkdir(parents=True, exist_ok=True)
-    yml = tdir / "target.yaml"
-    if not yml.exists():
-        skel = {
-            "id": c.chosen_pdb.upper(),
-            "target_name": c.subunit_name or c.protein_name,
-            "assembly_id": "1",
-            "chains": [c.pdb_matched_chain] if c.pdb_matched_chain else [],
-            "allowed_epitope_range": c.pdb_vendor_intersection,
-            "epitopes": [],
-            "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}},
-        }
-        yml.write_text(yaml.safe_dump(skel, sort_keys=False))
-
-def write_summary(cands: List[Candidate], prefix: str = "targets_summary") -> None:
-    CATALOG_DIR.mkdir(exist_ok=True)
+def write_summary(cands: List[Candidate], prefix: str) -> None:
     out = CATALOG_DIR / f"{prefix}.tsv"
-    with out.open("w", newline="") as f:
+    with out.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow([
             "rank", "uniprot", "gene", "protein_name", "subunit_name", "organism",
-            "chosen_pdb", "pdb_method", "pdb_release_date", "resolution_A",
-            "pdb_matched_chain", "vendor_product_accession", "vendor_product_range",
-            "pdb_map_uniprot_range", "pdb_map_identity", "pdb_vendor_coverage", "pdb_vendor_intersection",
-            "antigen_catalog", "antigen_url", "biotinylated", "accession_sequence", "pdb_sequence",
+            "chosen_pdb", "resolution_A", "biotinylated", "pdb_vendor_coverage",
+            "antigen_catalog", "antigen_url"
         ])
-        ranked = sorted(cands, key=lambda x: ((1 if x.biotinylated else 0), x.pdb_vendor_coverage or 0.0), reverse=True)
+        ranked = sorted(cands, key=lambda c: ((1 if c.biotinylated else 0), c.pdb_vendor_coverage or 0.0), reverse=True)
         for i, c in enumerate(ranked, 1):
             w.writerow([
                 i, c.uniprot, c.gene, c.protein_name, c.subunit_name or "", c.organism,
-                c.chosen_pdb or "", c.pdb_method or "", c.pdb_release_date or "",
-                f"{c.resolution:.2f}" if c.resolution else "",
-                c.pdb_matched_chain or "", c.vendor_product_accession or "", c.vendor_product_range or "",
-                c.pdb_map_uniprot_range or "", f"{c.pdb_map_identity:.3f}" if c.pdb_map_identity is not None else "",
-                f"{c.pdb_vendor_coverage:.3f}" if c.pdb_vendor_coverage is not None else "",
-                c.pdb_vendor_intersection or "",
-                c.antigen_catalog or "", c.antigen_url or "", c.biotinylated,
-                c.accession_sequence or "", c.pdb_sequence or ""
+                c.chosen_pdb or "", f"{c.resolution:.2f}" if c.resolution else "",
+                c.biotinylated, f"{c.pdb_vendor_coverage:.3f}" if c.pdb_vendor_coverage is not None else "",
+                c.antigen_catalog or "", c.antigen_url or ""
             ])
-    print(f"[ok] Wrote summary: {out}")
+    log_info(f"[ok] Wrote summary: {out}")
 
-def run_target_generation(
-    args=None,
-    *,
-    instruction: Optional[str] = None,
-    max_targets: Optional[int] = None,
-    species: Optional[str] = None,
-    prefer_tags: Optional[str] = None,
-    require_biotinylated: Optional[bool] = None,
-    **kwargs
-) -> List[Candidate]:
-    """
-    prefer_tags: comma-separated (e.g., "biotin,his"). If includes "biotin", strict
-                 biotin verification is enforced unless overridden by require_biotinylated.
-    require_biotinylated: if True, ONLY verified-biotin antigens are considered.
-    """
-    if args:
-        instruction = args.instruction
-        max_targets = args.max_targets
-        species = args.species
-        prefer_tags = getattr(args, "prefer_tags", prefer_tags)
-        if getattr(args, "require_biotinylated", None) is not None:
-            require_biotinylated = args.require_biotinylated
+def run_target_generation(args):
+    """ Main execution function """
+    require_biotin = "biotin" in (args.prefer_tags or "").lower()
+    instruction_slug = _slugify(args.instruction, maxlen=32)
 
-    if require_biotinylated is None:
-        tags_lower = (prefer_tags or "").lower()
-        require_biotinylated = ("biotin" in tags_lower)
+    log_info(textwrap.dedent(f"""
+    --- Target Generation (LLM-Enhanced) ---
+    Instruction: {args.instruction}
+    Species: {args.species}
+    Max Targets: {args.max_targets}
+    Prefer Tags: {args.prefer_tags}
+    Require Biotinylated: {require_biotin}
+    Log file: {LOG_PATH}
+    -------------------------------------------
+    """).strip())
 
-    print(f"--- Target Generation ---\nInstruction: {instruction}\nSpecies: {species}\nMax: {max_targets}\nRequire Biotinylated: {require_biotinylated}")
-    queries = expand_instruction_to_queries(instruction, species or "human", max_targets or 10)
+    queries = expand_instruction_to_queries(args.instruction, args.species, args.max_targets)
 
-    cands: List[Candidate] = []
-    for q in queries:
+    candidates: List[Candidate] = []
+    for i, q in enumerate(queries, 1):
+        log_info(f"\n[stage] [{i}/{len(queries)}] Processing query: {q}")
         try:
-            c = build_candidate(q, species or "human", require_biotinylated=require_biotinylated)
-            if c:
-                cands.append(c)
+            candidate = build_candidate(q, args.species, require_biotinylated=require_biotin)
+            if candidate:
+                candidates.append(candidate)
         except Exception as e:
-            print(f"[error] Failed processing '{q}': {e}", file=sys.stderr)
+            log_info(f"[error] Failed processing query '{q}': {e}")
             import traceback
-            traceback.print_exc()
+            log_debug(traceback.format_exc())
+        # Respect rate limit between targets (single LLM batch per target)
+        time.sleep(SLEEP_PER_TARGET_SEC)
 
-    if not cands:
-        print("[warn] No candidates produced.")
+    if not candidates:
+        log_info("[warn] No valid candidates were generated.")
         return []
 
-    prefix = re.sub(r'[^a-z0-9]+', '_', instruction.lower())[:20]
-    write_summary(cands, prefix=prefix)
-    for c in cands:
-        write_candidate_outputs(c)
-
-    print("[done] target-generation complete.")
-    return cands
+    prefix = f"{instruction_slug}_{RUN_TS}"
+    write_summary(candidates, prefix=prefix)
+    
+    log_info("[done] Target generation complete.")
+    log_info(f"[note] Full debug (prompts, HTML bodies, LLM outputs) saved to: {LOG_PATH}")
+    return candidates
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="Standalone Target Generation")
-    ap.add_argument("--instruction", required=True)
-    ap.add_argument("--max_targets", type=int, default=10)
-    ap.add_argument("--species", default="human")
-    ap.add_argument("--prefer_tags", default="biotin,his")
-    ap.add_argument("--soluble_only", default="true")
-    ap.add_argument("--min_struct_quality", type=float, default=3.5)
-    ap.add_argument("--require_biotinylated", type=lambda s: str(s).lower() in ("1","true","yes","y"), default=None)
+    ap = argparse.ArgumentParser(description="LLM-Enhanced Target Generation for Antibody Design")
+    ap.add_argument("--instruction", required=True, help="A descriptive term (e.g., 'human interleukin receptors') or a comma-separated list of gene symbols (e.g., 'IL6,IL1B,TNF').")
+    ap.add_argument("--max_targets", type=int, default=10, help="Maximum number of targets to process from the instruction.")
+    ap.add_argument("--species", default="human", help="Target species (e.g., 'human', 'mouse').")
+    ap.add_argument("--prefer_tags", default="biotin", help="If 'biotin' is present, only biotinylated targets will be considered.")
     a = ap.parse_args()
     run_target_generation(a)
