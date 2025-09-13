@@ -4,6 +4,171 @@ from Bio.PDB import MMCIFParser
 from utils import _ensure_dir, ROOT, SCHEMA
 from jsonschema import validate
 
+# --- NEW: math + parsing helpers for RMSD (minimal deps) ---
+import math
+import numpy as np
+from typing import Iterable, Optional, Tuple, List
+
+def _kabsch(P: np.ndarray, Q: np.ndarray) -> Tuple[np.ndarray, float]:
+    """
+    Kabsch alignment: returns rotated P and RMSD to Q (both Nx3).
+    Assumes P and Q are already centered.
+    """
+    # covariance
+    H = P.T @ Q
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    # right-handedness
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    P_aln = P @ R
+    rmsd = np.sqrt(np.mean(np.sum((P_aln - Q) ** 2, axis=1)))
+    return P_aln, rmsd
+
+def _load_chain_ca_coords(struct_path: Path, chain_id: str) -> Tuple[List[int], np.ndarray]:
+    """
+    Load CA coordinates for a given chain from PDB or mmCIF.
+    Returns (sorted_resseq_list, coords as Nx3 float array).
+    Only canonical residues (resseq int, no insertions) are kept.
+    """
+    chain_id = str(chain_id).strip()
+    coords = []
+    resseqs = []
+
+    # choose parser by extension
+    ext = struct_path.suffix.lower()
+    if ext == ".cif" or ext == ".mmcif":
+        parser = MMCIFParser(QUIET=True)
+    else:
+        from Bio.PDB import PDBParser
+        parser = PDBParser(QUIET=True)
+
+    s = parser.get_structure("x", str(struct_path))
+    # model 0
+    try:
+        ch = s[0][chain_id]
+    except KeyError:
+        return [], np.zeros((0, 3), dtype=float)
+
+    for res in ch.get_residues():
+        # ignore hetero/water
+        if res.id[0] != " ":
+            continue
+        resseq = res.id[1]
+        if "CA" not in res:
+            continue
+        a = res["CA"].get_coord().astype(float)
+        resseqs.append(int(resseq))
+        coords.append(a)
+
+    if not coords:
+        return [], np.zeros((0, 3), dtype=float)
+
+    # sort by residue number to ensure stable matching
+    order = np.argsort(np.array(resseqs, dtype=int))
+    resseqs_sorted = [int(resseqs[i]) for i in order]
+    coords_sorted = np.vstack([coords[i] for i in order]).astype(float)
+    return resseqs_sorted, coords_sorted
+
+def _match_by_resseq(A_keys: List[int], B_keys: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Given two sorted lists of residue numbers, return index arrays
+    selecting only the intersection (preserving order).
+    """
+    aset = set(A_keys); bset = set(B_keys)
+    common = sorted(aset.intersection(bset))
+    if not common:
+        return np.array([], dtype=int), np.array([], dtype=int)
+    a_idx = np.array([A_keys.index(k) for k in common], dtype=int)
+    b_idx = np.array([B_keys.index(k) for k in common], dtype=int)
+    return a_idx, b_idx
+
+def _ca_rmsd_after_alignment(p_coords: np.ndarray, q_coords: np.ndarray) -> float:
+    """
+    Aligns p_coords onto q_coords (both Nx3) via Kabsch and returns RMSD.
+    """
+    if p_coords.shape[0] == 0 or q_coords.shape[0] == 0:
+        return float("nan")
+    n = min(p_coords.shape[0], q_coords.shape[0])
+    P = p_coords[:n, :].astype(float)
+    Q = q_coords[:n, :].astype(float)
+    # center
+    Pc = P - P.mean(axis=0, keepdims=True)
+    Qc = Q - Q.mean(axis=0, keepdims=True)
+    _, rmsd = _kabsch(Pc, Qc)
+    return float(rmsd)
+
+def _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb: Path, af3_cif: Path, chain_id: str = "H") -> float:
+    """
+    Compute CA RMSD between RFdiffusion design (PDB) and AF3 prediction (CIF) for a single chain.
+    1) extract CA coords for the specified chain from both
+    2) match residues by resseq; if no overlap, fall back to trim-to-min length order
+    3) Kabsch-align and report RMSD (Å). Returns NaN on failure.
+    """
+    try:
+        a_keys, a_xyz = _load_chain_ca_coords(rfdiff_pdb, chain_id)
+        b_keys, b_xyz = _load_chain_ca_coords(af3_cif, chain_id)
+        if a_xyz.shape[0] == 0 or b_xyz.shape[0] == 0:
+            return float("nan")
+
+        # try residue-number intersection first
+        ai, bi = _match_by_resseq(a_keys, b_keys)
+        if ai.size >= 5:  # enough points for stable alignment
+            P = a_xyz[ai, :]
+            Q = b_xyz[bi, :]
+        else:
+            # fallback: strict order, trim to min length
+            n = min(a_xyz.shape[0], b_xyz.shape[0])
+            if n < 5:
+                return float("nan")
+            P = a_xyz[:n, :]
+            Q = b_xyz[:n, :]
+
+        # align and RMSD
+        Pc = P - P.mean(axis=0, keepdims=True)
+        Qc = Q - Q.mean(axis=0, keepdims=True)
+        _, rmsd = _kabsch(Pc, Qc)
+        return float(rmsd)
+    except Exception as e:
+        print(f"[warn] RMSD failed for chain {chain_id}: {e}")
+        return float("nan")
+
+def _find_rfdiffusion_pdb(rfdiff_root: Path, design_name: str, binder_chain_id: str = "H") -> Path | None:
+    """
+    Try several common layouts to locate the RFdiffusion design PDB for a design.
+    Returns a path whose structure contains the binder chain, else None.
+    """
+    cands = []
+    # flat files
+    cands += [rfdiff_root / f"{design_name}.pdb",
+              rfdiff_root / f"{design_name}_design.pdb",
+              rfdiff_root / f"{design_name}_rfdiffusion.pdb"]
+    # nested
+    cands += [rfdiff_root / design_name / f"{design_name}.pdb",
+              rfdiff_root / design_name / f"{design_name}_design.pdb"]
+    # recursive search as a last resort
+    if rfdiff_root.exists():
+        for p in rfdiff_root.rglob(f"{design_name}*.pdb"):
+            s = str(p).lower()
+            # avoid unrelated stages
+            if any(tag in s for tag in ["af3", "rf2", "mpnn", "relax", "repack"]):
+                continue
+            cands.append(p)
+
+    # pick the first that actually has the binder chain
+    for p in cands:
+        try:
+            if not p.exists():
+                continue
+            keys, coords = _load_chain_ca_coords(p, binder_chain_id)
+            if len(keys) >= 5 and coords.shape[0] >= 5:
+                return p
+        except Exception:
+            continue
+    return None
+# --- /NEW helpers ---
+
 AA3_TO_1 = {
     "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E","GLY":"G",
     "HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F","PRO":"P",
@@ -299,6 +464,11 @@ def assess_rfa_design(pdb_id: str, epitope: str, design_name: str, seed: int | N
     af3_base_dir = tdir / "designs" / name_sanitized / "rfa_af3" / design_name
     best = _find_af3_best_sample(af3_base_dir, design_name, seed, sample_idx)
 
+    # RFdiffusion path (NEW)
+    hs_dir = tdir / "designs" / name_sanitized  # parent of rfa_* folders in single-epitope runs
+    rfdiff_root = hs_dir / "rfa_rfdiffusion"
+    rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id="H")
+
     # Epitope metadata
     prep_dir = tdir / "prep"
     prepared_pdb = prep_dir / "prepared.pdb"
@@ -311,7 +481,7 @@ def assess_rfa_design(pdb_id: str, epitope: str, design_name: str, seed: int | N
     report_dir = af3_base_dir / f"assessment_report_s{seed}_p{sample_idx}"
     _ensure_dir(report_dir)
 
-    results = {"rf2": None, "af3": None}
+    results = {"rf2": None, "af3": None, "rfdiff_pdb": str(rfdiff_pdb) if rfdiff_pdb else ""}
     if rf2_pred_path.exists() and rf2_scores_path.exists():
         try:
             scores = json.loads(rf2_scores_path.read_text())
@@ -320,11 +490,17 @@ def assess_rfa_design(pdb_id: str, epitope: str, design_name: str, seed: int | N
         except Exception as e:
             print(f"[warn] Could not parse RF2 score file: {e}")
 
+    chainH_rmsd = float("nan")
     if best:
         print("[info] Found AlphaFold 3 outputs.")
         try:
             summary_data = json.loads(best["summary"].read_text())
-            results["af3"] = {"summary": summary_data}
+            results["af3"] = {"summary": summary_data, "cif": str(best["cif"])}
+            # RMSD (NEW): RFdiffusion vs AF3 for chain H
+            if rfdiff_pdb and best.get("cif") and Path(best["cif"]).exists():
+                chainH_rmsd = _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb, best["cif"], chain_id="H")
+                print(f"[rmsd] RFdiffusion vs AF3 (chain H) CA-RMSD = {chainH_rmsd:.3f} Å")
+
             # PML (with target + epitope)
             pml_path = report_dir / "visualize_assessment.pml"
             _make_pml(
@@ -396,6 +572,11 @@ def assess_rfa_design(pdb_id: str, epitope: str, design_name: str, seed: int | N
         | pTM | `{s.get('ptm', 'N/A')}` |
         | Has Clash | `{s.get('has_clash', 'N/A')}` |
         | Fraction Disordered | `{s.get('fraction_disordered', 'N/A')}` |
+        """))
+    if not math.isnan(chainH_rmsd):
+        report_md.append(textwrap.dedent(f"""
+        ## Pose Consistency (binder chain H)
+        RFdiffusion ↔ AF3 CA-RMSD (after alignment): **{chainH_rmsd:.3f} Å**
         """))
     if results["rf2"]:
         r = results["rf2"]["data"]
@@ -821,6 +1002,7 @@ def assess_rfa_all(
             af3_dir = hs_dir / "rfa_af3"
             mpnn_dir = hs_dir / "rfa_mpnn"
             rf2_dir  = hs_dir / "rfa_rf2"
+            rfdiff_root = hs_dir / "rfa_rfdiffusion"  # NEW: RFdiffusion outputs
             if not af3_dir.exists(): continue
 
             print(f'[info] Scanning epitope "{ep_name}" variant "{variant}"... under {hs_dir}')
@@ -834,6 +1016,9 @@ def assess_rfa_all(
                 best = _find_af3_best_sample(
                     design_dir, design_name, seed, sample_idx, include_keyword=include_keyword
                 )
+
+                # RFdiffusion PDB (NEW)
+                rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id=binder_chain_id)
 
                 # RF2（あれば拾う）
                 rf2_pred = rf2_dir / f"{design_name}_pred.pdb"
@@ -849,7 +1034,6 @@ def assess_rfa_all(
 
                 # binder配列（既定はスキップ）
                 mpnn_pdb = mpnn_dir / f"{design_name}.pdb"
-                # print(f"[debug] Looking for MPNN PDB at {mpnn_pdb}")
                 if not mpnn_pdb.exists():
                     cand = list(mpnn_dir.rglob(f"{design_name}*.pdb"))
                     mpnn_pdb = cand[0] if cand else None
@@ -867,6 +1051,7 @@ def assess_rfa_all(
                 af3_frac_dis = None
                 af3_cif = af3_summary = None
                 pml_path = None
+                chainH_rmsd = float("nan")  # NEW
 
                 if best:
                     af3_summary = best["summary"]
@@ -880,6 +1065,13 @@ def assess_rfa_all(
                         af3_frac_dis  = float(s.get("fraction_disordered", "nan"))
                     except Exception:
                         pass
+
+                    # NEW: compute chain-H RMSD (RFdiffusion vs AF3)
+                    try:
+                        if rfdiff_pdb and Path(af3_cif).exists():
+                            chainH_rmsd = _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb, af3_cif, chain_id=binder_chain_id)
+                    except Exception as e:
+                        print(f"[warn] RMSD calc failed for {design_name}: {e}")
 
                     # 個別PMLは既定スキップ（必要時のみ作る）
                     if not skip_pml:
@@ -922,6 +1114,8 @@ def assess_rfa_all(
                     "rf2_pred_pdb_path": str(rf2_pred.resolve()) if rf2_pred.exists() else "",
                     "rf2_pae": rf2_pae if rf2_pae is not None else "",
                     "rf2_rmsd": rf2_rmsd if rf2_rmsd is not None else "",
+                    "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",  # NEW
+                    "rfdiff_vs_af3_rmsd_chainH": chainH_rmsd if chainH_rmsd == chainH_rmsd else "",  # NEW
                     "pymol_script_path": str(pml_path.resolve()) if (pml_path and not skip_pml) else "",
                     "final_score": final_score if final_score is not None else ""
                 })
@@ -954,6 +1148,7 @@ def assess_rfa_all(
         "af3_model_cif_path","af3_summary_json_path",
         "af3_ranking_score","af3_iptm","af3_ptm","af3_has_clash","af3_fraction_disordered",
         "rf2_pred_pdb_path","rf2_pae","rf2_rmsd",
+        "rfdiffusion_pdb_path","rfdiff_vs_af3_rmsd_chainH",   # NEW columns
         "pymol_script_path",
         "final_score"
     ]
@@ -969,7 +1164,7 @@ def assess_rfa_all(
     topn = min(5, len(rows))
     print("[top] best designs:")
     for r in rows[:topn]:
-        print(f"  #{r['rank']:>3}  {r['epitope']} / hs-{r['hotspot_variant']} / {r['design_name']}  score={r['final_score']}  iptm={r['af3_iptm']}  clash={r['af3_has_clash']}")
+        print(f"  #{r['rank']:>3}  {r['epitope']} / hs-{r['hotspot_variant']} / {r['design_name']}  score={r['final_score']}  iptm={r['af3_iptm']}  clash={r['af3_has_clash']}  rmsdH={r.get('rfdiff_vs_af3_rmsd_chainH','')}")
 
     # ===== Arm/Epitope の集計（ログ表示のみ） =====
     def _to_float(x):

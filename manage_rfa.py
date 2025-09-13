@@ -11,6 +11,12 @@ RBD: 6M17
 Arms = Epitope@Variant (e.g., "RBM Core@A"). Results live in:
   targets/<PDB>/designs/<Epitope_sanitized>/hs-<Variant>/(rfa_rfdiff|rfa_mpnn|rfa_af3)
 
+
+1) Batch-process a TSV file from target-generation to prepare multiple targets at once.
+# This will run init-target, decide-scope, and prep-target for each PDB in the TSV.
+# It also creates a master PyMOL bundle to visualize all hotspots.
+python manage_rfa.py batch-prep --tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_100_proteins_we_should_targe_20250913_044100_biotin.tsv
+
 0) (Optional) Discover targets + prefill target.yaml (run locally; uses Chromium)
 python manage_rfa.py target-generation \
     --instruction "Human CD3 epsilon" \
@@ -361,6 +367,10 @@ def main():
     p_prep.add_argument("pdb", help="Target PDB ID.")
     p_prep.add_argument("--sasa_cutoff", type=float, default=10, help="SASA cutoff for epitope definition.")
 
+    p_batch = sub.add_parser("batch-prep", help="Run init, scope, and prep for multiple targets from a TSV file.")
+    p_batch.add_argument("--tsv", required=True, help="Path to the TSV file from target-generation.")
+    p_batch.add_argument("--sasa_cutoff", type=float, default=10.0, help="SASA cutoff to use for all targets.")
+    
     # --- RFdiffusion (multi-epitope, split-by-default) ---
     p_rfd = sub.add_parser("make-rfa-rfdiffusion", help="Run RFdiffusion for one or more arms (Epitope[@Variant]).")
     p_rfd.add_argument("pdb")
@@ -485,6 +495,82 @@ def main():
 
     elif args.cmd == "prep-target":
         prep_target(args.pdb, args.sasa_cutoff)
+
+    elif args.cmd == "batch-prep":
+        if not Path(args.tsv).exists():
+            raise FileNotFoundError(f"Input TSV not found: {args.tsv}")
+
+        processed_targets_info = []
+        with open(args.tsv, 'r', encoding='utf-8') as f:
+            # Detect delimiter (assuming TSV here)
+            reader = csv.DictReader(f, delimiter='\t')
+            
+            # Find PDB and URL columns, trying common names
+            header = [h.lower().strip() for h in reader.fieldnames]
+            pdb_col = next((c for c in ["chosen_pdb", "pdb", "pdb_id"] if c in header), None)
+            url_col = next((c for c in ["antigen_url", "url"] if c in header), None)
+            
+            if not pdb_col:
+                raise KeyError("Could not find a PDB ID column (e.g., 'chosen_pdb', 'pdb') in the TSV.")
+
+            # Get original case-sensitive column names
+            pdb_col_orig = reader.fieldnames[header.index(pdb_col)]
+            url_col_orig = reader.fieldnames[header.index(url_col)] if url_col else None
+
+            rows = list(reader)
+
+        for i, row in enumerate(rows):
+            pdb_id = row.get(pdb_col_orig, "").strip()
+            antigen_url = row.get(url_col_orig, "").strip() if url_col_orig else None
+            
+            if not pdb_id or not re.match(r"^[A-Za-z0-9]{4}$", pdb_id):
+                print(f"[warn] Skipping invalid or missing PDB ID in row {i+2}.")
+                continue
+
+            print(f"\n{'='*20} Processing Target {i+1}/{len(rows)}: {pdb_id.upper()} {'='*20}")
+            try:
+                init_target(pdb_id, antigen_url=antigen_url)
+                llm_scope(pdb_id)
+                prep_target(pdb_id, args.sasa_cutoff)
+
+                target_dir = ROOT / "targets" / pdb_id.upper()
+                prep_dir = target_dir / "prep"
+                prepared_pdb = prep_dir / "prepared.pdb"
+                hotspot_jsons = list(prep_dir.glob("epitope_*_hotspots*.json"))
+                
+                if prepared_pdb.exists():
+                    processed_targets_info.append({
+                        "pdb_id": pdb_id.upper(),
+                        "prepared_pdb_path": prepared_pdb,
+                        "hotspot_json_paths": hotspot_jsons
+                    })
+                else:
+                    print(f"[warn] Could not find prepared.pdb for {pdb_id.upper()}; it will be excluded from the PyMOL bundle.")
+
+                if i < len(rows) - 1:
+                    print(f"\n--- Waiting 90 seconds before next target to avoid rate limits ---")
+                    time.sleep(90)
+
+            except Exception as e:
+                import traceback
+                print(f"\n[ERROR] An error occurred while processing {pdb_id.upper()}: {e}")
+                print(traceback.format_exc())
+                print(f"--- Skipping to the next target ---")
+                if i < len(rows) - 1:
+                    print(f"--- Waiting 90 seconds before next target to avoid rate limits ---")
+                    time.sleep(90)
+        
+        if processed_targets_info:
+            print(f"\n{'='*20} Batch Processing Complete {'='*20}")
+            print("Generating consolidated PyMOL visualization bundle for all successful targets...")
+            try:
+                from scripts.pymol_utils import export_batch_hotspot_bundle
+                export_batch_hotspot_bundle(processed_targets_info)
+            except Exception as e:
+                print(f"[ERROR] Failed to generate PyMOL bundle: {e}")
+        else:
+            print("\n[warn] No targets were processed successfully. No PyMOL bundle will be generated.")
+
 
     elif args.cmd == "make-rfa-rfdiffusion":
         arms = [ _parse_arm(s) for s in args.arm ]
@@ -672,6 +758,6 @@ def main():
                 ])
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote follow-up launcher: {launch}\nRun: bash {launch}")
-
+            
 if __name__ == "__main__":
     main()

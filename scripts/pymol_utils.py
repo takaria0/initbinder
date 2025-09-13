@@ -276,14 +276,14 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
         # Check if this is a hotspot variant or mask
         m = re.match(r"^(.*)_hotspots([A-Za-z0-9]*)$", base)
         if m:
-            epi = m.group(1)
+            epi = m.group(1).replace("_", " ") # Convert sanitized name back
             var_label = m.group(2) or "A"
             try: keys = json.loads(f.read_text())
             except json.JSONDecodeError: keys = []
             epitopes.setdefault(epi, {}).setdefault(var_label, []).extend(keys)
         else:
             # epitope mask
-            epi = base
+            epi = base.replace("_", " ")
             try: keys = json.loads(f.read_text())
             except json.JSONDecodeError: keys = []
             epitopes.setdefault(epi, {})["mask"] = keys
@@ -656,4 +656,133 @@ def export_rfdiff_crop_bundle(
     )
     
     _maybe_scp_to_local(bundle_dir)
-    return bundle_dirs
+    return bundle_dir
+
+def export_batch_hotspot_bundle(targets: List[Dict]) -> Path | None:
+    """
+    Creates a single visualization bundle for multiple prepared targets.
+    
+    Args:
+        targets: A list of dicts, where each dict contains:
+                 - 'pdb_id': The 4-letter PDB ID.
+                 - 'prepared_pdb_path': Path to the prepared.pdb file.
+                 - 'hotspot_json_paths': A list of paths to hotspot JSON files.
+    
+    Returns:
+        The path to the generated bundle directory, or None on failure.
+    """
+    if not targets:
+        print("[pymol_utils] No targets provided for batch bundle export.")
+        return None
+
+    bundle_dir = Path(tempfile.mkdtemp(prefix="batch_prep_pymol_"))
+    
+    # --- 1. Copy all necessary PDB files into the bundle ---
+    for target_info in targets:
+        pdb_id = target_info['pdb_id']
+        src_pdb_path = Path(target_info['prepared_pdb_path'])
+        if src_pdb_path.exists():
+            # Rename to avoid collisions, e.g., "1ABC_prepared.pdb"
+            dest_pdb_name = f"{pdb_id}_prepared.pdb"
+            shutil.copy(str(src_pdb_path), str(bundle_dir / dest_pdb_name))
+        else:
+            print(f"[warn] PDB not found for {pdb_id}, skipping it in the bundle.")
+    
+    # --- 2. Generate the master PyMOL script ---
+    pml_path = bundle_dir / "visualize_all_targets.pml"
+    
+    # Re-use helpers from _write_hotspot_pml
+    def _sanitize(s: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_")
+
+    def _keys_to_sel(obj: str, keys: list[str]) -> str:
+        parts = []
+        for k in keys or []:
+            s = str(k).strip()
+            m = (re.match(r"^([A-Za-z0-9])[:_\-]?(-?\d+[A-Z]?)$", s) or
+                 re.match(r"^([A-Za-z0-9])(-?\d+[A-Z]?)$", s))
+            if not m: continue
+            ch, resi = m.group(1), m.group(2)
+            parts.append(f"( {obj} and chain {ch} and resi {resi} )")
+        return " or ".join(parts)
+
+    pml = [
+        "reinitialize", "bg_color white", "set stick_radius, 0.25", 
+        "set sphere_scale, 0.5", "set cartoon_fancy_helices, 1",
+        "set ray_trace_mode, 1", ""
+    ]
+    
+    palette = [
+        "palecyan", "lightmagenta", "paleyellow", "lightorange", "lightblue", 
+        "palegreen", "salmon", "slate", "sand", "wheat", "pink", "deepteal"
+    ]
+
+    for i, target_info in enumerate(targets):
+        pdb_id = target_info['pdb_id']
+        pdb_file_rel = f"{pdb_id}_prepared.pdb"
+        
+        # Check if PDB was actually copied
+        if not (bundle_dir / pdb_file_rel).exists():
+            continue
+
+        pml.append(f"# {'-'*10} Target: {pdb_id} {'-'*10}")
+        pml.append(f"load {pdb_file_rel}, {pdb_id}")
+        pml.append(f"hide everything, {pdb_id}")
+        pml.append(f"show cartoon, {pdb_id}")
+        pml.append(f"color gray80, {pdb_id}")
+
+        # Collect this PDB's epitopes from its JSON files
+        epitopes: Dict[str, Dict[str, List[str]]] = {}
+        for f in target_info.get('hotspot_json_paths', []):
+            m = re.match(r"epitope_(.*)_hotspots([A-Za-z0-9]*)\.json$", f.name)
+            if m:
+                epi = m.group(1).replace("_", " ")
+                var = m.group(2) or "A"
+                try:
+                    keys = json.loads(f.read_text())
+                    epitopes.setdefault(epi, {})[var] = keys
+                except json.JSONDecodeError:
+                    continue
+        
+        epi_names = sorted(epitopes.keys())
+        for j, epi_name in enumerate(epi_names):
+            color = palette[(i + j) % len(palette)]
+            sanitized_epi = _sanitize(epi_name)
+            
+            for var, keys in sorted(epitopes[epi_name].items()):
+                if not keys: continue
+                sel_expr = _keys_to_sel(pdb_id, keys)
+                if not sel_expr: continue
+                
+                sel_name = f"hs_{pdb_id}_{sanitized_epi}_{var}"
+                pml.append(f"select {sel_name}, {sel_expr}")
+                pml.append(f"show spheres, {sel_name}")
+                pml.append(f"color {color}, {sel_name}")
+                pml.append(f"group {pdb_id}_epitopes, {sel_name}")
+        
+        pml.append(f"group {pdb_id}, {pdb_id} {pdb_id}_epitopes")
+        pml.append("")
+    
+    pml.append("zoom")
+    pml_path.write_text("\n".join(pml))
+
+    # --- 3. Print SCP command for the user ---
+    print(f"[pymol_utils] Batch visualization bundle created at: {bundle_dir}")
+    try:
+        import socket
+        host = socket.gethostname() or os.uname()[1]
+    except Exception:
+        host = os.uname()[1] if hasattr(os, 'uname') else ''
+    
+    user = os.getenv('USER', '')
+    port = os.getenv('RFA_SCP_PORT', '6000') # Use existing env var
+    
+    if user and host:
+        print(
+            f"[pymol_utils] To copy this bundle to your local machine, run:\n\n"
+            f"  scp -r -P {port} {user}@{host}:{bundle_dir} ~/Downloads/\n\n"
+            f"(Modify the destination path as needed. Once downloaded, open PyMOL and run the 'visualize_all_targets.pml' script inside the folder.)"
+        )
+    
+    return bundle_dir
+

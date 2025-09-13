@@ -1,0 +1,10 @@
+rank	uniprot	gene	protein_name	subunit_name	organism	chosen_pdb	resolution_A	biotinylated	pdb_vendor_coverage	antigen_catalog	antigen_url
+1	Q15116	PDCD1	Programmed cell death protein 1	Programmed cell death protein 1	Homo sapiens	5WT9	2.40	True	1.000	10377-H41H-B	https://www.sinobiological.com/recombinant-proteins/human-pd-1-10377-h41h-b
+2	P04626	ERBB2	Receptor tyrosine-protein kinase erbB-2	Receptor tyrosine-protein kinase erbB-2	Homo sapiens	6BGT	2.70	True	1.000	10004-H27H-B	https://www.sinobiological.com/recombinant-proteins/human-her2-erbb2-10004-h27h-b
+3	P01375	TNF	Tumor necrosis factor	Tumor necrosis factor	Homo sapiens	5M2J	1.90	True	1.000	10602-H49H-B	https://www.sinobiological.com/recombinant-proteins/human-tnf-alpha-10602-h49h-b
+4	P11836	MS4A1	B-lymphocyte antigen CD20	B-lymphocyte antigen CD20	Homo sapiens	6Y90	3.69	True	1.000	11007-H34E-B	https://www.sinobiological.com/recombinant-proteins/human-cd20-11007-h34e-b
+5	P08887	IL6R	Interleukin-6 receptor subunit alpha	Interleukin-6 receptor subunit alpha	Homo sapiens	8QY5	3.10	True	1.000	10398-H35H-B	https://www.sinobiological.com/recombinant-proteins/human-il-6r-10398-h35h-b
+6	Q16552	IL17A	Interleukin-17A	Interleukin-17A	Homo sapiens	5HI4	1.80	True	1.000	12047-H44H-B	https://www.sinobiological.com/recombinant-proteins/human-il17-12047-h44h-b
+7	P00533	EGFR	Epidermal growth factor receptor	Epidermal growth factor receptor	Homo sapiens	5XWD	2.89	True	0.997	10001-H27H-B	https://www.sinobiological.com/recombinant-proteins/human-egfr-10001-h27h-b
+8	Q9NZQ7	CD274	Programmed cell death 1 ligand 1	Programmed cell death 1 ligand 1	Homo sapiens	7XAE	3.44	True	0.996	10084-H02H-B	https://www.sinobiological.com/recombinant-proteins/human-pd-l1-10084-h02h-b
+9	P16410	CTLA4	Cytotoxic T-lymphocyte protein 4	Cytotoxic T-lymphocyte protein 4	Homo sapiens	5GGV	2.00	True	0.778	11159-H08H-B	https://www.sinobiological.com/recombinant-proteins/human-ctla-4-11159-h08h-b
