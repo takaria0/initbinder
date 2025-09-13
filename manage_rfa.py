@@ -34,6 +34,10 @@ python manage_rfa.py init-target 5WT9 \
 python manage_rfa.py init-target 6BGT \
     --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-her2-erbb2-10004-h27h-b"
 
+7M3Z, https://www.sinobiological.com/recombinant-proteins/human-tim-3-10390-h08h-b
+python manage_rfa.py init-target 7M3Z \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-tim-3-10390-h08h-b"
+
 2) Decide epitope scope with LLM (updates target.yaml)
 python manage_rfa.py decide-scope 8SK7
 python manage_rfa.py decide-scope 4DOH
