@@ -131,28 +131,39 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     """
     Debug-mode prep: keep raw numbering, compute SASA, write masks.
     Metadata generation is delegated to utils.build_epitope_metadata.
+
+    追加:
+      - 各エピトープの露出判定を実施（1残基でも露出→ True）
+      - target.yaml の各エピトープ項目へ
+          surface_exposed: true/false
+          debug:
+            exposed_count / declared_count / exposed_fraction / sasa_cutoff_used
+        を追記
+      - 1つでも False があれば top-level に needs_epitope_redesign: true を付与
     """
     print(f"--- Preparing Target (No-Fixer Debug Mode): {pdb_id.upper()} ---")
 
     # --- I/O & config ---
-    tdir = ROOT / "targets" / pdb_id.upper()             # ← 既存のROOTを想定
+    tdir = ROOT / "targets" / pdb_id.upper()
     cfg_path = tdir / "target.yaml"
     raw_pdb_path = tdir / "raw" / f"{pdb_id}.pdb"
 
     if not cfg_path.exists(): raise FileNotFoundError(cfg_path)
     if not raw_pdb_path.exists(): raise FileNotFoundError(raw_pdb_path)
 
-    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
     target_chains = cfg.get("chains", [])
     if not target_chains:
         raise ValueError("[prep_target] target.yaml must include non-empty 'chains'.")
-    
+
+    # allow YAML override
     sasa_cutoff = float(cfg.get("sasa_cutoff", sasa_cutoff))
     if sasa_cutoff <= 0.0:
         raise ValueError(f"[prep_target] Invalid SASA cutoff: {sasa_cutoff}. Must be positive.")
     print(f"[info] Using SASA cutoff: {sasa_cutoff}")
     if not isinstance(target_chains, list) or not all(isinstance(c, str) for c in target_chains):
         raise ValueError("[prep_target] 'chains' in target.yaml must be a list of strings.")
+
     prep_dir = tdir / "prep"
     prep_dir.mkdir(exist_ok=True)
 
@@ -160,7 +171,12 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("raw", str(raw_pdb_path))
     io = PDBIO(); io.set_structure(structure)
-    selector = KeepChains(target_chains)
+
+    class _KeepChains(Select):
+        def __init__(self, chains): self.chains=set(chains)
+        def accept_chain(self, chain): return chain.id in self.chains
+
+    selector = _KeepChains(target_chains)
     selected_pdb_path = prep_dir / "prepared.pdb"
     io.save(str(selected_pdb_path), selector)
     print(f"[ok] Selected chains {target_chains} from raw PDB -> {selected_pdb_path.name}")
@@ -222,6 +238,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     struct = freesasa.Structure(str(selected_pdb_path))
     result = freesasa.calc(struct)
 
+    from collections import defaultdict
     res_sasa = defaultdict(float)
     chain_labels = set()
     for i in range(struct.nAtoms()):
@@ -248,14 +265,17 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     # --- 3) Build masks & collect metadata entries ---
     any_empty = []
     epi_entries = []
+    exposure_info = {}  # surface_exposed 判定集計
 
-    for epi in cfg.get("epitopes", []):
+    for epi in (cfg.get("epitopes", []) or []):
+        if not isinstance(epi, dict) or "name" not in epi:
+            continue
         name = epi["name"]
         name_sanitized = name.replace(" ","_").replace("/", "_")
         declared_keys = []
 
         # Collect declared residue keys
-        for span in epi["residues"]:
+        for span in epi.get("residues", []):
             ch, rng = span.split(":")
             a, b = rng.split("-")
             a_i, b_i = int(a), int(b)
@@ -265,9 +285,9 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
         # --- Per-epitope SASA auto-relax: try current cutoff → 8.0 → 6.0 ---
         tried_cutoffs = [sasa_cutoff]
-        # Only add lower (more permissive) values that are different from current
         for c in (8.0, 6.0):
-            if c < sasa_cutoff - 1e-6:  # relax only
+            # relax only（より小さい閾値で露出扱いを広げる）
+            if c < sasa_cutoff - 1e-6:
                 print(f"[debug] Epitope '{name}': relaxing SASA {sasa_cutoff}→{c}")
                 tried_cutoffs.append(c)
 
@@ -280,8 +300,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
                 final_cutoff = cut
                 break
 
-
-        # Write mask JSON (keep legacy filename)
+        # マスク JSON（レガシー互換名）
         mask_filename = f"epitope_{name_sanitized}.json"
         (prep_dir / mask_filename).write_text(json.dumps(sorted(mask), indent=2))
         print(f"[ok] Epitope '{name}': declared={len(declared_keys)}, "
@@ -295,7 +314,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
         # derive glyco keys in declared region (returns motif triplets; flatten to keys)
         ng_hits = find_nglyc_motifs_in_declared(declared_keys, chain_seq, chain_index_map, resname_lookup)
-        ng_keys = {h["asn_key"] for h in ng_hits} if ng_hits else set()
+        ng_keys = {h["asn_key"] for h in (ng_hits or [])}
 
         # pick hotspots with policy defaults or YAML overrides
         policy = (cfg.get("hotspot_policy") or {})
@@ -352,10 +371,21 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
             top_k=15,
         )
         epi_meta["hotspots"] = hotspots
-        # keep a note that auto-relax happened (if applicable)
         if abs(epi_cutoff - sasa_cutoff) > 1e-6:
             epi_meta["sasa_cutoff_relaxed_from"] = sasa_cutoff
         epi_entries.append(epi_meta)
+
+        # --- surface_exposed 判定を集計（1残基でも露出していれば True） ---
+        declared_cnt = len(set(declared_keys))
+        exposed_cnt   = len(mask)
+        frac          = (exposed_cnt / declared_cnt) if declared_cnt > 0 else 0.0
+        exposure_info[name] = {
+            "surface_exposed": exposed_cnt > 0,
+            "exposed_count": exposed_cnt,
+            "declared_count": declared_cnt,
+            "exposed_fraction": round(frac, 3),
+            "sasa_cutoff_used": float(epi_cutoff),
+        }
 
     # --- 4) メタドキュメント保存（空でも書いてから例外） ---
     meta_doc = build_metadata_doc(pdb_id, target_chains, sasa_cutoff, epi_entries, version=2)
@@ -370,18 +400,45 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
     print(f"[ok] Wrote rich metadata for {len(epi_entries)} epitopes -> {meta_path.name}")
     print("[done] prep-target (no-fixer) complete.")
-    
-    # ==== 追加行 ====
+
+    # --- target.yaml に surface_exposed / debug / needs_epitope_redesign を反映 ---
+    try:
+        cfg_latest = yaml.safe_load(cfg_path.read_text()) or {}
+        eps = (cfg_latest.get("epitopes", []) or [])
+        name_to_idx = {e.get("name"): i for i, e in enumerate(eps) if isinstance(e, dict) and e.get("name")}
+
+        for name, rec in exposure_info.items():
+            if name in name_to_idx:
+                e = eps[name_to_idx[name]]
+            else:
+                e = {"name": name}
+                eps.append(e)
+            e["surface_exposed"] = bool(rec["surface_exposed"])
+            dbg = e.get("debug", {})
+            dbg.update({
+                "exposed_count": int(rec["exposed_count"]),
+                "declared_count": int(rec["declared_count"]),
+                "exposed_fraction": float(rec["exposed_fraction"]),
+                "sasa_cutoff_used": float(rec["sasa_cutoff_used"]),
+            })
+            e["debug"] = dbg
+
+        cfg_latest["epitopes"] = eps
+        cfg_latest["needs_epitope_redesign"] = any(not r["surface_exposed"] for r in exposure_info.values())
+
+        cfg_path.write_text(yaml.safe_dump(cfg_latest, sort_keys=False))
+        print(f"[ok] target.yaml updated: surface_exposed for {len(exposure_info)} epitopes "
+              f"(needs_epitope_redesign={cfg_latest['needs_epitope_redesign']})")
+        if cfg_latest["needs_epitope_redesign"]:
+            print("[warn] Some epitopes are not surface-exposed. Consider reselecting epitopes.")
+    except Exception as e:
+        print(f"[warn] Failed to write surface_exposed to target.yaml: {e}")
+
+    # ==== 既存の提案出力はそのまま ====
     print_arm_suggestions(pdb_id)
     suggest_pipeline_command(pdb_id)
 
-    # --- Hotspot PyMOL bundle export and scp suggestion ---
-    # Export a PyMOL visualization bundle for the detected hotspots.  The
-    # bundle contains the prepared PDB and a PyMOL script with relative
-    # paths.  We also print an scp command that the user can run from
-    # their local machine to retrieve the bundle from this HPC node.  The
-    # scp port defaults to 22 but can be overridden by setting
-    # RFA_SCP_PORT in the environment (e.g. 6000 for the hpc3 cluster).
+    # --- Hotspot PyMOL bundle export and scp suggestion (既存のまま) ---
     try:
         from scripts.pymol_utils import export_hotspot_bundle  # type: ignore
         bdir = export_hotspot_bundle(pdb_id)

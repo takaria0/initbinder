@@ -49,8 +49,15 @@ def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
 
     return mapping
 
-def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | None = None, antigen_url: str | None = None):
-    """Downloads PDB data and creates the initial directory structure."""
+def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | None = None, antigen_url: str = ""):
+    """Downloads PDB data and creates the initial directory structure.
+
+    Required:
+      - antigen_url: vendor product page (currently tuned for Sino Biological)
+    """
+    if not antigen_url or not isinstance(antigen_url, str):
+        raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
+
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     tdir = ROOT/"targets"/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
@@ -88,31 +95,89 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     yml_path = tdir/"target.yaml"
     if not yml_path.exists():
         skel = {
-            "id": pdb_id.upper(), "target_name": "", "assembly_id": "1", "chains": [],
-            "epitopes": [], "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}}
+            "id": pdb_id.upper(),
+            "target_name": target_name or "",
+            "assembly_id": "1",
+            "chains": [chain_id] if chain_id else [],
+            "target_chains": [],  # added (will be populated below)
+            "antigen_catalog_url": antigen_url,  # added
+            "sequences": {                      # added (debug info)
+                "pdb": {},
+                "accession": {"id": "", "aa": ""},
+            },
+            "epitopes": [],
+            "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}},
         }
-        if chain_id: skel["chains"] = [chain_id]
-        if target_name: skel["target_name"] = target_name
         yml_path.write_text(yaml.safe_dump(skel, sort_keys=False))
         print(f"[ok] Wrote skeleton to {yml_path}")
-            
-    if antigen_url:
-        if "sinobiological.com" in antigen_url:
-            verification_result = _verify_antigen_compatibility(pdb_id, antigen_url, tdir)
-            if verification_result and yml_path.exists():
-                start, end, chosen_chain = verification_result
-                with yml_path.open('r') as f:
-                    config = yaml.safe_load(f)
-                
-                config['allowed_epitope_range'] = f"{start}-{end}"
-                if not config.get('chains'): # Only update chains if not already set
-                    config['chains'] = [chosen_chain]
-                
-                with yml_path.open('w') as f:
-                    yaml.safe_dump(config, f, sort_keys=False)
-                print(f"[ok] Updated {yml_path.name} with chain '{chosen_chain}' and allowed_epitope_range: {start}-{end}")
+
+    # Load current config
+    with yml_path.open('r') as f:
+        config = yaml.safe_load(f) or {}
+
+    # Always set/refresh antigen URL
+    config["antigen_catalog_url"] = antigen_url
+
+    # Gather PDB chain sequences (debug)
+    pdb_sequences = {}
+    if raw_pdb.exists():
+        pdb_sequences = _get_pdb_chain_sequences(raw_pdb)
+        if pdb_sequences:
+            config.setdefault("sequences", {})
+            config["sequences"]["pdb"] = pdb_sequences
+            print(f"[ok] Extracted PDB AA sequences for {len(pdb_sequences)} chains.")
         else:
-            print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
+            print("[warn] No polymer sequences found in PDB file.")
+    else:
+        print(f"[warn] PDB file missing at {raw_pdb}")
+
+    # Vendor-specific verification (Sino Biological)
+    chosen_chain = None
+    accession_id, accession_seq = "", ""
+    allowed_range = None
+
+    if "sinobiological.com" in antigen_url:
+        verification_result = _verify_antigen_compatibility(pdb_id, antigen_url, tdir)
+        # Backward compatibility: handle 3-tuple (old) or 5-tuple (new)
+        if verification_result:
+            if len(verification_result) == 3:
+                start, end, chosen_chain = verification_result
+            else:
+                start, end, chosen_chain, accession_id, accession_seq = verification_result
+            allowed_range = (start, end)
+            config["allowed_epitope_range"] = f"{start}-{end}"
+            print(f"[ok] Verified vendor overlap {start}-{end} on chain '{chosen_chain}'")
+    else:
+        print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
+
+    # Sequences.accession (debug)
+    config.setdefault("sequences", {})
+    config["sequences"].setdefault("accession", {"id": "", "aa": ""})
+    if accession_id:
+        config["sequences"]["accession"]["id"] = accession_id
+    if accession_seq:
+        config["sequences"]["accession"]["aa"] = accession_seq
+
+    # Chains / target_chains logic
+    # - keep existing 'chains' if user provided; otherwise, adopt verified chain if available
+    if not config.get("chains"):
+        if chosen_chain:
+            config["chains"] = [chosen_chain]
+    # - ensure 'target_chains' exists and mirrors best knowledge
+    if config.get("chains"):
+        config["target_chains"] = list(config["chains"])
+    elif chosen_chain:
+        config["target_chains"] = [chosen_chain]
+    elif pdb_sequences:
+        config["target_chains"] = list(pdb_sequences.keys())
+    else:
+        config.setdefault("target_chains", [])
+
+    # Save updated YAML
+    with yml_path.open('w') as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+    print(f"[ok] Updated {yml_path.name} with antigen_catalog_url, sequences.*, and target_chains.")
+
 
 def _get_ncbi_sequence(accession: str) -> str:
     """Fetches a protein sequence from NCBI given a RefSeq accession."""
@@ -147,9 +212,13 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
     return sequences
 
 def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
+    """
+    Returns (intersection_start, intersection_end, target_chain_id, accession, accession_full_seq)
+    (Older callers expecting a 3-tuple are handled in init_target.)
+    """
     print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
     
-    # 1. Fetch and parse Sino Biological page
+    # 1. Parse Sino page (get accession + vendor residue range)
     print(f"[1/5] Parsing vendor page with headless browser: {antigen_url}")
     try:
         with sync_playwright() as pw:
@@ -158,7 +227,6 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
             page.goto(antigen_url, wait_until="domcontentloaded", timeout=30000)
             html_content = page.content()
             browser.close()
-        
         soup = BeautifulSoup(html_content, "lxml")
         pc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Protein Construction\s*'))
         if not pc_header: raise ValueError("Could not find 'Protein Construction' section.")
@@ -185,7 +253,7 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
         print(f"[fail] Could not fetch NCBI sequence: {e}")
         return None
 
-    # 3. Get PDB sequence and select best chain
+    # 3. PDB chain sequences & choose best chain
     print("[3/5] Extracting sequences and selecting best matching chain...")
     raw_pdb = tdir / "raw" / f"{pdb_id.upper()}.pdb"
     if not raw_pdb.exists():
@@ -201,13 +269,14 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
     if yml_path.exists():
         with yml_path.open() as f:
             config = yaml.safe_load(f)
-            chains = config.get("chains", [])
+            chains = (config or {}).get("chains", [])
             print(f"[info] User-specified chains in target.yaml: {chains}")
             print(f"[debug] target.yaml path: {yml_path.resolve()}")
             print(f"[debug] available PDB chains: {list(pdb_sequences.keys())}")
-            if chains: 
+            if chains:
                 user_chain_id = chains[0]
 
+    import difflib
     best_match = None
     if user_chain_id and user_chain_id in pdb_sequences:
         print(f"[info] Analyzing user-specified target chain: '{user_chain_id}'")
@@ -219,44 +288,42 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
     else:
         print("[info] No target chain specified or found. Auto-selecting best match...")
         all_matches = []
-        for chain_id, chain_seq in pdb_sequences.items():
-            if not chain_seq: continue
-            s = difflib.SequenceMatcher(a=full_ncbi_seq, b=chain_seq, autojunk=False)
-            match = s.find_longest_match(0, len(full_ncbi_seq), 0, len(chain_seq))
-            identity = match.size / len(chain_seq) if len(chain_seq) > 0 else 0
-            all_matches.append({'chain_id': chain_id, 'identity': identity, 'match_obj': match})
-        
+        for cid, cseq in pdb_sequences.items():
+            if not cseq: continue
+            s = difflib.SequenceMatcher(a=full_ncbi_seq, b=cseq, autojunk=False)
+            m = s.find_longest_match(0, len(full_ncbi_seq), 0, len(cseq))
+            ident = m.size / len(cseq) if len(cseq) > 0 else 0
+            all_matches.append({'chain_id': cid, 'identity': ident, 'match_obj': m})
         if not all_matches:
             print("[fail] Could not find any suitable chain to analyze.")
             return None
-        
         best_match = max(all_matches, key=lambda x: x['identity'])
         print(f"[ok] Auto-selected chain '{best_match['chain_id']}' with highest identity ({best_match['identity']:.2%}).")
 
     target_chain_id = best_match['chain_id']
     match = best_match['match_obj']
-    
-    # 4. Process alignment of the chosen chain
+
+    # 4. Alignment window on the NCBI seq (1-based)
     print("[4/5] Analyzing alignment of the selected chain...")
     identity = best_match['identity']
     u_start, u_end = match.a + 1, match.a + match.size
     print(f"[info] PDB chain '{target_chain_id}' aligns to NCBI reference at residues {u_start}-{u_end} with {identity:.2%} identity.")
 
-    # 5. Check overlap and report
+    # 5. Overlap with vendor construct
     print("[5/5] Checking overlap between vendor product and PDB structure...")
     intersection_start = max(u_start, v_start)
     intersection_end = min(u_end, v_end)
     intersection_len = max(0, intersection_end - intersection_start + 1)
-    
     vendor_len = v_end - v_start + 1
     pdb_coverage_of_vendor = intersection_len / vendor_len if vendor_len > 0 else 0
 
     print("\n--- Verification Summary ---")
-    print(f"  - Selected PDB Chain:             '{target_chain_id}'")
-    print(f"  - PDB Chain Mapped Range:         {u_start}-{u_end} (Identity: {identity:.2%})")
+    print(f"  - Selected PDB Chain:               '{target_chain_id}'")
+    print(f"  - PDB Chain Mapped Range:           {u_start}-{u_end} (Identity: {identity:.2%})")
     print(f"  - Vendor Product Canonical Range:   {v_start}-{v_end}")
-    print(f"  - Vendor Product Accession:        {accession}")
+    print(f"  - Vendor Product Accession:         {accession}")
     print(f"  - Overlap (Intersection):           {intersection_len} residues from {intersection_start} to {intersection_end}")
     print(f"  - PDB Coverage of Vendor Product:   {pdb_coverage_of_vendor:.2%}")
-    
-    return intersection_start, intersection_end, target_chain_id
+
+    # NEW: return accession + its full AA sequence for YAML debug
+    return intersection_start, intersection_end, target_chain_id, accession, full_ncbi_seq

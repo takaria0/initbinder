@@ -24,10 +24,22 @@ python manage_rfa.py target-generation \
 
 1) Initialize a target directory (also writes a skeleton target.yaml if missing)
 python manage_rfa.py init-target 8SK7
+
 # Example with verification:
+python manage_rfa.py init-target 6M17 \
+    --antigen_url "https://www.sinobiological.com/recombinant-proteins/2019-ncov-cov-spike-40592-v08b-b"
+
+python manage_rfa.py decide-scope 6M17
+
+python manage_rfa.py prep-target 6M17 --sasa_cutoff 10.0
+
+
 python manage_rfa.py init-target 7FJD \
-    --chain e --target_name "T-cell surface glycoprotein CD3 epsilon chain" \
     --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
+
+python manage_rfa.py decide-scope 7FJD
+
+python manage_rfa.py prep-target 7FJD --sasa_cutoff 10.0
 
 python manage_rfa.py init-target 7FJD \
     --antigen_url "https://www.sinobiological.com/recombinant-proteins/human-cd3-epsilon-cd3e-10977-h08s-b"
