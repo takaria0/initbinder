@@ -95,7 +95,11 @@ def _flags_from_tags(tags: List[str]) -> Dict[str, bool]:
 
 class BaseVendorConnector:
     def __init__(self, *, mode: str = "headless", timeout: float = 25.0, throttle_s: float = 1.2):
-        assert mode in {"headless", "xhr"}
+        # accepted backends:
+        #   - 'interactive' => Playwright visible window
+        #   - 'headless'    => Playwright headless (no window; good for scale)
+        #   - 'xhr'         => static HTTP fetch + HTML parse (fallback to headless if JS required)
+        assert mode in {"interactive", "headless", "xhr"}
         self.mode = mode
         self.timeout = timeout
         self.ua = UserAgent()
@@ -136,9 +140,8 @@ class SinoBioConnector(BaseVendorConnector):
     # https://www.sinobiological.com/search/by-category?keywords=PD1&categoryCode=1&searchType=1
     SEARCH_URL_TPL = BASE + "/search/by-category?keywords={kw}&categoryCode=1&searchType=1"
 
-    # --- VISIBLE (Playwright, non-headless) backend
-    def _visible_impl(
-        self, query: str, species_preference: Optional[Iterable[str]], limit: int
+    def _browser_impl(
+        self, query: str, species_preference: Optional[Iterable[str]], limit: int, *, headless: bool
     ) -> List[Dict[str, Any]]:
         try:
             from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -150,16 +153,15 @@ class SinoBioConnector(BaseVendorConnector):
 
         results: List[AntigenRecord] = []
         species_pref = {s.lower() for s in (species_preference or [])}
-
         debug_dump = bool(getattr(self, "debug_dump", False))
-        slow_mo = int(getattr(self, "slow_mo", 120))  # slower = easier to see
+        # slow motion only when interactive; speed up headless
+        slow_mo = int(getattr(self, "slow_mo", 120 if not headless else 0))
 
         from urllib.parse import quote
 
         html = ""
         with sync_playwright() as pw:
-            # visible browser
-            browser = pw.chromium.launch(headless=False, slow_mo=slow_mo)
+            browser = pw.chromium.launch(headless=headless, slow_mo=slow_mo)
             ua = getattr(self, "ua", None)
             ua_str = getattr(ua, "chrome", None) or (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -173,48 +175,40 @@ class SinoBioConnector(BaseVendorConnector):
                 viewport={"width": 1366, "height": 900},
                 java_script_enabled=True,
             )
-            # best-effort stealth for navigator.webdriver
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-
             page = context.new_page()
 
             try:
                 search_url = self.SEARCH_URL_TPL.format(kw=quote(query))
-                # Use a two-phase wait; some analytics keep the network busy forever
                 page.goto(search_url, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
-                    pass  # not critical
+                    pass
 
-                # Wait for result containers to exist
                 page.wait_for_selector(
                     "#search_result_cntr, #search_result_body",
                     timeout=int(self.timeout * 1000),
                 )
-
-                # If there's a global spinner, wait for it to disappear (best-effort)
                 for sel in ("#mask_loading", ".loading", ".spinner", ".lds-ellipsis"):
                     try:
                         page.wait_for_selector(sel, state="hidden", timeout=4000)
                     except Exception:
                         pass
 
-                # Wait until either rows exist OR a no-results text shows up
                 page.wait_for_function(
                     """
                     () => {
-                      const hasRows = document.querySelectorAll('#search_result_cntr ul.result-item.body').length > 0
-                                   || document.querySelectorAll('#search_result_cntr .result-item.body').length > 0;
-                      const bodyTxt = (document.querySelector('#search_result_body')?.innerText || '');
-                      const noRes = /no results|not\\s*found|0\\s*results/i.test(bodyTxt);
-                      return hasRows || noRes;
+                    const hasRows = document.querySelectorAll('#search_result_cntr ul.result-item.body').length > 0
+                                || document.querySelectorAll('#search_result_cntr .result-item.body').length > 0;
+                    const bodyTxt = (document.querySelector('#search_result_body')?.innerText || '');
+                    const noRes = /no results|not\\s*found|0\\s*results/i.test(bodyTxt);
+                    return hasRows || noRes;
                     }
                     """,
                     timeout=int(self.timeout * 1000),
                 )
 
-                # Scroll a bit to encourage lazy rendering; stop when we have enough
                 for _ in range(10):
                     rows_now = len(
                         page.query_selector_all("#search_result_cntr ul.result-item.body, #search_result_cntr .result-item.body")
@@ -227,7 +221,6 @@ class SinoBioConnector(BaseVendorConnector):
                 html = page.content()
 
             except PWTimeout:
-                # Capture what we got for debugging
                 html = page.content()
                 if debug_dump:
                     try:
@@ -237,22 +230,23 @@ class SinoBioConnector(BaseVendorConnector):
                         pass
                 raise
             finally:
-                # keep the window open a touch after rendering for human inspection
+                # keep a tiny pause for interactive viewing; no-op in headless
                 try:
-                    page.wait_for_timeout(600)  # brief pause
+                    if not headless:
+                        page.wait_for_timeout(600)
                 except Exception:
                     pass
                 context.close()
                 browser.close()
 
-        # ---------- Parse rendered HTML (protein rows) ----------
+        # --- parse (unchanged from your original _visible_impl) ---
         soup = BeautifulSoup(html, "lxml")
         cards = soup.select("#search_result_cntr ul.result-item.body[data-cate='protein']")
         if not cards:
-            # fallback: some builds omit data-cate; filter by columns that proteins have
             candidates = soup.select("#search_result_cntr ul.result-item.body, #search_result_cntr .result-item.body")
             cards = [ul for ul in candidates if ul.select_one("li[data-col='species']") and ul.select_one("li[data-col='expressionhost']")]
 
+        parsed: List[Dict[str, Any]] = []
         for ul in cards[:limit]:
             try:
                 sku_a = ul.select_one("li[data-col='catalogue'] a")
@@ -263,9 +257,7 @@ class SinoBioConnector(BaseVendorConnector):
 
                 desc_li = ul.select_one("li[data-col='description']")
                 protein_name = _norm_whitespace(desc_li.get_text()) if desc_li else None
-                # --- MODIFIED: Check full description text for biotin ---
                 description_full_text = (desc_li.get_text(" ", strip=True) if desc_li else "").lower()
-
 
                 sp_li = ul.select_one("li[data-col='species']")
                 species_txt = _norm_whitespace(sp_li.get_text()) if sp_li else ""
@@ -277,7 +269,6 @@ class SinoBioConnector(BaseVendorConnector):
                 seq_li = ul.select_one("li[data-col='sequence']")
                 sequence = _norm_whitespace(seq_li.get_text()) if seq_li else None
 
-                # extract tag semantic keys from data-fixpos (e.g., "tagLookups|c-his|Protein_Tag")
                 raw_tag_keys = []
                 for span in ul.select("li[data-col='tag'] span.lbl"):
                     key = span.get("data-fixpos", "")
@@ -285,22 +276,18 @@ class SinoBioConnector(BaseVendorConnector):
                         parts = key.split("|")
                         if len(parts) >= 2:
                             raw_tag_keys.append(parts[1])
-                
-                # --- MODIFIED: Add biotin to tags if found in description ---
                 if "biotin" in description_full_text:
                     raw_tag_keys.append("biotin")
 
                 tags = _map_tags(raw_tag_keys)
                 flags = _flags_from_tags(tags)
 
-                # heuristic gene symbol from names like "Human PD-1/CD279 Protein"
                 gene_symbol = None
                 if protein_name:
                     m = re.search(r"\b([A-Z0-9]{2,7})(?:/|\b)", protein_name)
                     if m:
                         gene_symbol = m.group(1)
 
-                # in-Python species filter
                 if species_pref and species and not any(s.lower() in species_pref for s in species):
                     continue
 
@@ -316,11 +303,11 @@ class SinoBioConnector(BaseVendorConnector):
                     tags=tags,
                     **flags,
                 )
-                results.append(rec)
+                parsed.append(rec.to_row())
             except Exception:
                 continue
 
-        return [r.to_row() for r in results]
+        return parsed
 
     # --- XHR backend (kept as-is; will auto-upgrade to visible if JS rendering is required)
     @retry(wait=wait_exponential(multiplier=1.2, min=1, max=8), stop=stop_after_attempt(3))
@@ -335,10 +322,15 @@ class SinoBioConnector(BaseVendorConnector):
             html = r.text
 
         soup = BeautifulSoup(html, "lxml")
+        # if not soup.select("#search_result_cntr ul.result-item.body"):
+        #     # requires JS; switch to visible browser
+        #     return self._visible_impl(query, species_preference, limit)
+        # return self._parse_sino_rendered(soup, limit, species_preference)
         if not soup.select("#search_result_cntr ul.result-item.body"):
-            # requires JS; switch to visible browser
-            return self._visible_impl(query, species_preference, limit)
+            # requires JS; switch to headless browser (no window)
+            return self._browser_impl(query, species_preference, limit, headless=True)
         return self._parse_sino_rendered(soup, limit, species_preference)
+
 
     @staticmethod
     def _parse_sino_rendered(
@@ -408,6 +400,25 @@ class SinoBioConnector(BaseVendorConnector):
         return out
 
     # public
+    # def search_proteins(
+    #     self,
+    #     query: str,
+    #     *,
+    #     species_preference: Optional[Iterable[str]] = None,
+    #     limit: int = 60,
+    # ) -> List[Dict[str, Any]]:
+    #     """
+    #     For this vendor we default to **visible browser** so you can inspect behavior.
+    #     Even if self.mode == 'headless', we will still use the visible browser.
+    #     Use self.mode == 'xhr' for the lightweight parser (it auto-upgrades to visible if needed).
+    #     """
+    #     backend = (getattr(self, "mode", "") or "visible").lower()
+    #     if backend == "xhr":
+    #         return self._xhr_impl(query, species_preference, limit)
+    #     # Treat anything else (including 'headless') as visible browser:
+    #     return self._visible_impl(query, species_preference, limit)
+
+
     def search_proteins(
         self,
         query: str,
@@ -416,15 +427,19 @@ class SinoBioConnector(BaseVendorConnector):
         limit: int = 60,
     ) -> List[Dict[str, Any]]:
         """
-        For this vendor we default to **visible browser** so you can inspect behavior.
-        Even if self.mode == 'headless', we will still use the visible browser.
-        Use self.mode == 'xhr' for the lightweight parser (it auto-upgrades to visible if needed).
+        Backends:
+        - mode='xhr'         : static HTTP; auto-fallback to headless if JS needed
+        - mode='headless'    : Playwright headless (no visible window)
+        - mode='interactive' : Playwright with a visible window (debug)
         """
-        backend = (getattr(self, "mode", "") or "visible").lower()
+        backend = (getattr(self, "mode", "") or "headless").lower()
         if backend == "xhr":
             return self._xhr_impl(query, species_preference, limit)
-        # Treat anything else (including 'headless') as visible browser:
-        return self._visible_impl(query, species_preference, limit)
+        elif backend == "headless":
+            return self._browser_impl(query, species_preference, limit, headless=True)
+        else:
+            return self._browser_impl(query, species_preference, limit, headless=False)
+
 
 # ------------------------------
 # ACROBiosystems Connector (NEW)
@@ -816,7 +831,8 @@ def main():
     ap = argparse.ArgumentParser("Harvest purchasable antigen options from vendors")
     ap.add_argument("query", help="Protein/gene keyword, e.g., 'PD-1' or 'EGFR'.")
     ap.add_argument("--vendor", choices=["sino", "acro", "both"], default="acro")
-    ap.add_argument("--mode", choices=["headless", "xhr"], default="headless")
+    # ap.add_argument("--mode", choices=["headless", "xhr"], default="headless")
+    ap.add_argument("--mode", choices=["interactive", "headless", "xhr"], default="headless")
     ap.add_argument("--species", nargs="*", default=None)
     ap.add_argument("--limit", type=int, default=60)
     ap.add_argument("--out", help="Optional path to CSV output")

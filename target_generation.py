@@ -32,8 +32,8 @@ Usage (standalone):
       --max_targets 10 --species human --prefer_tags biotin
       
 #   high level targets:
-    python target_generation.py --instruction "top 100 proteins we should target for antibody therapeutics with high unmet medical need" \
-        --max_targets 100 --species human --prefer_tags biotin
+    python target_generation.py --instruction "top 200 proteins we should target for antibody therapeutics with high unmet medical need" \
+        --max_targets 200 --species human --prefer_tags biotin --no_browser_popup
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ import yaml
 
 # --- LLM Configuration (Google Gemini) ---
 USE_LLM = True
+BROWSER_HEADLESS = False
 try:
     from env import GOOGLE_API_KEY
     import google.generativeai as genai
@@ -266,7 +267,8 @@ def fetch_product_html(url: str, timeout: int = 45) -> Optional[str]:
         return str(out_path)
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch()
+            log_debug(f"[fetch] launching Playwright (headless={BROWSER_HEADLESS})")
+            browser = pw.chromium.launch(headless=BROWSER_HEADLESS)
             page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             html = page.content()
@@ -602,10 +604,11 @@ def fetch_vendor_antigens(query_term: str, species: str, limit: int = 40) -> Lis
         log_info("[error] SinoBioConnector is not available.")
         return []
     try:
-        sino = SinoBioConnector(mode="headless")
+        mode = "headless" if BROWSER_HEADLESS else "interactive"
+        sino = SinoBioConnector(mode=mode)
         results = sino.search_proteins(query_term, species_preference=[species.capitalize()], limit=limit)
         opts = [AntigenOption(vendor="Sino Biological", catalog=r.get("sku",""), species=r.get("species", species), url=r.get("url")) for r in results]
-        log_info(f"[info] Vendor search {query_term} ({species}) -> {len(opts)} candidates")
+        log_info(f"[info] Vendor search {query_term} ({species}) -> {len(opts)} candidates (browser_headless={BROWSER_HEADLESS})")
         return opts
     except Exception as e:
         log_info(f"[warn] Sino connector failed for '{query_term}': {e}")
@@ -957,6 +960,8 @@ def _slugify(text: str, maxlen: int = 32) -> str:
 
 def run_target_generation(args):
     require_biotin = "biotin" in (args.prefer_tags or "").lower()
+    global BROWSER_HEADLESS
+    BROWSER_HEADLESS = bool(getattr(args, "no_browser_popup", False))
     instruction_slug = _slugify(args.instruction, maxlen=32)
 
     log_info(textwrap.dedent(f"""
@@ -966,6 +971,7 @@ def run_target_generation(args):
     Max Targets: {args.max_targets}
     Prefer Tags: {args.prefer_tags}
     Require Biotinylated (primary list): {require_biotin}
+    Browser Headless Mode: {BROWSER_HEADLESS}
     Log file: {LOG_PATH}
     -------------------------------------------
     """).strip())
@@ -1004,5 +1010,7 @@ if __name__ == "__main__":
     ap.add_argument("--max_targets", type=int, default=10)
     ap.add_argument("--species", default="human")
     ap.add_argument("--prefer_tags", default="biotin")
+    ap.add_argument("--no_browser_popup", action="store_true",
+                    help="Run page fetches headless (no visible browser windows). Recommended for scale.")
     a = ap.parse_args()
     run_target_generation(a)
