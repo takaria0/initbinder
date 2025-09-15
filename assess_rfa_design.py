@@ -7,7 +7,9 @@ from jsonschema import validate
 # --- NEW: math + parsing helpers for RMSD (minimal deps) ---
 import math
 import numpy as np
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, Optional, Tuple, List, Dict
+
+
 
 def _kabsch(P: np.ndarray, Q: np.ndarray) -> Tuple[np.ndarray, float]:
     """
@@ -36,23 +38,27 @@ def _load_chain_ca_coords(struct_path: Path, chain_id: str) -> Tuple[List[int], 
     coords = []
     resseqs = []
 
-    # choose parser by extension
     ext = struct_path.suffix.lower()
-    if ext == ".cif" or ext == ".mmcif":
+    if ext in (".cif", ".mmcif"):
         parser = MMCIFParser(QUIET=True)
     else:
         from Bio.PDB import PDBParser
         parser = PDBParser(QUIET=True)
 
-    s = parser.get_structure("x", str(struct_path))
-    # model 0
+    print(f"[load_chain] file={struct_path} chain={chain_id} parser={'MMCIF' if ext in ('.cif','.mmcif') else 'PDB'}")
+    try:
+        s = parser.get_structure("x", str(struct_path))
+    except Exception as e:
+        print(f"[load_chain][error] failed to parse {struct_path}: {e}")
+        return [], np.zeros((0, 3), dtype=float)
+
     try:
         ch = s[0][chain_id]
     except KeyError:
+        print(f"[load_chain][miss] model0 has no chain '{chain_id}' in {struct_path}")
         return [], np.zeros((0, 3), dtype=float)
 
     for res in ch.get_residues():
-        # ignore hetero/water
         if res.id[0] != " ":
             continue
         resseq = res.id[1]
@@ -63,76 +69,373 @@ def _load_chain_ca_coords(struct_path: Path, chain_id: str) -> Tuple[List[int], 
         coords.append(a)
 
     if not coords:
+        print(f"[load_chain][empty] CA count=0 for {struct_path} chain={chain_id}")
         return [], np.zeros((0, 3), dtype=float)
 
-    # sort by residue number to ensure stable matching
     order = np.argsort(np.array(resseqs, dtype=int))
     resseqs_sorted = [int(resseqs[i]) for i in order]
     coords_sorted = np.vstack([coords[i] for i in order]).astype(float)
+    print(f"[load_chain][ok] file={struct_path} chain={chain_id} CA_count={len(coords_sorted)} "
+          f"resi_min={resseqs_sorted[0]} resi_max={resseqs_sorted[-1]}")
     return resseqs_sorted, coords_sorted
 
-def _match_by_resseq(A_keys: List[int], B_keys: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Given two sorted lists of residue numbers, return index arrays
-    selecting only the intersection (preserving order).
-    """
-    aset = set(A_keys); bset = set(B_keys)
-    common = sorted(aset.intersection(bset))
-    if not common:
-        return np.array([], dtype=int), np.array([], dtype=int)
-    a_idx = np.array([A_keys.index(k) for k in common], dtype=int)
-    b_idx = np.array([B_keys.index(k) for k in common], dtype=int)
-    return a_idx, b_idx
 
-def _ca_rmsd_after_alignment(p_coords: np.ndarray, q_coords: np.ndarray) -> float:
+def _load_multichain_ca_coords(struct_path: Path, chain_ids: List[str]) -> Tuple[List[Tuple[str, int]], np.ndarray]:
     """
-    Aligns p_coords onto q_coords (both Nx3) via Kabsch and returns RMSD.
+    Loads CA coordinates for multiple chains, returning a single list of keys and a single coordinate array.
+    Keys are tuples of (chain_id, resseq) to ensure uniqueness.
     """
-    if p_coords.shape[0] == 0 or q_coords.shape[0] == 0:
+    all_keys = []
+    all_coords = []
+    print(f"[load_multi] file={struct_path} chains={','.join(sorted(chain_ids))}")
+    for chain_id in sorted(chain_ids):
+        resseqs, coords = _load_chain_ca_coords(struct_path, chain_id)
+        print(f"[load_multi]   chain={chain_id} CA_count={coords.shape[0]}")
+        if coords.shape[0] > 0:
+            keys = [(chain_id, r) for r in resseqs]
+            all_keys.extend(keys)
+            all_coords.append(coords)
+
+    if not all_coords:
+        print(f"[load_multi][empty] no CA across given chains for {struct_path}")
+        return [], np.zeros((0, 3), dtype=float)
+
+    out = np.vstack(all_coords)
+    print(f"[load_multi][ok] file={struct_path} total_CA={out.shape[0]}")
+    return all_keys, out
+
+
+
+def _min_ca_distance(A: np.ndarray, B: np.ndarray) -> float:
+    if A.size == 0 or B.size == 0:
         return float("nan")
-    n = min(p_coords.shape[0], q_coords.shape[0])
-    P = p_coords[:n, :].astype(float)
-    Q = q_coords[:n, :].astype(float)
-    # center
-    Pc = P - P.mean(axis=0, keepdims=True)
-    Qc = Q - Q.mean(axis=0, keepdims=True)
-    _, rmsd = _kabsch(Pc, Qc)
-    return float(rmsd)
+    D = np.linalg.norm(A[:, None, :] - B[None, :, :], axis=2)
+    return float(D.min())
 
-def _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb: Path, af3_cif: Path, chain_id: str = "H") -> float:
+
+# --- NEW: sequence-driven helpers ---
+
+from Bio import pairwise2
+
+def _load_chain_seq_and_ca(struct_path: Path, chain_id: str) -> Tuple[str, List[int], np.ndarray]:
     """
-    Compute CA RMSD between RFdiffusion design (PDB) and AF3 prediction (CIF) for a single chain.
-    1) extract CA coords for the specified chain from both
-    2) match residues by resseq; if no overlap, fall back to trim-to-min length order
-    3) Kabsch-align and report RMSD (Å). Returns NaN on failure.
+    Load a chain's one-letter sequence (only residues that have CA), the sorted resseq list,
+    and the corresponding CA coordinate array (Nx3). Works for PDB or mmCIF.
+    Returns (seq, resseqs_sorted, coords_sorted).
+    """
+    from Bio.PDB import MMCIFParser, PDBParser
+    ext = struct_path.suffix.lower()
+    parser = MMCIFParser(QUIET=True) if ext in (".cif", ".mmcif") else PDBParser(QUIET=True)
+
+    try:
+        s = parser.get_structure("x", str(struct_path))
+        ch = s[0][str(chain_id)]
+    except Exception:
+        return "", [], np.zeros((0,3), dtype=float)
+
+    seq_letters, coords, resseqs = [], [], []
+    for res in ch.get_residues():
+        if res.id[0] != " ":  # skip hetero/water
+            continue
+        if "CA" not in res:
+            continue
+        aa3 = (res.get_resname() or "UNK").upper()
+        aa1 = AA3_TO_1.get(aa3, "X")
+        seq_letters.append(aa1)
+        coords.append(res["CA"].get_coord().astype(float))
+        resseqs.append(int(res.id[1]))
+
+    if not coords:
+        return "", [], np.zeros((0,3), dtype=float)
+
+    order = np.argsort(np.array(resseqs, dtype=int))
+    seq_sorted = "".join([seq_letters[i] for i in order])
+    resseqs_sorted = [int(resseqs[i]) for i in order]
+    coords_sorted = np.vstack([coords[i] for i in order]).astype(float)
+    return seq_sorted, resseqs_sorted, coords_sorted
+
+
+def _seq_align_map(seqA: str, seqB: str) -> Tuple[List[int], List[int], float]:
+    """
+    Global alignment (sequence→sequence) and return index maps where both sides are non-gaps.
+    Uses a simple substitution scheme robust to 'X'.
+    Returns (idxA, idxB, score).
+      idxA/B are 0-based indices into the *original* sequences.
+    """
+    if not seqA or not seqB:
+        return [], [], float("-inf")
+
+    # match=+2, mismatch=-1, gap_open=-2, gap_extend=-0.5
+    aln = pairwise2.align.globalms(seqA, seqB, 2, -1, -2, -0.5, one_alignment_only=True)
+    if not aln:
+        return [], [], float("-inf")
+    a_aln, b_aln, score, _, _ = aln[0]
+
+    idxA, idxB = [], []
+    iA = iB = 0
+    for a, b in zip(a_aln, b_aln):
+        if a != "-" and b != "-":
+            idxA.append(iA); idxB.append(iB)
+        if a != "-":
+            iA += 1
+        if b != "-":
+            iB += 1
+    return idxA, idxB, float(score)
+
+
+def _fit_transform_by_sequence(
+    ref_struct: Path,           # reference target (prepared)
+    mov_struct: Path,           # moving target (RFdiff/AF3)
+    target_chain_ids: List[str],
+    *,
+    allow_crosschain: bool = True,
+    min_pairs_per_chain: int = 10,
+    min_total_pairs: int = 25,
+    accept_rmsd: float = 4.0
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], float, int, Dict[str, Tuple[str, int, float]]]:
+    """
+    Build a rigid transform (R, t) that aligns mov_struct's *target* onto ref_struct's *target*,
+    driven purely by sequence alignment. Then we can apply the same transform to the binder.
+    - For each ref target chain in target_chain_ids:
+        (1) try the same chain ID in mov_struct; if empty and allow_crosschain=True,
+            scan all chains in mov_struct and pick the best sequence match (by alignment score).
+        (2) from the alignment, collect CA pairs (indices) to form correspondence points.
+    - Concatenate correspondences across chains and Kabsch-fit mov→ref.
+
+    Returns:
+      (R, mov_centroid, ref_centroid, rmsd, n_pairs, per_chain_map)
+      where per_chain_map[ch_ref] = (ch_mov, n_pairs_chain, score)
+    """
+    # Load all ref target chains
+    ref_ch_data = {}
+    for ch in target_chain_ids:
+        s, rs, xyz = _load_chain_seq_and_ca(ref_struct, ch)
+        ref_ch_data[ch] = (s, rs, xyz)
+
+    # Enumerate all chains in mov_struct
+    from Bio.PDB import MMCIFParser, PDBParser
+    ext = mov_struct.suffix.lower()
+    parser = MMCIFParser(QUIET=True) if ext in (".cif",".mmcif") else PDBParser(QUIET=True)
+    try:
+        s_mov = parser.get_structure("m", str(mov_struct))
+        mov_chain_ids = [str(ch.id) for ch in s_mov[0].get_chains()]
+    except Exception:
+        mov_chain_ids = []
+
+    mov_cache = {}
+    def get_mov_chain(chid: str):
+        if chid not in mov_cache:
+            mov_cache[chid] = _load_chain_seq_and_ca(mov_struct, chid)
+        return mov_cache[chid]
+
+    P_list, Q_list = [], []
+    per_chain_map: Dict[str, Tuple[str, int, float]] = {}
+
+    for ch_ref in target_chain_ids:
+        seqR, rkeys, rxyz = ref_ch_data.get(ch_ref, ("", [], np.zeros((0,3))))
+        if rxyz.shape[0] == 0 or not seqR:
+            continue
+
+        # Preferred: same chain id
+        best = None  # (ch_mov, idxR, idxM, n_pairs, score)
+        if ch_ref in mov_chain_ids:
+            seqM, mkeys, mxyz = get_mov_chain(ch_ref)
+            idxR, idxM, score = _seq_align_map(seqR, seqM)
+            if len(idxR) >= min_pairs_per_chain:
+                best = (ch_ref, idxR, idxM, len(idxR), score)
+
+        # Fallback: cross-chain search
+        if best is None and allow_crosschain:
+            for ch_mov in mov_chain_ids:
+                seqM, mkeys, mxyz = get_mov_chain(ch_mov)
+                if mxyz.shape[0] == 0 or not seqM:
+                    continue
+                idxR, idxM, score = _seq_align_map(seqR, seqM)
+                if len(idxR) >= (best[3] if best else 0):
+                    best = (ch_mov, idxR, idxM, len(idxR), score)
+
+        if best is None:
+            continue
+
+        ch_mov, idxR, idxM, n_pairs, score = best
+        # collect coordinates for this chain
+        _, _, mxyz = get_mov_chain(ch_mov)
+        if rxyz.shape[0] and mxyz.shape[0] and n_pairs >= min_pairs_per_chain:
+            P_list.append(mxyz[np.array(idxM)])  # moving
+            Q_list.append(rxyz[np.array(idxR)])  # reference
+            per_chain_map[ch_ref] = (ch_mov, n_pairs, float(score))
+
+    if not P_list:
+        return None, None, None, float("inf"), 0, per_chain_map
+
+    P = np.vstack(P_list).astype(float)
+    Q = np.vstack(Q_list).astype(float)
+    n_pairs = P.shape[0]
+    if n_pairs < min_total_pairs:
+        return None, None, None, float("inf"), n_pairs, per_chain_map
+
+    # Kabsch
+    Pc = P - P.mean(0, keepdims=True)
+    Qc = Q - Q.mean(0, keepdims=True)
+    H = Pc.T @ Qc
+    U,S,Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1,:] *= -1
+        R = Vt.T @ U.T
+    rms = float(np.sqrt(np.mean(np.sum(((Pc @ R) - Qc)**2, axis=1))))
+    if not np.isfinite(rms):
+        return None, None, None, float("inf"), n_pairs, per_chain_map
+
+    return R, P.mean(0), Q.mean(0), rms, n_pairs, per_chain_map
+
+# --- MODIFIED: pose RMSD computation now returns a dict of all metrics ---
+
+def _compute_pose_rmsd(
+    rfdiff_pdb: Path,
+    af3_cif: Path,
+    target_chain_ids: List[str],
+    binder_chain_id: str,
+    reference_target_pdb: Path | None = None,
+) -> Dict[str, float | str | int] | None:
+    """
+    Sequence-alignment-driven implementation. Returns a dictionary of metrics or None on failure.
+
+    1) Build rigid transforms that align each design's TARGET onto the prepared TARGET:
+       - RFdiff target → prepared target
+       - AF3    target → prepared target
+       (per-chain sequence alignment produces correspondence points for Kabsch)
+    2) Apply the same transforms to the BINDER coordinates.
+    3) Align binder-vs-binder by sequence to pick common residues to compare.
+    4) Report a dictionary containing all computed metrics.
     """
     try:
-        a_keys, a_xyz = _load_chain_ca_coords(rfdiff_pdb, chain_id)
-        b_keys, b_xyz = _load_chain_ca_coords(af3_cif, chain_id)
-        if a_xyz.shape[0] == 0 or b_xyz.shape[0] == 0:
-            return float("nan")
+        print(f"\n[pose] === Pose RMSD (sequence-driven) ===")
+        print(f"[pose] rfdiff_pdb={rfdiff_pdb}")
+        print(f"[pose] af3_cif   ={af3_cif}")
+        print(f"[pose] target_chains={','.join(target_chain_ids)} binder_chain={binder_chain_id}")
+        if reference_target_pdb:
+            print(f"[pose] reference_target_pdb={reference_target_pdb}")
 
-        # try residue-number intersection first
-        ai, bi = _match_by_resseq(a_keys, b_keys)
-        if ai.size >= 5:  # enough points for stable alignment
-            P = a_xyz[ai, :]
-            Q = b_xyz[bi, :]
-        else:
-            # fallback: strict order, trim to min length
-            n = min(a_xyz.shape[0], b_xyz.shape[0])
-            if n < 5:
-                return float("nan")
-            P = a_xyz[:n, :]
-            Q = b_xyz[:n, :]
+        if reference_target_pdb is None:
+            print("[pose][fail] reference_target_pdb is required")
+            return None
 
-        # align and RMSD
-        Pc = P - P.mean(axis=0, keepdims=True)
-        Qc = Q - Q.mean(axis=0, keepdims=True)
-        _, rmsd = _kabsch(Pc, Qc)
-        return float(rmsd)
+        # 0) Load prepared target (reference frame)
+        prep_tgt_keys, prep_tgt_xyz = _load_multichain_ca_coords(reference_target_pdb, target_chain_ids)
+        if prep_tgt_xyz.shape[0] < 10:
+            print("[pose][fail] prepared target has too few CA atoms")
+            return None
+
+        # 1) Build transforms by sequence alignment on target chains
+        R_rf, c_rf, c_prep_rf, rms_rf, n_rf, map_rf = _fit_transform_by_sequence(
+            reference_target_pdb, rfdiff_pdb, target_chain_ids,
+            allow_crosschain=True, min_pairs_per_chain=10, min_total_pairs=25, accept_rmsd=4.0
+        )
+        print(f"[pose] RFdiff target fit: pairs={n_rf} rmsd={rms_rf:.3f} Å map={map_rf}")
+
+        R_af, c_af, c_prep_af, rms_af, n_af, map_af = _fit_transform_by_sequence(
+            reference_target_pdb, af3_cif, target_chain_ids,
+            allow_crosschain=True, min_pairs_per_chain=10, min_total_pairs=25, accept_rmsd=4.0
+        )
+        print(f"[pose] AF3    target fit: pairs={n_af} rmsd={rms_af:.3f} Å map={map_af}")
+
+        if (R_rf is None) or (R_af is None):
+            print("[pose][fail] target fitting failed (insufficient correspondences).")
+            return None
+
+        # 2) Load binders and apply transforms to bring them into prepared frame
+        p_binder_seq, p_binder_keys, p_binder_xyz_raw = _load_chain_seq_and_ca(rfdiff_pdb, binder_chain_id)
+        if p_binder_xyz_raw.shape[0] < 5:
+            print("[pose][fail] RFdiff binder has too few CA atoms")
+            return None
+        p_binder_xyz = (p_binder_xyz_raw - c_rf) @ R_rf + c_prep_rf
+
+        # AF3 binder: if expected chain missing, pick best chain by sequence match to RF binder
+        q_binder_seq, q_binder_keys, q_binder_xyz_raw = _load_chain_seq_and_ca(af3_cif, binder_chain_id)
+        if q_binder_xyz_raw.shape[0] < 5 or not q_binder_seq:
+            # scan all chains to find best binder by sequence similarity
+            from Bio.PDB import MMCIFParser, PDBParser
+            ext = af3_cif.suffix.lower()
+            parser = MMCIFParser(QUIET=True) if ext in (".cif",".mmcif") else PDBParser(QUIET=True)
+            try:
+                s = parser.get_structure("a", str(af3_cif))
+                cand = []
+                for ch in s[0].get_chains():
+                    ch_id = str(ch.id)
+                    if ch_id in set(target_chain_ids):  # skip target chains
+                        continue
+                    s2, k2, x2 = _load_chain_seq_and_ca(af3_cif, ch_id)
+                    if not s2 or x2.shape[0] < 5:
+                        continue
+                    _, _, sc = _seq_align_map(p_binder_seq, s2)
+                    cand.append((sc, ch_id, s2, k2, x2))
+                if cand:
+                    cand.sort(key=lambda t: t[0], reverse=True)
+                    _, pick_id, q_binder_seq, q_binder_keys, q_binder_xyz_raw = cand[0]
+                    print(f"[pose] AF3 binder auto-picked by sequence: {pick_id}")
+            except Exception:
+                pass
+
+        if q_binder_xyz_raw.shape[0] < 5:
+            print("[pose][fail] AF3 binder has too few CA atoms")
+            return None
+        q_binder_xyz = (q_binder_xyz_raw - c_af) @ R_af + c_prep_af
+
+        print(f"[pose] target_CA_counts: ref(prepared)={prep_tgt_xyz.shape[0]}")
+        print(f"[pose] binder_CA_counts: rfdiff={p_binder_xyz.shape[0]}  af3={q_binder_xyz.shape[0]}")
+
+        # 3) Binder-binder correspondence by sequence alignment
+        idxP, idxQ, sc_b = _seq_align_map(p_binder_seq, q_binder_seq)
+        print(f"[pose] binder sequence alignment: pairs={len(idxP)} score={sc_b:.1f}")
+        if len(idxP) < 5:
+            print("[pose][fail] insufficient binder correspondence after sequence alignment")
+            return None
+
+        P_b = p_binder_xyz[np.array(idxP)]
+        Q_b = q_binder_xyz[np.array(idxQ)]
+
+        # 4) Metrics
+        # Interface sanity: min distance to prepared target
+        min_d_rf = _min_ca_distance(P_b, prep_tgt_xyz)
+        min_d_af = _min_ca_distance(Q_b, prep_tgt_xyz)
+        print(f"[pose] min CA-dist: RFdiffBinder↔Target={min_d_rf:.2f} Å, AF3Binder↔Target={min_d_af:.2f} Å")
+
+        com_dist = float(np.linalg.norm(P_b.mean(0) - Q_b.mean(0)))
+        pose_rmsd = float(np.sqrt(np.mean(np.sum((P_b - Q_b) ** 2, axis=1))))
+
+        Pc = P_b - P_b.mean(0, keepdims=True)
+        Qc = Q_b - Q_b.mean(0, keepdims=True)
+        _, binder_rmsd = _kabsch(Pc, Qc)
+
+        print(f"[pose] binder COM distance = {com_dist:.2f} Å")
+        print(f"[pose][ok] Pose RMSD = {pose_rmsd:.3f} Å  compare_mode=seq-align (N={len(idxP)})")
+        print(f"[pose][ok] Binder RMSD (after Kabsch) = {binder_rmsd:.3f} Å")
+        
+        # Assemble all metrics into a dictionary
+        results = {
+            'rfdiff_target_fit_pairs': n_rf,
+            'rfdiff_target_fit_rmsd': rms_rf,
+            'rfdiff_target_fit_map': str(map_rf),
+            'af3_target_fit_pairs': n_af,
+            'af3_target_fit_rmsd': rms_af,
+            'af3_target_fit_map': str(map_af),
+            'target_ca_count_ref': prep_tgt_xyz.shape[0],
+            'binder_ca_count_rfdiff': p_binder_xyz.shape[0],
+            'binder_ca_count_af3': q_binder_xyz.shape[0],
+            'binder_seq_align_pairs': len(idxP),
+            'binder_seq_align_score': sc_b,
+            'min_dist_rfdiff_binder_target': min_d_rf,
+            'min_dist_af3_binder_target': min_d_af,
+            'binder_com_distance': com_dist,
+            'rfdiff_vs_af3_pose_rmsd': pose_rmsd,
+            'binder_rmsd_kabsch': binder_rmsd,
+        }
+        return results
+
     except Exception as e:
-        print(f"[warn] RMSD failed for chain {chain_id}: {e}")
-        return float("nan")
+        print(f"[pose][exception] {e}")
+        return None
 
 def _find_rfdiffusion_pdb(rfdiff_root: Path, design_name: str, binder_chain_id: str = "H") -> Path | None:
     """
@@ -149,7 +452,10 @@ def _find_rfdiffusion_pdb(rfdiff_root: Path, design_name: str, binder_chain_id: 
               rfdiff_root / design_name / f"{design_name}_design.pdb"]
     # recursive search as a last resort
     if rfdiff_root.exists():
-        for p in rfdiff_root.rglob(f"{design_name}*.pdb"):
+        # NOTE: design_name in AF3/MPNN may have suffixes like `_dldesign_0` not present
+        # in the original RFdiffusion output. Use a glob with the base name.
+        base_name = design_name.split("_dldesign")[0]
+        for p in rfdiff_root.rglob(f"{base_name}*.pdb"):
             s = str(p).lower()
             # avoid unrelated stages
             if any(tag in s for tag in ["af3", "rf2", "mpnn", "relax", "repack"]):
@@ -218,50 +524,6 @@ def _extract_chain_seq_from_pdb(pdb_path: Path, chain_id: str) -> str:
         aa3 = (res.get_resname() or "UNK").upper()
         seq.append(AA3_TO_1.get(aa3, "X"))
     return "".join(seq)
-
-def _find_af3_best_sample(design_root: Path, design_name: str, seed: int | None, sample_idx: int | None):
-    """
-    design_root: .../rfa_af3/<design_name>
-    prefer exact seed/sample if provided; else pick the best by ranking_score among all found.
-    Returns dict or None.
-    """
-    cand = []
-    # Expected canonical path
-    if seed is not None and sample_idx is not None:
-        p = design_root / design_name / f"seed-{seed}_sample-{sample_idx}"
-        summ = p / f"{design_name}_seed-{seed}_sample-{sample_idx}_summary_confidences.json"
-        cif  = p / f"{design_name}_seed-{seed}_sample-{sample_idx}_model.cif"
-        conf = p / f"{design_name}_seed-{seed}_sample-{sample_idx}_confidences.json"
-        if summ.exists() and cif.exists():
-            try:
-                sd = json.loads(summ.read_text())
-                score = float(sd.get("ranking_score", 0.0))
-            except Exception:
-                score = 0.0
-            cand.append((score, {"sample_dir": p, "summary": summ, "cif": cif, "conf": conf, "seed": seed, "sample": sample_idx}))
-    # Fallback: search all summaries beneath this design
-    if not cand:
-        for summ in design_root.rglob("*_summary_confidences.json"):
-            try:
-                bn = summ.name
-                cif = summ.with_name(bn.replace("_summary_confidences.json", "_model.cif"))
-                conf = summ.with_name(bn.replace("_summary_confidences.json", "_confidences.json"))
-                if not cif.exists():  # skip incomplete
-                    continue
-                sd = json.loads(summ.read_text())
-                score = float(sd.get("ranking_score", 0.0))
-                parent = summ.parent
-                seed_val, samp_val = None, None
-                m = re.search(r"seed-(\d+)_sample-(\d+)", str(parent))
-                if m:
-                    seed_val, samp_val = int(m.group(1)), int(m.group(2))
-                cand.append((score, {"sample_dir": parent, "summary": summ, "cif": cif, "conf": conf, "seed": seed_val, "sample": samp_val}))
-            except Exception:
-                continue
-    if not cand:
-        return None
-    cand.sort(key=lambda x: x[0], reverse=True)  # best first
-    return cand[0][1]
 
 # --- modify signature + body of _find_af3_best_sample ---
 def _find_af3_best_sample(
@@ -443,155 +705,6 @@ except Exception:
     export_design_bundle = None  # type: ignore
 
 
-# ---------- Single-design assessor (unchanged behavior) ----------
-
-def assess_rfa_design(pdb_id: str, epitope: str, design_name: str, seed: int | None = None, sample_idx: int | None = None):
-    """
-    Original single-design assessor (kept for convenience). If seed/sample_idx are None,
-    the best AF3 sample is auto-picked by ranking_score.
-    """
-    print(f"--- Assessing Design: {design_name} ---")
-    tdir = ROOT / "targets" / pdb_id.upper()
-    cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
-    name_sanitized = _sanitize_epitope(epitope)
-    target_chains = sorted(cfg.get("chains", []))
-
-    # RF2 paths
-    rf2_pred_path = tdir / "designs" / name_sanitized / "rfa_rf2" / f"{design_name}_pred.pdb"
-    rf2_scores_path = tdir / "designs" / name_sanitized / "rfa_rf2" / f"{design_name}_pred.json"
-
-    # AF3 paths
-    af3_base_dir = tdir / "designs" / name_sanitized / "rfa_af3" / design_name
-    best = _find_af3_best_sample(af3_base_dir, design_name, seed, sample_idx)
-
-    # RFdiffusion path (NEW)
-    hs_dir = tdir / "designs" / name_sanitized  # parent of rfa_* folders in single-epitope runs
-    rfdiff_root = hs_dir / "rfa_rfdiffusion"
-    rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id="H")
-
-    # Epitope metadata
-    prep_dir = tdir / "prep"
-    prepared_pdb = prep_dir / "prepared.pdb"
-    mask_path     = prep_dir / f"epitope_{name_sanitized}.json"
-    hotspot_path  = prep_dir / f"epitope_{name_sanitized}_hotspots.json"
-    epitope_mask = json.loads(mask_path.read_text()) if mask_path.exists() else []
-    hotspots     = json.loads(hotspot_path.read_text()) if hotspot_path.exists() else []
-
-    # Output
-    report_dir = af3_base_dir / f"assessment_report_s{seed}_p{sample_idx}"
-    _ensure_dir(report_dir)
-
-    results = {"rf2": None, "af3": None, "rfdiff_pdb": str(rfdiff_pdb) if rfdiff_pdb else ""}
-    if rf2_pred_path.exists() and rf2_scores_path.exists():
-        try:
-            scores = json.loads(rf2_scores_path.read_text())
-            results["rf2"] = {"data": scores, "path": rf2_pred_path}
-            print(f"[ok] Loaded RF2 data.")
-        except Exception as e:
-            print(f"[warn] Could not parse RF2 score file: {e}")
-
-    chainH_rmsd = float("nan")
-    if best:
-        print("[info] Found AlphaFold 3 outputs.")
-        try:
-            summary_data = json.loads(best["summary"].read_text())
-            results["af3"] = {"summary": summary_data, "cif": str(best["cif"])}
-            # RMSD (NEW): RFdiffusion vs AF3 for chain H
-            if rfdiff_pdb and best.get("cif") and Path(best["cif"]).exists():
-                chainH_rmsd = _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb, best["cif"], chain_id="H")
-                print(f"[rmsd] RFdiffusion vs AF3 (chain H) CA-RMSD = {chainH_rmsd:.3f} Å")
-
-            # PML (with target + epitope)
-            pml_path = report_dir / "visualize_assessment.pml"
-            _make_pml(
-                pml_path=pml_path,
-                af3_model_path=best["cif"],
-                prepared_pdb_path=prepared_pdb,
-                binder_chain_id="H",
-                target_chain_ids=target_chains,
-                epitope_mask_keys=epitope_mask,
-                hotspot_keys=hotspots,
-                align_to_target=True
-            )
-            print(f"✅ Wrote PyMOL script to: {pml_path}")
-            # Export the script into a portable bundle and suggest scp command
-            if export_design_bundle is not None:
-                try:
-                    bdir = export_design_bundle(pml_path)
-                    if bdir:
-                        print(f"[assess_rfa_design] Exported design PyMOL bundle: {bdir}")
-                        # Suggest an scp command to copy the bundle to local machine
-                        try:
-                            import socket
-                            host = socket.gethostname() or os.uname()[1]
-                        except Exception:
-                            host = os.uname()[1] if hasattr(os, 'uname') else ''
-                        user = os.getenv('USER', '')
-                        port = os.getenv('RFA_SCP_PORT', '6000')
-                        if user and host:
-                            print(
-                                f"[assess_rfa_design] To copy this bundle to your local machine, run:\n"
-                                f"  scp -r -P {port} {user}@{host}:{bdir} ~/Downloads/\n"
-                                f"(modify the destination path as needed)"
-                            )
-                except Exception as e:
-                    print(f"[assess_rfa_design] Warning: failed to export design bundle ({e})")
-        except Exception as e:
-            print(f"[ERROR] AF3 load failed: {e}")
-    else:
-        print("[warn] AF3 outputs not found for this design.")
-
-    # Simple recommendation
-    recommendation = "Poor"
-    if results["af3"]:
-        rs = float(results["af3"]["summary"].get('ranking_score', 0.0))
-        ip = float(results["af3"]["summary"].get('iptm', 0.0))
-        clash = bool(results["af3"]["summary"].get('has_clash', True))
-        if rs > 0.7 and ip > 0.8 and not clash:
-            recommendation = "Good (AF3)"
-        elif rs > 0.5 and ip > 0.65 and not clash:
-            recommendation = "Promising (AF3)"
-    elif results["rf2"]:
-        try:
-            pae = float(results["rf2"]["data"].get("pAE", 99))
-            rmsd = float(results["rf2"]["data"].get("rmsd", 99))
-            if pae < 10 and rmsd < 2.0:
-                recommendation = "Promising (RF2)"
-        except Exception:
-            pass
-
-    report_md = [f"# Assessment Report: {design_name} (seed={seed}, sample={sample_idx})\n\n**Overall Recommendation: `{recommendation}`**\n"]
-    if results["af3"]:
-        s = results["af3"]["summary"]
-        report_md.append(textwrap.dedent(f"""
-        ## AlphaFold 3 Summary
-        | Metric | Value |
-        |---|---|
-        | Ranking Score | `{s.get('ranking_score', 'N/A')}` |
-        | ipTM | `{s.get('iptm', 'N/A')}` |
-        | pTM | `{s.get('ptm', 'N/A')}` |
-        | Has Clash | `{s.get('has_clash', 'N/A')}` |
-        | Fraction Disordered | `{s.get('fraction_disordered', 'N/A')}` |
-        """))
-    if not math.isnan(chainH_rmsd):
-        report_md.append(textwrap.dedent(f"""
-        ## Pose Consistency (binder chain H)
-        RFdiffusion ↔ AF3 CA-RMSD (after alignment): **{chainH_rmsd:.3f} Å**
-        """))
-    if results["rf2"]:
-        r = results["rf2"]["data"]
-        report_md.append(textwrap.dedent(f"""
-        ## RF2
-        | Metric | Value |
-        |---|---|
-        | pAE | `{r.get('pAE', 'N/A')}` |
-        | RMSD | `{r.get('rmsd', 'N/A')}` |
-        """))
-
-    (report_dir / "assessment_report.md").write_text("\n".join(report_md))
-    print(f"✅ Wrote consolidated report: {report_dir / 'assessment_report.md'}")
-    print("--- Assessment Complete ---")
-
 # ---------- All-designs assessor (now writes PML with target + epitope) ----------
 def build_pymol_gallery_from_rankings(
     pdb_id: str,
@@ -599,20 +712,22 @@ def build_pymol_gallery_from_rankings(
     *,
     top_n: int = 50,
     binder_chain_id: str = "H",
-    make_pse: bool = False,          # headlessでPSEまで作る（PyMOLがPATHにある前提）
-    group_by_arm: bool = True,       # epitope@variant でグルーピング（現状は色分けのみ）
-    show_overlay_text: bool = False  # Trueにすると各シーン専用の短いラベルを1つだけ表示
+    make_pse: bool = False,          # if True, create .pse file in headless mode (requires PyMOL in PATH)
+    group_by_arm: bool = True,       # if True, group by arm (epitope@variant) for coloring etc.
+    show_overlay_text: bool = False  # if True, show a short, dedicated label for each scene
 ):
     """
-    assess_rfa_all の TSV を入力に、上位Nデザインを 1 つの PyMOL ギャラリーに集約する。
-    出力: bundle_dir/
-          ├─ gallery.pml
-          ├─ models/  (各 design の cif を相対パスで配置: リンク/コピー)
-          ├─ target_prepared.pdb
-          └─ README.txt
+    Takes the TSV from assess_rfa_all as input and consolidates the top N designs
+    into a single PyMOL gallery.
+    Output: bundle_dir/
+            ├─ gallery.pml
+            ├─ models/  (cif files for each design are placed here with relative paths: link/copy)
+            ├─ target_prepared.pdb
+            └─ README.txt
 
-    重要: 初期状態は target_exp + binder_gallery(state=1) のみを可視化。
-          ←/→ で 1体ずつ切替できる。Scene "overview" は薄い俯瞰。
+    Important: The initial state visualizes only target_exp + binder_gallery (state=1).
+               Users can cycle through designs one by one with arrow keys.
+               The "overview" scene provides a transparent overview of all binders.
     """
     import csv, shutil, time, re, os, textwrap
     from pathlib import Path
@@ -623,29 +738,29 @@ def build_pymol_gallery_from_rankings(
     rankings_tsv = Path(rankings_tsv)
     assert rankings_tsv.exists(), f"rankings TSV not found: {rankings_tsv}"
 
-    # 出力バンドル
+    # Output bundle
     stamp = time.strftime("%Y%m%d_%H%M%S")
     bundle_dir = tdir / "designs" / "_assessments" / f"gallery_{stamp}"
     models_dir = bundle_dir / "models"; _ensure_dir(models_dir)
     pml_path   = bundle_dir / "gallery.pml"
     readme     = bundle_dir / "README.txt"
 
-    # 対象構造（整形済みターゲット）
+    # Target structure (prepared)
     prepared_pdb = tdir / "prep" / "prepared.pdb"
     if not prepared_pdb.exists():
         raise FileNotFoundError(f"prepared.pdb not found: {prepared_pdb}")
-    # バンドルに相対参照で持ち込む
+    # Add to bundle with a relative path (hardlink is fastest)
     prep_in_bundle = bundle_dir / "target_prepared.pdb"
     if prep_in_bundle.exists(): prep_in_bundle.unlink()
     try:
-        os.link(prepared_pdb, prep_in_bundle)  # 同一FS: ハードリンク最速
+        os.link(prepared_pdb, prep_in_bundle)
     except Exception:
         try:
-            os.symlink(prepared_pdb, prep_in_bundle)
+            os.symlink(os.path.relpath(prepared_pdb, bundle_dir), prep_in_bundle)
         except Exception:
             shutil.copy2(prepared_pdb, prep_in_bundle)
 
-    # ランキング読み込み（上位N抽出）
+    # Read rankings (extract top N)
     rows = []
     with rankings_tsv.open() as f:
         rd = csv.DictReader(f, delimiter="\t")
@@ -654,7 +769,8 @@ def build_pymol_gallery_from_rankings(
             if not path or not Path(path).exists():
                 continue
             try:
-                score = float(r.get("final_score") or r.get("af3_ranking_score") or "nan")
+                # Use af3_iptm for sorting, falling back to rank if needed
+                score = float(r.get("af3_iptm") or "nan")
             except Exception:
                 score = float("nan")
             rows.append({
@@ -666,7 +782,7 @@ def build_pymol_gallery_from_rankings(
                 "score": score,
                 "clash": r.get("af3_has_clash")
             })
-    # スコアで再ソート（NaNは末尾）
+    # Re-sort by score (NaNs last)
     rows = [r for r in rows if r["design"]]
     rows.sort(key=lambda x: (x["score"] if x["score"] == x["score"] else -1e9), reverse=True)
     rows = rows[:min(top_n, len(rows))]
@@ -674,11 +790,12 @@ def build_pymol_gallery_from_rankings(
         print("[warn] no rows to pack into gallery")
         return
 
-    # CIF を models/ 下に集約（相対参照用ファイル名を決める）
+    # Aggregate CIFs under models/ and determine relative filenames
     def sanitize(s: str) -> str:
         return re.sub(r"[^A-Za-z0-9_.\-]+", "_", s.strip())[:180]
     for r in rows:
         src = Path(r["cif"])
+        # Use rank from the file to ensure consistent naming
         fn  = f"{r['rank']:03d}__{sanitize(r['arm'])}__{sanitize(r['design'])}.cif"
         dst = models_dir / fn
         if dst.exists(): dst.unlink()
@@ -686,12 +803,12 @@ def build_pymol_gallery_from_rankings(
             os.link(src, dst)
         except Exception:
             try:
-                os.symlink(src, dst)
+                os.symlink(os.path.relpath(src, models_dir), dst)
             except Exception:
                 shutil.copy2(src, dst)
-        r["bundle_cif"] = Path("models") / fn  # PML からの相対パス
+        r["bundle_cif"] = Path("models") / fn  # Relative path for PML
 
-    # PyMOL PML を生成
+    # Generate PyMOL PML
     cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
     chains_sorted = sorted(cfg.get("chains", []))
     if not chains_sorted:
@@ -715,22 +832,22 @@ def build_pymol_gallery_from_rankings(
         "set antialias, 2\n",
         "set cartoon_transparency, 0.25, target_exp\n",
         "\n",
-        # binder_gallery を作り直す（この時点では空、multi-state器）
+        # Recreate binder_gallery (empty multi-state object for now)
         "delete binder_gallery\n",
         "create binder_gallery, none\n",
-        # ここ重要：全state同時表示はしない
+        # Important: do not show all states simultaneously
         "set all_states, off, binder_gallery\n",
-        # binders は基本不透明
+        # Binders are generally opaque
         "set cartoon_transparency, 0.0, binder_gallery\n",
     ]
 
-    # ホットスポット表示のエイリアス
+    # Aliases for showing/hiding hotspots
     pml += [
         "alias hotspots_off, hide sticks, epi_mask_*; hide spheres, epi_hot_*\n",
         "alias hotspots_on,  show sticks, epi_mask_*; show spheres, epi_hot_*\n",
     ]
 
-    # ==== Hotspot coloring (prep配下のepitope_* jsonを解釈) ====
+    # ==== Hotspot coloring (parse epitope_* json files from prep dir) ====
     prep_dir = tdir / "prep"
     epitopes = {}
     import json as _json, re as _re
@@ -749,7 +866,7 @@ def build_pymol_gallery_from_rankings(
             epi = name
             epitopes.setdefault(epi, {})["mask"] = keys
 
-    def _sanitize(s: str) -> str:
+    def _sanitize_pml_name(s: str) -> str:
         return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_")
 
     base_palette = [
@@ -785,7 +902,7 @@ def build_pymol_gallery_from_rankings(
 
     epi_names = sorted(epitopes.keys())
     for i, epi in enumerate(epi_names):
-        epi_key = _sanitize(epi)
+        epi_key = _sanitize_pml_name(epi)
         base = base_palette[i % len(base_palette)]
         a = _tint(base, 0.85); b = _tint(base, 1.00); c = _tint(base, 1.15)
         pml += [
@@ -808,7 +925,7 @@ def build_pymol_gallery_from_rankings(
             sel = _keys_to_sel("target_exp", keys, default_chain=(chains_sorted[0] if chains_sorted else None))
             if not sel:
                 continue
-            var_key = _sanitize(var)
+            var_key = _sanitize_pml_name(var)
             obj = f"epi_hot_{epi_key}_{var_key}"
             color_name = f"epi_{epi_key}_{var_key}" if var in {"A","B","C"} else f"epi_{epi_key}"
             pml += [
@@ -818,7 +935,7 @@ def build_pymol_gallery_from_rankings(
             ]
     # ==== /hotspot coloring ====
 
-    # 1件ずつ：各 design を binder_gallery の state=i に積む
+    # One by one: load each design into a state of binder_gallery
     for i, r in enumerate(rows, start=1):
         obj    = f"d{i:03d}"
         tmp_tg = f"__tgt_tmp_{i:03d}"
@@ -826,55 +943,56 @@ def build_pymol_gallery_from_rankings(
 
         pml += [
             f"load {r['bundle_cif']}, {obj}\n",
-            # ターゲット鎖でアライン（CAのみ）
+            # Align using target chains (CA only)
             f"align ({obj} and chain {target_chain_expr} and name CA), "
             f"(target_exp and chain {target_chain_expr} and name CA)\n",
-            # 分割
+            # Split
             f"create {tmp_tg}, {obj} and chain {target_chain_expr}\n",
             f"create {tmp_bd}, {obj} and chain {binder_chain_id}\n",
             f"delete {obj}\n",
-            # 見た目（ターゲットは薄く、binderは青）
+            # Visuals (target is transparent, binder is marine blue)
             f"show cartoon, {tmp_tg}\n",
             f"color lightorange, {tmp_tg}\n",
             f"set cartoon_transparency, 0.5, {tmp_tg}\n",
             f"show cartoon, {tmp_bd}\n",
             f"color marine, {tmp_bd}\n",
-            # マルチステート・ギャラリーへ（binderのみを state=i に）
+            # To multi-state gallery (only the binder goes into state i)
             f"create binder_gallery, {tmp_bd}, 1, {i}\n",
-            # ここポイント：Sceneは binder_gallery を表示対象にする
+            # Key point: Scene targets binder_gallery
             "disable all\n",
             "enable target_exp\n",
             "enable binder_gallery\n",
             f"set state, {i}, binder_gallery\n",
             f"zoom target_exp or binder_gallery\n",
             f"scene top_{i:03d}, store, view=1, animate=0\n",
-            # 一時オブジェクトは掃除
+            # Clean up temporary objects
             f"delete {tmp_bd}\n",
             f"delete {tmp_tg}\n",
             "\n",
         ]
 
-    # “総覧”シーン（薄い俯瞰）
+    # "Overview" scene (transparent overview)
     pml += [
         "disable all\n",
         "show cartoon, target_exp\n",
         "color gray80, target_exp\n",
         "set cartoon_transparency, 0.50, target_exp\n",
         "enable binder_gallery\n",
-        "set all_states, off, binder_gallery\n",
-        "set state, 1, binder_gallery\n",
+        "set all_states, on, binder_gallery\n", # Show all states
+        "set cartoon_transparency, 0.75, binder_gallery\n", # Make them transparent
         "zoom target_exp or binder_gallery\n",
         "scene overview, store, view=1, animate=0\n",
-        # ==== 初期状態：state=1 単体表示 ====
+        # ==== Initial state: single display of state=1 ====
         "disable all\n",
         "enable target_exp\n",
         "enable binder_gallery\n",
         "set all_states, off, binder_gallery\n",
+        "set cartoon_transparency, 0.0, binder_gallery\n",
         "set state, 1, binder_gallery\n",
         "frame 1\n",
         "zoom target_exp or binder_gallery\n",
         "\n",
-        "# ←/→ で state を巡回できるように簡易ムービースロットを用意\n",
+        "# Set up movie slots to cycle through states with arrow keys\n",
         f"mset 1 x{len(rows)}\n",
     ]
 
@@ -894,7 +1012,7 @@ def build_pymol_gallery_from_rankings(
       - Keep 'binder_gallery' enabled.
       - Use left/right arrow keys or 'set state, N, binder_gallery' to switch designs.
       - Scenes 'top_001' .. 'top_{len(rows):03d}' recall each design with the correct state.
-      - 'overview' shows a thin overview.
+      - 'overview' shows a transparent overview of all binders.
 
     Tips:
       - For images:
@@ -902,7 +1020,7 @@ def build_pymol_gallery_from_rankings(
         'scene top_001, recall; ray 1200,900; png rank_001.png'
     """).strip()+"\n")
 
-    # 任意: PSEを自動生成
+    # Optionally, generate PSE automatically
     if make_pse:
         pse = bundle_dir / "gallery.pse"
         os.system(f'cd "{bundle_dir}" && pymol -cq gallery.pml -d "save {pse.name}; quit" || true')
@@ -928,18 +1046,17 @@ def assess_rfa_all(
     binder_chain_id: str = "H",
     seed: int | None = None,
     sample_idx: int | None = None,
-    rank_by: str = "ranking_score",
     run_label: str | None = None,
-    # 追加：高速化オプション
-    skip_pml: bool = True,          # 各デザインの個別PML生成をスキップ（最後にギャラリーだけ作る）
-    skip_seq: bool = False,          # binder配列抽出をスキップ（Bio.PDBのI/Oを抑える）
-    progress_every: int = 200,      # 進捗ログの間引き
-    include_keyword: Optional[Iterable[str] | str] = None,   # <-- NEW
+    # Added: options for faster runs
+    skip_pml: bool = True,          # Skip generating individual PML files (make one gallery at the end)
+    skip_seq: bool = False,         # Skip extracting binder sequences (reduces Bio.PDB I/O)
+    progress_every: int = 200,      # Throttle progress logs
+    include_keyword: Optional[Iterable[str] | str] = None,
 ):
     """
-    すべてのデザインを走査し、AF3サマリ等からランキングTSVを出力。
-    既定では重い処理（PML/配列抽出）をスキップして高速化。
-    最後にギャラリーだけ作るのがオススメ運用。
+    Scans all designs and outputs a ranking TSV from AF3 summaries etc.
+    By default, heavy processes (PML/sequence extraction) are skipped for speed.
+    Recommended workflow is to generate only the final gallery.
     """
     import csv, json, os, re, yaml, textwrap
     from pathlib import Path
@@ -949,6 +1066,9 @@ def assess_rfa_all(
     tdir = ROOT / "targets" / pdb_id.upper()
     cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
     target_chains = sorted(cfg.get("chains", []))
+
+    prepared_pdb_path = tdir / "prep" / "prepared.pdb"
+    print(f"[info] prepared target pdb: {prepared_pdb_path}  exists={prepared_pdb_path.exists()}")
 
     designs_root = tdir / "designs"
     if not designs_root.exists():
@@ -1002,7 +1122,7 @@ def assess_rfa_all(
             af3_dir = hs_dir / "rfa_af3"
             mpnn_dir = hs_dir / "rfa_mpnn"
             rf2_dir  = hs_dir / "rfa_rf2"
-            rfdiff_root = hs_dir / "rfa_rfdiffusion"  # NEW: RFdiffusion outputs
+            rfdiff_root = hs_dir / "rfa_rfdiff"
             if not af3_dir.exists(): continue
 
             print(f'[info] Scanning epitope "{ep_name}" variant "{variant}"... under {hs_dir}')
@@ -1016,11 +1136,19 @@ def assess_rfa_all(
                 best = _find_af3_best_sample(
                     design_dir, design_name, seed, sample_idx, include_keyword=include_keyword
                 )
+                print(f"\n[design] ===============")
+                print(f"[design] epitope={ep_name} variant={variant} design={design_name}")
+                if best:
+                    print(f"[design] AF3 summary={best['summary']}")
+                    print(f"[design] AF3 cif    ={best['cif']}")
+                else:
+                    print(f"[design][warn] no AF3 sample found under {design_dir}")
+                print(f"[design] rfdiff_root={rfdiff_root}")
 
-                # RFdiffusion PDB (NEW)
+                # RFdiffusion PDB
                 rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id=binder_chain_id)
 
-                # RF2（あれば拾う）
+                # RF2 (if available)
                 rf2_pred = rf2_dir / f"{design_name}_pred.pdb"
                 rf2_json = rf2_dir / f"{design_name}_pred.json"
                 rf2_pae = rf2_rmsd = None
@@ -1032,7 +1160,7 @@ def assess_rfa_all(
                     except Exception:
                         pass
 
-                # binder配列（既定はスキップ）
+                # binder sequence (skipped by default)
                 mpnn_pdb = mpnn_dir / f"{design_name}.pdb"
                 if not mpnn_pdb.exists():
                     cand = list(mpnn_dir.rglob(f"{design_name}*.pdb"))
@@ -1045,13 +1173,22 @@ def assess_rfa_all(
                         binder_seq = ""
                         print(f"[warn] Could not extract seq from {mpnn_pdb}")
 
-                # AF3サマリ
+                # AF3 summary
                 af3_rank = af3_iptm = af3_ptm = None
                 af3_has_clash = None
                 af3_frac_dis = None
                 af3_cif = af3_summary = None
                 pml_path = None
-                chainH_rmsd = float("nan")  # NEW
+                
+                # MODIFIED: Initialize a dictionary for all pose RMSD metrics
+                pose_metrics = {
+                    'rfdiff_target_fit_pairs': "", 'rfdiff_target_fit_rmsd': "", 'rfdiff_target_fit_map': "",
+                    'af3_target_fit_pairs': "", 'af3_target_fit_rmsd': "", 'af3_target_fit_map': "",
+                    'target_ca_count_ref': "", 'binder_ca_count_rfdiff': "", 'binder_ca_count_af3': "",
+                    'binder_seq_align_pairs': "", 'binder_seq_align_score': "",
+                    'min_dist_rfdiff_binder_target': "", 'min_dist_af3_binder_target': "",
+                    'binder_com_distance': "", 'rfdiff_vs_af3_pose_rmsd': "", 'binder_rmsd_kabsch': ""
+                }
 
                 if best:
                     af3_summary = best["summary"]
@@ -1066,14 +1203,32 @@ def assess_rfa_all(
                     except Exception:
                         pass
 
-                    # NEW: compute chain-H RMSD (RFdiffusion vs AF3)
+                    # MODIFIED: compute Pose RMSD and get all metrics
                     try:
                         if rfdiff_pdb and Path(af3_cif).exists():
-                            chainH_rmsd = _compute_rfdiff_vs_af3_chain_rmsd(rfdiff_pdb, af3_cif, chain_id=binder_chain_id)
-                    except Exception as e:
-                        print(f"[warn] RMSD calc failed for {design_name}: {e}")
+                            print(f"[design] computing Pose RMSD... binder_chain={binder_chain_id} target_chains={','.join(target_chains)}")
+                            rmsd_results = _compute_pose_rmsd(
+                                rfdiff_pdb,
+                                af3_cif,
+                                target_chain_ids=target_chains,
+                                binder_chain_id=binder_chain_id,
+                                reference_target_pdb=prepared_pdb_path,
+                            )
+                            if rmsd_results:
+                                # Update metrics dict with results, handling potential NaNs for TSV
+                                for k, v in rmsd_results.items():
+                                    pose_metrics[k] = v if (isinstance(v, str) or (v==v)) else ""
+                                print(f"[design] Pose RMSD result = {pose_metrics.get('rfdiff_vs_af3_pose_rmsd')}")
+                            else:
+                                print(f"[design][fail] Pose RMSD calculation returned None")
 
-                    # 個別PMLは既定スキップ（必要時のみ作る）
+                        else:
+                            print(f"[design][skip] pose RMSD: rfdiff_pdb={rfdiff_pdb} exists={bool(rfdiff_pdb and Path(rfdiff_pdb).exists())}, "
+                                  f"af3_cif={af3_cif} exists={bool(af3_cif and Path(af3_cif).exists())}")
+                    except Exception as e:
+                        print(f"[warn] Pose RMSD calc failed for {design_name}: {e}")
+
+                    # individual PMLs are skipped by default
                     if not skip_pml:
                         pml_path = pml_dir / f"{name_sanitized}__hs-{variant}__{design_name}.pml"
                         _make_pml(
@@ -1087,13 +1242,9 @@ def assess_rfa_all(
                             align_to_target=True
                         )
 
-                final_score = None
-                if af3_rank is not None:
-                    final_score = af3_rank
-                    if af3_has_clash:
-                        final_score -= 0.2
-
-                rows.append({
+                final_score = af3_iptm if af3_iptm is not None and af3_iptm == af3_iptm else None
+                
+                row_data = {
                     "pdb_id": pdb_id.upper(),
                     "epitope": ep_name,
                     "hotspot_variant": variant,
@@ -1114,11 +1265,13 @@ def assess_rfa_all(
                     "rf2_pred_pdb_path": str(rf2_pred.resolve()) if rf2_pred.exists() else "",
                     "rf2_pae": rf2_pae if rf2_pae is not None else "",
                     "rf2_rmsd": rf2_rmsd if rf2_rmsd is not None else "",
-                    "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",  # NEW
-                    "rfdiff_vs_af3_rmsd_chainH": chainH_rmsd if chainH_rmsd == chainH_rmsd else "",  # NEW
+                    "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",
                     "pymol_script_path": str(pml_path.resolve()) if (pml_path and not skip_pml) else "",
                     "final_score": final_score if final_score is not None else ""
-                })
+                }
+                # Add all the pose metrics to the row
+                row_data.update(pose_metrics)
+                rows.append(row_data)
 
         print(f'[info] Completed epitope "{ep_name}"  processed={n_scanned}  total_rows={len(rows)}')
 
@@ -1126,12 +1279,12 @@ def assess_rfa_all(
         print("[warn] No designs found to assess.")
         return
 
-    # Ranking
+    # MODIFIED: Ranking logic is now purely by af3_iptm (descending).
     def _score_key(r):
-        v = r.get("final_score")
         try:
-            return float(v)
-        except Exception:
+            v = float(r.get("af3_iptm"))
+            return v if not math.isnan(v) else float("-inf")
+        except (ValueError, TypeError):
             return float("-inf")
 
     rows.sort(key=_score_key, reverse=True)
@@ -1141,6 +1294,7 @@ def assess_rfa_all(
     # Write TSV
     tsv_path = out_dir / f"af3_rankings.tsv"
 
+    # MODIFIED: TSV header updated with all new metrics
     headers = [
         "rank","pdb_id","epitope","hotspot_variant","arm",
         "design_name","binder_chain","binder_seq","binder_len",
@@ -1148,9 +1302,16 @@ def assess_rfa_all(
         "af3_model_cif_path","af3_summary_json_path",
         "af3_ranking_score","af3_iptm","af3_ptm","af3_has_clash","af3_fraction_disordered",
         "rf2_pred_pdb_path","rf2_pae","rf2_rmsd",
-        "rfdiffusion_pdb_path","rfdiff_vs_af3_rmsd_chainH",   # NEW columns
+        "rfdiffusion_pdb_path",
+        # New detailed RMSD metrics
+        "rfdiff_vs_af3_pose_rmsd", "binder_rmsd_kabsch", "binder_com_distance",
+        "min_dist_rfdiff_binder_target", "min_dist_af3_binder_target",
+        "binder_seq_align_pairs", "binder_seq_align_score",
+        "rfdiff_target_fit_pairs", "rfdiff_target_fit_rmsd", "rfdiff_target_fit_map",
+        "af3_target_fit_pairs", "af3_target_fit_rmsd", "af3_target_fit_map",
+        "target_ca_count_ref", "binder_ca_count_rfdiff", "binder_ca_count_af3",
         "pymol_script_path",
-        "final_score"
+        "final_score" # Retained for compatibility, but ranking is based on iPTM
     ]
 
     with tsv_path.open("w", newline="") as f:
@@ -1162,11 +1323,12 @@ def assess_rfa_all(
     print(f"✅ Wrote ranking TSV: {tsv_path}")
     print(f"Total designs assessed: {len(rows)}")
     topn = min(5, len(rows))
-    print("[top] best designs:")
+    print("[top] best designs (ranked by ipTM):")
     for r in rows[:topn]:
-        print(f"  #{r['rank']:>3}  {r['epitope']} / hs-{r['hotspot_variant']} / {r['design_name']}  score={r['final_score']}  iptm={r['af3_iptm']}  clash={r['af3_has_clash']}  rmsdH={r.get('rfdiff_vs_af3_rmsd_chainH','')}")
+        print(f"  #{r['rank']:>3}  {r['epitope']} / hs-{r['hotspot_variant']} / {r['design_name']}  "
+              f"iptm={r['af3_iptm']}  pose_rmsd={r.get('rfdiff_vs_af3_pose_rmsd','')}  clash={r['af3_has_clash']}")
 
-    # ===== Arm/Epitope の集計（ログ表示のみ） =====
+    # ===== Arm/Epitope summary (for logging only) =====
     def _to_float(x):
         try:
             v = float(x);  return v if v == v else float("-inf")
@@ -1175,46 +1337,51 @@ def assess_rfa_all(
 
     arm_buckets: dict[str, list[dict]] = {}
     for r in rows:
-        fs = _to_float(r.get("final_score", ""))
-        if fs == float("-inf"): continue
+        # MODIFIED: Use iPTM as the score for leaderboards, consistent with main ranking.
+        score_val = _to_float(r.get("af3_iptm", ""))
+        if score_val == float("-inf"): continue
+        r["leaderboard_score"] = score_val
         arm_buckets.setdefault(f"{r['epitope']}@{r['hotspot_variant']}", []).append(r)
 
     def _summarize_bucket(items: list[dict], topk: int = 5):
-        items_sorted = sorted(items, key=lambda rr: _to_float(rr.get("final_score", "")), reverse=True)
+        items_sorted = sorted(items, key=lambda rr: rr.get("leaderboard_score", float("-inf")), reverse=True)
+        if not items_sorted:
+            return {}
         best = items_sorted[0]
-        best_score = _to_float(best.get("final_score", ""))
+        best_score = best.get("leaderboard_score", float("-inf")) # This is best ipTM
         k = min(topk, len(items_sorted))
-        topk_mean = sum(_to_float(items_sorted[i].get("final_score", "")) for i in range(k)) / max(1, k)
-        iptm_best = _to_float(best.get("af3_iptm", ""))
+        topk_mean = sum(it.get("leaderboard_score", float("-inf")) for it in items_sorted[:k]) / max(1, k)
+        rmsd_best = _to_float(best.get("rfdiff_vs_af3_pose_rmsd", ""))
         clash_best = bool(best.get("af3_has_clash", True))
         return {"n_total": len(items), "best": best, "best_score": best_score,
-                "topk_mean": topk_mean, "iptm_best": iptm_best, "clash_best": clash_best}
+                "topk_mean": topk_mean, "rmsd_best": rmsd_best, "clash_best": clash_best}
 
     arm_summaries = sorted(((arm, _summarize_bucket(items, 5)) for arm, items in arm_buckets.items()),
-                           key=lambda t: t[1]["best_score"], reverse=True)
-    print("\n=== Arm Leaderboard (epitope@variant) — by best final_score ===")
+                           key=lambda t: t[1].get("best_score", float("-inf")), reverse=True)
+    print("\n=== Arm Leaderboard (epitope@variant) — by best ipTM ===")
     for rank, (arm, S) in enumerate(arm_summaries, start=1):
+        if not S: continue
         b = S["best"]
-        print(f"  #{rank:>2}  {arm:40s} best={S['best_score']:.3f} (iptm={S['iptm_best']:.2f}, clash={S['clash_best']})  "
-              f"top5-mean={S['topk_mean']:.3f}  n={S['n_total']:d}  top_design={b['design_name']}")
+        print(f"  #{rank:>2}  {arm:40s} best_iptm={S['best_score']:.3f} (rmsd={S['rmsd_best']:.2f}, clash={S['clash_best']})  "
+              f"top5-mean_iptm={S['topk_mean']:.3f}  n={S['n_total']:d}  top_design={b['design_name']}")
 
     epi_buckets: dict[str, list[dict]] = {}
     for r in rows:
-        fs = _to_float(r.get("final_score", ""))
-        if fs == float("-inf"): continue
-        epi_buckets.setdefault(r["epitope"], []).append(r)
+        if "leaderboard_score" in r:
+            epi_buckets.setdefault(r["epitope"], []).append(r)
     epi_summaries = sorted(((epi, _summarize_bucket(items, 10)) for epi, items in epi_buckets.items()),
-                           key=lambda t: t[1]["best_score"], reverse=True)
+                           key=lambda t: t[1].get("best_score", float("-inf")), reverse=True)
 
-    print("\n=== Epitope Leaderboard — by best final_score (top10-mean shown) ===")
+    print("\n=== Epitope Leaderboard — by best ipTM (top10-mean shown) ===")
     for rank, (epi, S) in enumerate(epi_summaries, start=1):
+        if not S: continue
         b = S["best"]; arm = f"{b['epitope']}@{b['hotspot_variant']}"
-        print(f"  #{rank:>2}  {epi:40s} best={S['best_score']:.3f} (iptm={S['iptm_best']:.2f}, clash={S['clash_best']})  "
-              f"top10-mean={S['topk_mean']:.3f}  n={S['n_total']:d}  top_design={b['design_name']} ({arm})")
+        print(f"  #{rank:>2}  {epi:40s} best_iptm={S['best_score']:.3f} (rmsd={S['rmsd_best']:.2f}, clash={S['clash_best']})  "
+              f"top10-mean_iptm={S['topk_mean']:.3f}  n={S['n_total']:d}  top_design={b['design_name']} ({arm})")
 
     print("=== Assessment complete ===")
 
-    # 最後にギャラリーを1回だけ生成（個別PMLをスキップしてもOK）
+    # Generate one gallery at the end (works even if individual PMLs were skipped)
     try:
         build_pymol_gallery_from_rankings(
             pdb_id, tsv_path, top_n=50, binder_chain_id=binder_chain_id, make_pse=False

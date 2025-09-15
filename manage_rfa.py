@@ -108,6 +108,22 @@ python manage_rfa.py pipeline 8ES8 \
   
 python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 20250908 --include_keyword "20250904"
 python manage_rfa.py assess-rfa-all 8ES8 --binder_chain_id H --run_label 20250910 --include_keyword "20250910"
+
+/pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv
+python plot_rankings.py \
+    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --out_dir ./results/8ES8_20250910 \
+    --img_format pdf --dpi 300 \
+    --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
+    --topN 50 --max_categories 12
+ 
+python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --top_n 48 \
+    --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA
+    --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
+    --codon_host yeast --use_dnachisel --dnachisel_species saccharomyces_cerevisiae \
+    --gc_target 0.45 --gc_window 100   
+
 python plot_rankings.py \
     --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
     --out_dir ./results/8ES8_20250910 \
@@ -620,7 +636,7 @@ def main():
         pass
 
     elif args.cmd == "assess-rfa-all":
-        assess_rfa_all(args.pdb, binder_chain_id=args.binder_chain_id, seed=args.seed, sample_idx=args.sample_idx, rank_by=args.rank_by,
+        assess_rfa_all(args.pdb, binder_chain_id=args.binder_chain_id, seed=args.seed, sample_idx=args.sample_idx,
                        run_label=args.run_label, skip_pml=args.skip_pml, skip_seq=False, include_keyword=args.include_keyword)
 
     elif args.cmd == "report-scope":

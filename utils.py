@@ -80,7 +80,7 @@ AF3_DATABASES_DIR = "/pub/inagakit/af3/databases"
 # --- Global Constants ---
 # ROOT = Path(__file__).resolve().parent
 ROOT = Path("/pub/inagakit/Projects/initbinder")  # hardcoded for simplicity
-ROOT = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder")  # hardcoded for simplicity
+# ROOT = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder")  # hardcoded for simplicity
 print(f'[info] Running manage_rfa_eco.py from {ROOT}')
 SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 
