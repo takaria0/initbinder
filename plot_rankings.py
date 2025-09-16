@@ -126,21 +126,30 @@ def plot_iptm_topN_bar(iptm: np.ndarray, names: list[str], out: Path, topN: int,
 # --- MODIFIED: Generic functions for RMSD plotting ---
 def plot_rmsd_hist(rmsd: np.ndarray, out: Path, thresholds: list[float], dpi: int, metric_name: str):
     """Plots a histogram for a given RMSD metric."""
+    rmsd = np.asarray(rmsd)
+    rmsd = rmsd[np.isfinite(rmsd)]  # 念のため NaN/inf を除去
+
     plt.figure(figsize=(6, 4))
-    # Cap range for better visualization, but ensure max is included if it's not extreme
-    plot_range = (0, min(10, np.percentile(rmsd, 99) * 1.2)) if len(rmsd) > 0 else (0, 10)
-    plt.hist(rmsd, bins=30, range=plot_range, edgecolor='black', alpha=0.7)
+
+    if rmsd.size == 0:
+        upper = 10.0
+    else:
+        q99 = np.percentile(rmsd, 99)
+        upper = max(10.0, q99 * 1.2, rmsd.max() * 1.02)
+    plt.hist(rmsd, bins=30, range=(0, upper), edgecolor='black', alpha=0.7)
+
     plt.xlabel(f'{metric_name} (Å)')
     plt.ylabel('Count')
     plt.title(f'{metric_name} Distribution (Histogram)')
 
-    mu, med = np.mean(rmsd), np.median(rmsd)
+    mu, med = float(np.mean(rmsd)) if rmsd.size else float('nan'), float(np.median(rmsd)) if rmsd.size else float('nan')
     add_vlines([mu], labels=[f"mean={mu:.3f}"], color='C1', linestyle='--', alpha=0.8)
     add_vlines([med], labels=[f"median={med:.3f}"], color='C2', linestyle='-.', alpha=0.8)
     if thresholds:
         add_vlines(thresholds, labels=[f"thr={t:.2f}" for t in thresholds], color='C3', linestyle=':', alpha=0.7)
 
     safe_savefig(out, dpi=dpi)
+
 
 def plot_rmsd_ecdf(rmsd: np.ndarray, out: Path, thresholds: list[float], dpi: int, metric_name: str):
     """Plots an ECDF for a given RMSD metric."""
@@ -262,8 +271,8 @@ def main():
     # Detect columns
     print("[info] Detecting columns...")
     iptm_col = find_column(df, ["af3_iptm","iptm","iptm_global","iptm_score"], contains_any=["iptm"])
-    pose_rmsd_col = find_column(df, ["rfdiff_vs_af3_pose_rmsd"], contains_any=["pose_rmsd"])
-    binder_rmsd_col = find_column(df, ["binder_rmsd_kabsch"], contains_any=["binder_rmsd"])
+    pose_rmsd_col = find_column(df, ["rmsd_binder_target_aligned"])
+    binder_rmsd_col = find_column(df, ["rmsd_binder_prepared_frame"])
     name_col = find_column(df, ["design_name","name","variant","id"], None)
     epitope_col = find_column(df, ["epitope","hotspot_category","hotspot","epitope_name"], None)
     dsasa_col = find_column(df, ["dsasa","delta_sasa","iface_dsasa"], contains_any=["dsasa"])
