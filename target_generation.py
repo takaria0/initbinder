@@ -232,7 +232,7 @@ class AntigenOption:
 @dataclass
 class Candidate:
     uniprot: str
-    gene: str
+    gene: Optional[str]
     protein_name: str
     organism: str
     pdb_ids: List[str]
@@ -242,6 +242,16 @@ class Candidate:
     debug_matches: List[Dict[str, Any]] = field(default_factory=list)
     # keep all options for context
     antigen_options: List[AntigenOption] = field(default_factory=list)
+    # original term that led to this lookup (useful when gene symbol is absent)
+    search_term: str = ""
+
+    @property
+    def display_label(self) -> str:
+        """Return the most informative label available for logs/outputs."""
+        for value in (self.gene, self.protein_name, self.uniprot, self.search_term):
+            if value:
+                return value
+        return ""
 
 # -------------------- Body text extraction --------------------
 def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_selector: str = "#main_left") -> str:
@@ -466,6 +476,8 @@ def analyze_product_page_with_llm(body_text: str, target_gene: str, target_prote
     )
 
 def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: str, protein_name: str):
+    gene = gene or protein_name or "unknown target"
+    protein_name = protein_name or gene
     total_chars = 0
     items_for_prompt = []
     for idx, opt in enumerate(options):
@@ -623,14 +635,57 @@ def pdb_list_from_uniprot_entry(entry: dict) -> List[str]:
     out = sorted({p.strip().upper() for p in pdbs if p})
     return out
 
+
+def _taxonomy_id_for_species(species: str) -> Optional[str]:
+    if not species:
+        return None
+    s = species.strip().lower()
+    if s in {"any", "all", "*", "none", ""}:
+        return None
+    mapping = {
+        "human": "9606",
+        "homo sapiens": "9606",
+        "mouse": "10090",
+        "mus musculus": "10090",
+    }
+    if s in mapping:
+        return mapping[s]
+    if re.fullmatch(r"\d+", s):
+        return s
+    return None
+
+
+def _candidate_query_templates(term: str) -> List[str]:
+    basics = [
+        f'gene:"{term}"',
+        f'accession:"{term}"',
+        f'protein_name:"{term}"',
+        f'"{term}"',
+    ]
+    out: List[str] = []
+    seen: set[str] = set()
+    for q in basics:
+        if q not in seen:
+            seen.add(q)
+            out.append(q)
+    return out
+
 def fetch_vendor_antigens(query_term: str, species: str, limit: int = 40) -> List[AntigenOption]:
     if SinoBioConnector is None:
         log_info("[error] SinoBioConnector is not available.")
         return []
     try:
+        if not query_term:
+            return []
         mode = "headless" if BROWSER_HEADLESS else "interactive"
         sino = SinoBioConnector(mode=mode)
-        results = sino.search_proteins(query_term, species_preference=[species.capitalize()], limit=limit)
+        species_pref: Optional[List[str]] = None
+        if species:
+            raw_species = species.strip()
+            sp = raw_species.lower()
+            if sp not in {"any", "all", "*", "none", ""}:
+                species_pref = [raw_species.title()]
+        results = sino.search_proteins(query_term, species_preference=species_pref, limit=limit)
         opts = [AntigenOption(vendor="Sino Biological", catalog=r.get("sku",""), species=r.get("species", species), url=r.get("url")) for r in results]
         log_info(f"[info] Vendor search {query_term} ({species}) -> {len(opts)} candidates (browser_headless={BROWSER_HEADLESS})")
         return opts
@@ -838,14 +893,15 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         exclusion_block = "\n".join(sorted(list(avoid_names))[:200]) if avoid_names else "(none)"
         prompt = textwrap.dedent(
             f"""
-            You are a bioinformatician generating OFFICIAL GENE SYMBOLS for the following request.
+            You are a bioinformatician preparing candidate antibody targets for the following request.
 
             - Species: {species}
             - User request: "{instruction}"
-            - Exclusion list (do NOT include these gene symbols; case-insensitive):
+            - Exclusion list (do NOT include these targets; case-insensitive):
               {exclusion_block}
-            - Return up to {max_request} NEW gene symbols not in the exclusion list.
-            - Output format: one symbol per line; no numbering, no extra text.
+            - Return up to {max_request} NEW entries not in the exclusion list.
+            - Prefer OFFICIAL GENE SYMBOLS when available; otherwise provide the most precise protein/domain or antigen name that a vendor catalog would recognize.
+            - Output format: one entry per line; no numbering, no extra text.
             """
         ).strip()
         log_debug("[LLM PRO] expand_instruction_to_queries PROMPT:\n" + prompt)
@@ -872,29 +928,55 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
 def build_candidate(term: str, species: str, *, require_biotinylated_primary: bool = True) -> Optional[Candidate]:
-    org_id = "9606" if species.lower() == "human" else "10090"
-    params = {"query": f'gene:"{term}" AND organism_id:{org_id}', "fields": "accession,protein_name,gene_primary,organism_name", "format": "json"}
-    uni_search_data = http_json(UNIPROT_SEARCH, params=params)
-    uni_search = uni_search_data.get("results", [])[0] if uni_search_data.get("results") else None
+    tax_id = _taxonomy_id_for_species(species)
+    base_queries = _candidate_query_templates(term)
+    search_queries: List[str] = []
+    if tax_id:
+        for base in base_queries:
+            search_queries.append(f"({base}) AND organism_id:{tax_id}")
+    search_queries.extend(base_queries)
+
+    uni_search = None
+    used_query = None
+    seen_queries: set[str] = set()
+    for query in search_queries:
+        if query in seen_queries:
+            continue
+        seen_queries.add(query)
+        params = {
+            "query": query,
+            "fields": "accession,protein_name,gene_primary,organism_name",
+            "format": "json",
+        }
+        uni_search_data = http_json(UNIPROT_SEARCH, params=params)
+        results = uni_search_data.get("results") or []
+        if results:
+            uni_search = results[0]
+            used_query = query
+            break
+
     if not uni_search:
-        log_info(f"[warn] UniProt search returned no results for term '{term}' ({species})")
+        log_info(f"[warn] UniProt search returned no results for term '{term}' (species={species}).")
         return None
 
     acc = uni_search["primaryAccession"]
     uni_full = fetch_uniprot_entry(acc)
-    gene_name = (uni_search.get("genes", [{}])[0].get("geneName", {}) or {}).get("value") or term
-    protein_name = (uni_search.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", ""))
+    gene_name = ((uni_search.get("genes", [{}])[0].get("geneName", {}) or {}).get("value") or "").strip() or None
+    protein_name = (uni_search.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", "") or "").strip()
 
-    log_info(f"\n[info] Evaluating candidate '{gene_name}' (UniProt: {acc})...")
+    label = gene_name or protein_name or term or acc
+    used_query_disp = used_query or "(direct lookup)"
+    log_info(f"\n[info] Evaluating candidate '{label}' (UniProt: {acc}; query={used_query_disp})...")
 
-    antigen_options = fetch_vendor_antigens(gene_name, species)
+    antigen_query = gene_name or protein_name or term or acc
+    antigen_options = fetch_vendor_antigens(antigen_query, species)
     if not antigen_options:
-        log_info(f"[warn] No vendor antigens found for {gene_name}.")
+        log_info(f"[warn] No vendor antigens found for {label} (query='{antigen_query}').")
         return None
 
-    enrich_antigen_details_with_llm_batch(antigen_options, gene_name, protein_name)
+    enrich_antigen_details_with_llm_batch(antigen_options, gene_name or antigen_query, protein_name or antigen_query)
 
-    log_info(f"[debug] LLM analysis results for {gene_name}:")
+    log_info(f"[debug] LLM analysis results for {label}:")
     for o in antigen_options:
         log_info(f"  - {o.catalog}: {o.llm_analysis.pretty() if o.llm_analysis else 'None'}")
 
@@ -903,7 +985,7 @@ def build_candidate(term: str, species: str, *, require_biotinylated_primary: bo
 
     pdbs = pdb_list_from_uniprot_entry(uni_full)
     if not pdbs:
-        log_info(f"[warn] No PDBs found for UniProt {acc}.")
+        log_info(f"[warn] No PDBs found for UniProt {acc} (target={label}).")
         return None
     log_info(f"[info] Found PDB IDs ({len(pdbs)}): {', '.join(pdbs)}")
 
@@ -913,7 +995,7 @@ def build_candidate(term: str, species: str, *, require_biotinylated_primary: bo
     best_any, recs_any = _select_best_match(pdbs, antigen_options, require_biotinylated=False)
 
     if not best_any and not best_biotin:
-        log_info(f"[fail] No suitable PDB/antigen match for {gene_name}.")
+        log_info(f"[fail] No suitable PDB/antigen match for {label}.")
         return None
 
     cand = Candidate(
@@ -924,7 +1006,8 @@ def build_candidate(term: str, species: str, *, require_biotinylated_primary: bo
         pdb_ids=pdbs,
         selections={"biotin": best_biotin or {}, "any": best_any or {}},
         debug_matches=(recs_any if recs_any else []) + (recs_biotin if recs_biotin else []),
-        antigen_options=antigen_options
+        antigen_options=antigen_options,
+        search_term=term,
     )
     return cand
 
@@ -952,8 +1035,9 @@ def _selection_to_row(sel_name: str, i_rank: int, cand: Candidate) -> Optional[L
     sel = cand.selections.get(sel_name) or {}
     if not sel:
         return None
+    gene_value = cand.gene or cand.protein_name or cand.uniprot
     return [
-        i_rank, sel_name, cand.uniprot, cand.gene, cand.protein_name, cand.organism,
+        i_rank, sel_name, cand.uniprot, gene_value, cand.protein_name, cand.organism,
         sel.get("pdb_id",""), sel.get("matched_chain",""), 
         f"{(sel.get('resolution') or 0):.2f}" if sel.get("resolution") is not None else "",
         sel.get("method",""), sel.get("release_date",""),
@@ -1010,12 +1094,13 @@ def write_debug(cands: List[Candidate], prefix: str) -> None:
             # unique by (antigen_catalog, pdb_id, entity_id)
             seen = set()
             for r in c.debug_matches:
-                key = (c.gene, c.uniprot, r.get("antigen_catalog"), r.get("pdb_id"), r.get("entity_id"))
+                label = c.gene or c.protein_name or c.uniprot
+                key = (label, c.uniprot, r.get("antigen_catalog"), r.get("pdb_id"), r.get("entity_id"))
                 if key in seen: 
                     continue
                 seen.add(key)
                 w.writerow([
-                    c.gene, c.uniprot, r.get("antigen_catalog",""), r.get("antigen_url",""),
+                    label, c.uniprot, r.get("antigen_catalog",""), r.get("antigen_url",""),
                     r.get("antigen_is_biotinylated", False),
                     r.get("molecular_weight_kda", None),
                     r.get("accession",""), r.get("vendor_range",""),
@@ -1130,6 +1215,8 @@ def run_target_generation(args):
             if candidate:
                 candidates.append(candidate)
                 # Append to catalogs incrementally, de-duplicated by (selection, UNIPROT)
+                label = candidate.display_label
+
                 if candidate.selections.get('biotin'):
                     key = ('biotin', candidate.uniprot.upper())
                     if key not in existing_keys:
@@ -1139,11 +1226,11 @@ def run_target_generation(args):
                             with out_biotin.open('a', newline='', encoding='utf-8') as f:
                                 csv.writer(f, delimiter='\t').writerow(row)
                             existing_keys.add(key)
-                            log_info(f"[append] +biotin {candidate.gene} ({candidate.uniprot}) → rank {biotin_rank}")
+                            log_info(f"[append] +biotin {label} ({candidate.uniprot}) → rank {biotin_rank}")
                         else:
-                            log_info(f"[append][skip] No biotin selection row for {candidate.gene}")
+                            log_info(f"[append][skip] No biotin selection row for {label}")
                     else:
-                        log_info(f"[append][dup] biotin {candidate.gene} ({candidate.uniprot}) already present; skipping")
+                        log_info(f"[append][dup] biotin {label} ({candidate.uniprot}) already present; skipping")
 
                 if candidate.selections.get('any'):
                     key = ('any', candidate.uniprot.upper())
@@ -1154,11 +1241,11 @@ def run_target_generation(args):
                             with out_all.open('a', newline='', encoding='utf-8') as f:
                                 csv.writer(f, delimiter='\t').writerow(row)
                             existing_keys.add(key)
-                            log_info(f"[append] +any {candidate.gene} ({candidate.uniprot}) → rank {all_rank}")
+                            log_info(f"[append] +any {label} ({candidate.uniprot}) → rank {all_rank}")
                         else:
-                            log_info(f"[append][skip] No any selection row for {candidate.gene}")
+                            log_info(f"[append][skip] No any selection row for {label}")
                     else:
-                        log_info(f"[append][dup] any {candidate.gene} ({candidate.uniprot}) already present; skipping")
+                        log_info(f"[append][dup] any {label} ({candidate.uniprot}) already present; skipping")
 
                 # Append debug rows (dedupe within candidate)
                 if candidate.debug_matches:
@@ -1166,12 +1253,12 @@ def run_target_generation(args):
                         wdbg = csv.writer(f, delimiter='\t')
                         seen = set()
                         for r in candidate.debug_matches:
-                            keyd = (candidate.gene, candidate.uniprot, r.get('antigen_catalog'), r.get('pdb_id'), r.get('entity_id'))
+                            keyd = (label, candidate.uniprot, r.get('antigen_catalog'), r.get('pdb_id'), r.get('entity_id'))
                             if keyd in seen:
                                 continue
                             seen.add(keyd)
                             wdbg.writerow([
-                                candidate.gene, candidate.uniprot, r.get('antigen_catalog',''), r.get('antigen_url',''),
+                                label, candidate.uniprot, r.get('antigen_catalog',''), r.get('antigen_url',''),
                                 r.get('antigen_is_biotinylated', False),
                                 r.get('molecular_weight_kda', None),
                                 r.get('accession',''), r.get('vendor_range',''),
