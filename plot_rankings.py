@@ -12,6 +12,10 @@ Reads a rankings TSV (tab-delimited) and generates:
 - CSV with summary stats + threshold exceedance counts
 
 Dependencies: pandas, matplotlib, numpy
+
+Example: /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv
+python plot_rankings.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv
+
 """
 
 import argparse

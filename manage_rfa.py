@@ -108,6 +108,7 @@ python manage_rfa.py pipeline 8ES8 \
   
 python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 20250908 --include_keyword "20250904"
 python manage_rfa.py assess-rfa-all 8ES8 --binder_chain_id H --run_label 20250910 --include_keyword "20250910"
+python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250910 --include_keyword "design"
 
 /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv
 python plot_rankings.py \
