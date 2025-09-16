@@ -755,6 +755,11 @@ def build_pymol_gallery_from_rankings(
     # Determine prepared chain: prefer provided arg else first row's stored value else 'T'
     prep_chain = prepared_target_chain_id or rows[0]["prepared_chain"]
 
+    # Epitope filename sanitize (match prep_target.py behavior)
+    def _sanitize_epitope_name(name: str) -> str:
+        s = (name or "").strip()
+        return s.replace(" ", "_").replace("/", "_").replace("\\", "_")
+
     def sanitize(s: str) -> str:
         return re.sub(r"[^A-Za-z0-9_.\-]+", "_", s.strip())[:180]
 
@@ -808,6 +813,8 @@ def build_pymol_gallery_from_rankings(
         "set auto_zoom, off\n",
         "set depth_cue, 0\n",
         "set antialias, 2\n",
+        "set stick_radius, 0.25\n",
+        "set sphere_scale, 0.6\n",
         "\n",
         # Load prepared target once
         "delete prepared_ref\n",
@@ -830,7 +837,21 @@ def build_pymol_gallery_from_rankings(
         "delete binder_gallery_rfdiff\n",
         "create binder_gallery_rfdiff, none\n",
         "set all_states, off, binder_gallery_rfdiff\n",
-        "alias both_on, enable binder_gallery_af3; enable binder_gallery_rfdiff; enable target_prepared; enable target_af3_gallery; enable target_rfcrop_gallery\n",
+        # Epitope galleries (stateful per design)
+        "delete epi_mask_gallery\n",
+        "create epi_mask_gallery, none\n",
+        "set all_states, off, epi_mask_gallery\n",
+        "delete epi_hot_gallery\n",
+        "create epi_hot_gallery, none\n",
+        "set all_states, off, epi_hot_gallery\n",
+        # Set representations/colors for epitope galleries
+        "hide everything, epi_mask_gallery\n",
+        "hide everything, epi_hot_gallery\n",
+        "show sticks, epi_mask_gallery\n",
+        "color yellow, epi_mask_gallery\n",
+        "show spheres, epi_hot_gallery\n",
+        "color red, epi_hot_gallery\n",
+        "alias both_on, enable binder_gallery_af3; enable binder_gallery_rfdiff; enable target_prepared; enable target_af3_gallery; enable target_rfcrop_gallery; enable epi_mask_gallery; enable epi_hot_gallery\n",
     ]
 
     for i, r in enumerate(rows, start=1):
@@ -840,6 +861,33 @@ def build_pymol_gallery_from_rankings(
         tmp_tg_af = f"__tgt_af_{i:03d}"
         tmp_bd_af = f"__bd_af3_{i:03d}"
         tmp_bd_rf = f"__bd_rf_{i:03d}"
+
+        # Resolve epitope/hotspot keys for this row's arm
+        arm = r.get("arm") or ""
+        if "@" in arm:
+            epi_name, hs_var = arm.rsplit("@", 1)
+        else:
+            epi_name, hs_var = arm, "A"
+        epi_file_base = _sanitize_epitope_name(epi_name)
+        mask_json = tdir / "prep" / f"epitope_{epi_file_base}.json"
+        hot_json  = tdir / "prep" / f"epitope_{epi_file_base}_hotspots{hs_var}.json"
+        mask_keys = []
+        hot_keys  = []
+        try:
+            if mask_json.exists():
+                mask_keys = json.loads(mask_json.read_text())
+        except Exception:
+            mask_keys = []
+        try:
+            if hot_json.exists():
+                hot_keys = json.loads(hot_json.read_text())
+        except Exception:
+            hot_keys = []
+        # Build PyMOL selection expressions relative to target_prepared
+        epi_map = _parse_keys_to_chain_resi(mask_keys or [], default_chain=prep_chain)
+        hot_map = _parse_keys_to_chain_resi(hot_keys or [],  default_chain=prep_chain)
+        epi_expr = _sel_from_map("target_prepared", epi_map)
+        hot_expr = _sel_from_map("target_prepared", hot_map)
 
         pml += [
             f"load {r['bundle_rfdiff']}, {obj_rf}\n",
@@ -876,6 +924,22 @@ def build_pymol_gallery_from_rankings(
             f"create binder_gallery_af3, {tmp_bd_af}, 1, {i}\n",
             f"create binder_gallery_rfdiff, {tmp_bd_rf}, 1, {i}\n",
 
+            # Epitope mask/hotspots for this state (derived from target_prepared)
+            *( [
+                f"create __epi_mask_tmp, {epi_expr}\n",
+                "show sticks, __epi_mask_tmp\n",
+                "color yellow, __epi_mask_tmp\n",
+                f"create epi_mask_gallery, __epi_mask_tmp, 1, {i}\n",
+                "delete __epi_mask_tmp\n",
+            ] if epi_expr else [] ),
+            *( [
+                f"create __epi_hot_tmp, {hot_expr}\n",
+                "show spheres, __epi_hot_tmp\n",
+                "color red, __epi_hot_tmp\n",
+                f"create epi_hot_gallery, __epi_hot_tmp, 1, {i}\n",
+                "delete __epi_hot_tmp\n",
+            ] if hot_expr else [] ),
+
             f"delete {tmp_bd_af}\n",
             f"delete {tmp_bd_rf}\n",
             f"delete {tmp_tg_rf}\n",
@@ -887,11 +951,15 @@ def build_pymol_gallery_from_rankings(
             "enable target_af3_gallery\n",
             "enable binder_gallery_af3\n",
             "enable binder_gallery_rfdiff\n",
+            "enable epi_mask_gallery\n",
+            "enable epi_hot_gallery\n",
             f"set state, {i}, target_rfcrop_gallery\n",
             f"set state, {i}, target_af3_gallery\n",
             f"set state, {i}, binder_gallery_af3\n",
             f"set state, {i}, binder_gallery_rfdiff\n",
-            "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff\n",
+            f"set state, {i}, epi_mask_gallery\n",
+            f"set state, {i}, epi_hot_gallery\n",
+            "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff or epi_mask_gallery or epi_hot_gallery\n",
             f"scene top_{i:03d}, store, view=1, animate=0\n",
             "\n",
         ]
@@ -904,13 +972,17 @@ def build_pymol_gallery_from_rankings(
         "enable target_af3_gallery\n",
         "enable binder_gallery_af3\n",
         "enable binder_gallery_rfdiff\n",
+        "enable epi_mask_gallery\n",
+        "enable epi_hot_gallery\n",
         "set all_states, on, target_rfcrop_gallery\n",
         "set all_states, on, target_af3_gallery\n",
         "set all_states, on, binder_gallery_af3\n",
         "set all_states, on, binder_gallery_rfdiff\n",
+        "set all_states, on, epi_mask_gallery\n",
+        "set all_states, on, epi_hot_gallery\n",
         "set cartoon_transparency, 0.75, binder_gallery_af3\n",
         "set cartoon_transparency, 0.75, binder_gallery_rfdiff\n",
-        "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff\n",
+        "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff or epi_mask_gallery or epi_hot_gallery\n",
         "scene overview, store, view=1, animate=0\n",
         "disable all\n",
         "enable target_prepared\n",
@@ -918,14 +990,20 @@ def build_pymol_gallery_from_rankings(
         "enable target_af3_gallery\n",
         "enable binder_gallery_af3\n",
         "enable binder_gallery_rfdiff\n",
+        "enable epi_mask_gallery\n",
+        "enable epi_hot_gallery\n",
         "set all_states, off, target_rfcrop_gallery\n",
         "set all_states, off, target_af3_gallery\n",
         "set all_states, off, binder_gallery_af3\n",
         "set all_states, off, binder_gallery_rfdiff\n",
+        "set all_states, off, epi_mask_gallery\n",
+        "set all_states, off, epi_hot_gallery\n",
         "set state, 1, target_rfcrop_gallery\n",
         "set state, 1, target_af3_gallery\n",
         "set state, 1, binder_gallery_af3\n",
         "set state, 1, binder_gallery_rfdiff\n",
+        "set state, 1, epi_mask_gallery\n",
+        "set state, 1, epi_hot_gallery\n",
         "frame 1\n",
         "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff\n",
         f"mset 1 x{len(rows)}\n",
@@ -943,6 +1021,8 @@ def build_pymol_gallery_from_rankings(
       - target_af3_gallery (grey, AF3 target chains)
       - binder_gallery_af3 (marine)
       - binder_gallery_rfdiff (purple)
+      - epi_mask_gallery (yellow sticks on target_prepared)
+      - epi_hot_gallery (red spheres on target_prepared; variant per state)
     """).strip()+"\n")
 
     print(f"✅ Gallery written: {bundle_dir}")
