@@ -1258,17 +1258,56 @@ def assess_rfa_all(
                         ipsae_min = ipsae_avg = ipsae_max = None
                         ipsae_pairs = None
                         if af3_conf and Path(af3_conf).exists() and af3_cif and Path(af3_cif).exists():
+                            print(f"[ipSAE] inputs: conf={af3_conf} exists={Path(af3_conf).exists()}  cif={af3_cif} exists={Path(af3_cif).exists()}")
+                            # Debug inputs
+                            try:
+                                conf_data = json.loads(Path(af3_conf).read_text())
+                                keys = list(conf_data.keys())
+                                print(f"[ipSAE][debug] confidences keys: {keys[:10]}{'...' if len(keys)>10 else ''}")
+                                if 'pae' in conf_data:
+                                    try:
+                                        print(f"[ipSAE][debug] PAE shape: {np.array(conf_data['pae']).shape}")
+                                    except Exception:
+                                        pass
+                                elif 'predicted_aligned_error' in conf_data:
+                                    try:
+                                        print(f"[ipSAE][debug] predicted_aligned_error shape: {np.array(conf_data['predicted_aligned_error']).shape}")
+                                    except Exception:
+                                        pass
+                                if 'atom_plddts' in conf_data:
+                                    try:
+                                        print(f"[ipSAE][debug] atom_plddts len: {len(conf_data['atom_plddts'])}")
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                print(f"[ipSAE][debug] failed reading confidences JSON: {e}")
+
+                            # Debug AF3 CIF chain IDs
+                            try:
+                                ext = Path(af3_cif).suffix.lower()
+                                parser = MMCIFParser(QUIET=True) if ext in ('.cif','.mmcif') else PDBParser(QUIET=True)
+                                s = parser.get_structure('af3', str(af3_cif))
+                                af3_chains = [str(ch.id) for ch in s[0].get_chains()]
+                                print(f"[ipSAE][debug] AF3 chains: {sorted(set(af3_chains))}")
+                                print(f"[ipSAE][debug] binder_chain_id param: {binder_chain_id} present={binder_chain_id in af3_chains}")
+                            except Exception as e:
+                                print(f"[ipSAE][debug] failed parsing AF3 CIF chains: {e}")
+
                             try:
                                 from scripts.ipsae_portable import compute_ipsae_af3  # type: ignore
                             except Exception:
                                 compute_ipsae_af3 = None  # type: ignore
                             if compute_ipsae_af3:
+                                print("[ipSAE] computing ipSAE via portable helper...")
                                 r_ = compute_ipsae_af3(Path(af3_conf), Path(af3_cif), pae_cutoff=10.0, binder_chain_id=binder_chain_id)
                                 ipsae_min = r_.get("ipsae_min")
                                 ipsae_avg = r_.get("ipsae_avg")
                                 ipsae_max = r_.get("ipsae_max")
                                 ipsae_pairs = r_.get("ipsae_pairs")
-                                print(f"[design] ipSAE(min/avg/max) = {ipsae_min:.4f}/{ipsae_avg:.4f}/{ipsae_max:.4f} over {ipsae_pairs} pairs")
+                                try:
+                                    print(f"[design] ipSAE(min/avg/max) = {float(ipsae_min):.4f}/{float(ipsae_avg):.4f}/{float(ipsae_max):.4f} over {int(ipsae_pairs)} pairs")
+                                except Exception:
+                                    print(f"[design] ipSAE(min/avg/max) = {ipsae_min}/{ipsae_avg}/{ipsae_max} over {ipsae_pairs} pairs")
                         else:
                             print("[design][skip] ipSAE: missing AF3 confidences or CIF")
                     except Exception as e:

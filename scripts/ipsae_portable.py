@@ -119,10 +119,26 @@ def compute_ipsae_af3(conf_json_path: Path,
             return {"ipsae_min": math.nan, "ipsae_avg": math.nan, "ipsae_max": math.nan, "ipsae_pairs": 0}
 
         # AF3 confidences JSON has 'pae' over atoms/tokens; subset using token_mask
-        pae_full = np.array(conf.get('pae'))
+        pae_full = conf.get('pae')
+        if pae_full is None:
+            # AF3 sometimes uses 'predicted_aligned_error'
+            pae_full = conf.get('predicted_aligned_error')
+        if pae_full is None:
+            return {"ipsae_min": math.nan, "ipsae_avg": math.nan, "ipsae_max": math.nan, "ipsae_pairs": 0}
+        pae_full = np.array(pae_full)
         if pae_full.ndim != 2:
             return {"ipsae_min": math.nan, "ipsae_avg": math.nan, "ipsae_max": math.nan, "ipsae_pairs": 0}
-        pae = pae_full[np.ix_(token_mask, token_mask)].astype(float)
+        # Depending on AF3 export, pae_full can be over tokens or already CA/C1 tokens
+        N = pae_full.shape[0]
+        M = int(np.sum(token_mask))
+        K = len(token_mask)
+        if N == K:
+            pae = pae_full[np.ix_(token_mask, token_mask)].astype(float)
+        elif N == M:
+            pae = pae_full.astype(float)
+        else:
+            # shape mismatch
+            return {"ipsae_min": math.nan, "ipsae_avg": math.nan, "ipsae_max": math.nan, "ipsae_pairs": 0}
 
         chains = np.array([r['chainid'] for r in residues])
         residue_types = np.array([r['res'] for r in residues])
@@ -161,9 +177,12 @@ def compute_ipsae_af3(conf_json_path: Path,
 
         # For unordered pairs, take min across directions
         pair_vals: List[float] = []
-        for i, ch1 in enumerate(uniq):
-            for ch2 in uniq[i+1:]:
-                if binder_chain_id and (ch1 != binder_chain_id and ch2 != binder_chain_id):
+        uniq_list = list(uniq)
+        # Fallback: if binder_chain_id provided but absent, compute over all pairs
+        restrict_binder = binder_chain_id in uniq_list if binder_chain_id else False
+        for i, ch1 in enumerate(uniq_list):
+            for ch2 in uniq_list[i+1:]:
+                if restrict_binder and (ch1 != binder_chain_id and ch2 != binder_chain_id):
                     continue
                 a = ipsae_asym.get((str(ch1), str(ch2)), 0.0)
                 b = ipsae_asym.get((str(ch2), str(ch1)), 0.0)
@@ -181,4 +200,3 @@ def compute_ipsae_af3(conf_json_path: Path,
         }
     except Exception:
         return {"ipsae_min": math.nan, "ipsae_avg": math.nan, "ipsae_max": math.nan, "ipsae_pairs": 0}
-
