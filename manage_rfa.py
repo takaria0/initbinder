@@ -309,7 +309,7 @@ if USE_LLM:
     import google.generativeai as genai  # pip install google-generativeai
     genai.configure(api_key=GOOGLE_API_KEY)
 
-from prep_target import prep_target
+from prep_target import prep_target, _enumerate_all_arm_combos
 from init_target import init_target
 from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
 from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
@@ -398,6 +398,7 @@ def main():
     p_batch = sub.add_parser("batch-prep", help="Run init, scope, and prep for multiple targets from a TSV file.")
     p_batch.add_argument("--tsv", required=True, help="Path to the TSV file from target-generation.")
     p_batch.add_argument("--sasa_cutoff", type=float, default=10.0, help="SASA cutoff to use for all targets.")
+    p_batch.add_argument("--write_enriched", action="store_true", help="Also write <catalog>_enriched.tsv with cross-references.")
     
     # --- RFdiffusion (multi-epitope, split-by-default) ---
     p_rfd = sub.add_parser("make-rfa-rfdiffusion", help="Run RFdiffusion for one or more arms (Epitope[@Variant]).")
@@ -529,6 +530,7 @@ def main():
             raise FileNotFoundError(f"Input TSV not found: {args.tsv}")
 
         processed_targets_info = []
+        enriched_rows = []
         with open(args.tsv, 'r', encoding='utf-8') as f:
             # Detect delimiter (assuming TSV here)
             reader = csv.DictReader(f, delimiter='\t')
@@ -566,6 +568,75 @@ def main():
                 prepared_pdb = prep_dir / "prepared.pdb"
                 hotspot_jsons = list(prep_dir.glob("epitope_*_hotspots*.json"))
                 
+                # 1) Link catalog → target.yaml and create a per-catalog pipeline launcher
+                try:
+                    target_yaml = target_dir / "target.yaml"
+                    ydoc = yaml.safe_load(target_yaml.read_text()) if target_yaml.exists() else {}
+                    if not isinstance(ydoc, dict):
+                        ydoc = {}
+                    # catalog_refs append (dedupe)
+                    refs = ydoc.get("catalog_refs") or []
+                    if not isinstance(refs, list):
+                        refs = []
+                    ref = {
+                        "catalog_path": str(Path(args.tsv).resolve()),
+                        "catalog_name": Path(args.tsv).name,
+                        "row_index": int(i + 2),
+                        "added_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    for k in ("id","uid","record_id","uniprot","gene","target_name"):
+                        if row.get(k): ref[k] = row.get(k)
+                    if not any((r.get("catalog_path") == ref["catalog_path"] and r.get("row_index") == ref["row_index"]) for r in refs):
+                        refs.append(ref)
+                    ydoc["catalog_refs"] = refs
+
+                    # Optional: generate a default pipeline script based on detected arms
+                    pipelines = ydoc.get("pipelines") or []
+                    if not isinstance(pipelines, list): pipelines = []
+                    try:
+                        arms = _enumerate_all_arm_combos(pdb_id) or []
+                    except Exception:
+                        arms = []
+                    pipeline_paths = []
+                    if arms:
+                        launch_dir = target_dir / "designs" / "launchers"; _ensure_dir(launch_dir)
+                        label = Path(args.tsv).stem
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        run_tag = f"{label}_{ts}"
+                        total = int(os.getenv("RFA_PIPELINE_TOTAL", str(len(arms))))
+                        dpt   = int(os.getenv("RFA_PIPELINE_DPT",  "100"))
+                        num_s = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "1"))
+                        temp  = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
+                        bcid  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
+                        sh = launch_dir / f"pipeline_{pdb_id.upper()}_{label}_{ts}.sh"
+                        lines = ["#!/bin/bash","set -euo pipefail","",
+                                 f"python manage_rfa.py pipeline {pdb_id.upper()} \\"]
+                        for idx, a in enumerate(arms):
+                            cont = " \\\"" if idx < len(arms) - 1 else " \\\""
+                            lines.append(f"  --arm \"{a}\"{cont}")
+                        lines += [
+                            f"  --total {total} \\",
+                            f"  --designs_per_task {dpt} \\",
+                            f"  --num_seq {num_s} --temp {temp} \\",
+                            f"  --binder_chain_id {bcid} \\",
+                            f"  --run_tag {run_tag}",
+                        ]
+                        Path(sh).write_text("\n".join(lines) + "\n"); os.chmod(sh, 0o755)
+                        pipeline_paths.append(str(sh.resolve()))
+                        pipelines.append({
+                            "label": label,
+                            "script_path": str(sh.resolve()),
+                            "generated_from_catalog": Path(args.tsv).name,
+                            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "arms": arms,
+                            "params": {"total": total, "designs_per_task": dpt, "num_seq": num_s, "temp": temp, "binder_chain_id": bcid, "run_tag": run_tag},
+                        })
+                        ydoc["pipelines"] = pipelines
+
+                    target_yaml.write_text(yaml.safe_dump(ydoc, sort_keys=False))
+                except Exception as e:
+                    print(f"[warn] Failed to cross-link catalog for {pdb_id.upper()}: {e}")
+                
                 if prepared_pdb.exists():
                     processed_targets_info.append({
                         "pdb_id": pdb_id.upper(),
@@ -574,6 +645,22 @@ def main():
                     })
                 else:
                     print(f"[warn] Could not find prepared.pdb for {pdb_id.upper()}; it will be excluded from the PyMOL bundle.")
+
+                # 2) Build enriched TSV row for this catalog record
+                enr = dict(row)
+                enr["target_yaml_path"] = str((target_dir/"target.yaml").resolve())
+                try:
+                    # if pipelines were made above, pipeline_paths is defined; else try to compute arms count
+                    if 'pipeline_paths' in locals() and pipeline_paths:
+                        enr["pipeline_script_paths"] = ";".join(pipeline_paths)
+                except Exception:
+                    pass
+                try:
+                    arms = _enumerate_all_arm_combos(pdb_id) or []
+                    enr["arm_count"] = len(arms)
+                except Exception:
+                    pass
+                enriched_rows.append(enr)
 
                 if i < len(rows) - 1:
                     print(f"\n--- Waiting 90 seconds before next target to avoid rate limits ---")
@@ -588,6 +675,17 @@ def main():
                     print(f"--- Waiting 90 seconds before next target to avoid rate limits ---")
                     time.sleep(90)
         
+        # Optionally write an enriched TSV alongside the catalog
+        if args.write_enriched and enriched_rows:
+            out_tsv = Path(args.tsv).with_name(Path(args.tsv).stem + "_enriched.tsv")
+            fields = list(enriched_rows[0].keys())
+            with open(out_tsv, "w", newline="", encoding="utf-8") as wf:
+                wr = csv.DictWriter(wf, fieldnames=fields, delimiter='\t')
+                wr.writeheader()
+                for r in enriched_rows:
+                    wr.writerow(r)
+            print(f"[ok] Enriched catalog TSV written to: {out_tsv}")
+
         if processed_targets_info:
             print(f"\n{'='*20} Batch Processing Complete {'='*20}")
             print("Generating consolidated PyMOL visualization bundle for all successful targets...")

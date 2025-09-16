@@ -34,11 +34,32 @@ Usage (standalone):
 #   high level targets:
     python target_generation.py --instruction "top 200 proteins we should target for antibody therapeutics with high unmet medical need" \
         --max_targets 200 --species human --prefer_tags biotin --no_browser_popup
+
+grow an existing catalog by excluding prior picks (avoid duplicates)
+Example: continue expanding the list that already exists here:
+/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv
+Use the same prefix to append to the same files, and pass the existing TSV to --avoid_tsv.
+(The prefix here is everything before the trailing _all.tsv/_biotin.tsv suffix.)
+
+Continue appending (avoids duplicates):
+python target_generation.py \
+    --instruction "top 200 targets we should target for antibody therapeutics with high unmet medical need (human proteins, viral targets, bacterial targets, etc, as long as they are relevant and can purchase recombinant proteins for experimental characterization)" \
+    --max_targets 200 --species human --prefer_tags biotin \
+    --out_prefix top_200_proteins_we_should_targe_20250915_142053 \
+    --avoid_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
+    --no_browser_popup
+    
+
+Tip: You can also include the biotin TSV in --avoid_tsv if desired:
+    ... --avoid_tsv \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_biotin.tsv
 """
 
 from __future__ import annotations
 
 import csv
+import shutil
 import hashlib
 import json
 import os
@@ -763,25 +784,68 @@ def _select_best_match(pdb_ids: List[str], antigen_options: List[AntigenOption],
     return best, all_records
 
 # -------------------- Core Pipeline --------------------
-def expand_instruction_to_queries(instruction: str, species: str, max_targets: int) -> List[str]:
+def _load_avoid_names(tsv_paths: List[str]) -> set[str]:
+    """Load gene/protein names to avoid from one or more TSVs."""
+    avoid: set[str] = set()
+    for p in (tsv_paths or []):
+        try:
+            path = Path(p)
+            if not path.exists():
+                continue
+            with path.open('r', encoding='utf-8') as f:
+                rd = csv.DictReader(f, delimiter='\t')
+                cols = [c.lower().strip() for c in (rd.fieldnames or [])]
+                name_cols = []
+                for c in ('gene','protein_name','target_name'):
+                    if c in cols:
+                        name_cols.append((c, (rd.fieldnames or [])[cols.index(c)]))
+                for r in rd:
+                    for _, orig in name_cols:
+                        v = (r.get(orig) or '').strip()
+                        if v:
+                            avoid.add(v.upper())
+        except Exception as e:
+            log_info(f"[warn] failed to read avoid TSV {p}: {e}")
+    return avoid
+
+def expand_instruction_to_queries(instruction: str, species: str, max_targets: int,
+                                  *, avoid_from_tsv: Optional[List[str]] = None) -> List[str]:
+    """
+    Expand an instruction into candidate gene symbols, avoiding names present in prior TSVs.
+    - If instruction is a comma-separated list, filter out avoided names and truncate to max_targets.
+    - If LLM is disabled, return the instruction itself.
+    - Otherwise, prompt the LLM with an explicit exclusion list and post-filter the results.
+    """
+    avoid_names = _load_avoid_names(avoid_from_tsv or [])
+
+    # Explicit comma-separated list path
     if "," in instruction and len(instruction.split(",")[0]) < 15:
-        items = [q.strip() for q in instruction.split(",") if q.strip()][:max_targets]
-        log_info(f"[info] Instruction treated as explicit gene list: {', '.join(items)}")
-        return items
+        items = [q.strip() for q in instruction.split(",") if q.strip()]
+        items_nodup = [s for s in items if s.upper() not in avoid_names]
+        out = items_nodup[:max_targets]
+        log_info(f"[info] Explicit list → {len(out)} items after excluding {len(items)-len(items_nodup)} duplicates.")
+        return out
+
     if not USE_LLM:
         log_info("[warn] LLM disabled. Using the instruction as a single query.")
-        return [instruction.strip()]
+        base = [instruction.strip()]
+        return [s for s in base if s.upper() not in avoid_names][:max_targets]
+
     try:
         model = genai.GenerativeModel(LLM_PRO_MODEL_NAME)
+        # Provide an exclusion list; ask for more than max to allow post-filtering
+        max_request = min(max_targets * 2, max_targets + 20)
+        exclusion_block = "\n".join(sorted(list(avoid_names))[:200]) if avoid_names else "(none)"
         prompt = textwrap.dedent(
             f"""
-            Your task is to act as a bioinformatician and generate a list of official gene symbols based on a user's request.
+            You are a bioinformatician generating OFFICIAL GENE SYMBOLS for the following request.
 
-            **User Request:** "{instruction}"
-            **Species:** {species}
-            **Maximum number of targets:** {max_targets}
-
-            Return a newline-separated list of gene symbols ONLY.
+            - Species: {species}
+            - User request: "{instruction}"
+            - Exclusion list (do NOT include these gene symbols; case-insensitive):
+              {exclusion_block}
+            - Return up to {max_request} NEW gene symbols not in the exclusion list.
+            - Output format: one symbol per line; no numbering, no extra text.
             """
         ).strip()
         log_debug("[LLM PRO] expand_instruction_to_queries PROMPT:\n" + prompt)
@@ -789,14 +853,23 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         text = (getattr(response, "text", None) or "").strip()
         log_debug("[LLM PRO] expand_instruction_to_queries RAW:\n" + text)
         items = [s.strip() for s in text.splitlines() if s.strip()]
-        if not items:
-            raise ValueError("empty list")
-        items = items[:max_targets]
-        log_info(f"[info] LLM generated gene list: {', '.join(items)}")
-        return items
+        # Post-filter against avoidance set (case-insensitive) and deduplicate
+        uniq = []
+        seen = set()
+        for s in items:
+            u = s.upper()
+            if u in avoid_names or u in seen:
+                continue
+            seen.add(u)
+            uniq.append(s)
+        out = uniq[:max_targets]
+        log_info(f"[info] LLM generated {len(out)} unique gene symbols after exclusion (requested up to {max_request}).")
+        log_debug(f"[debug] Final gene symbols: {out}")
+        return out
     except Exception as e:
         log_info(f"[warn] LLM expansion failed: {e}. Fallback to raw instruction.")
-        return [instruction.strip()]
+        base = [instruction.strip()]
+        return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
 def build_candidate(term: str, species: str, *, require_biotinylated_primary: bool = True) -> Optional[Candidate]:
     org_id = "9606" if species.lower() == "human" else "10090"
@@ -979,7 +1052,75 @@ def run_target_generation(args):
     -------------------------------------------
     """).strip())
 
-    queries = expand_instruction_to_queries(args.instruction, args.species, args.max_targets)
+    # Determine outputs (support appending to grow catalogs across runs)
+    instruction_slug = _slugify(args.instruction, maxlen=32)
+    prefix = args.out_prefix or f"{instruction_slug}_{RUN_TS}"
+    out_biotin = CATALOG_DIR / f"{prefix}_biotin.tsv"
+    out_all    = CATALOG_DIR / f"{prefix}_all.tsv"
+    out_dbg    = CATALOG_DIR / f"{prefix}_debug.tsv"
+
+    # Backup existing TSVs once per run to preserve original snapshot
+    def _backup_original_file(p: Path):
+        if not p.exists():
+            return None
+        base = p.stem
+        # Prefer a stable _original name; if exists, add timestamp
+        candidate = p.with_name(base + "_original" + p.suffix)
+        if candidate.exists():
+            candidate = p.with_name(f"{base}_original_{RUN_TS}{p.suffix}")
+        try:
+            shutil.copy2(str(p), str(candidate))
+            log_info(f"[backup] Saved original copy: {candidate}")
+            return candidate
+        except Exception as e:
+            log_info(f"[backup][warn] Failed to back up {p}: {e}")
+            return None
+
+    for _p in (out_biotin, out_all, out_dbg):
+        _backup_original_file(_p)
+
+    # Avoid duplicates using pre-existing catalogs: combine user-provided avoid TSVs and current outputs
+    avoid_list = list(args.avoid_tsv or [])
+    for p in (out_biotin, out_all):
+        if p.exists():
+            avoid_list.append(str(p))
+
+    queries = expand_instruction_to_queries(
+        args.instruction, args.species, args.max_targets,
+        avoid_from_tsv=avoid_list
+    )
+
+    candidates: List[Candidate] = []
+    # Prepare writers (create files with headers if missing); gather existing keys and running ranks
+    def _ensure_header(path: Path, columns: list[str]):
+        if not path.exists():
+            with path.open('w', newline='', encoding='utf-8') as f:
+                csv.writer(f, delimiter='\t').writerow(columns)
+
+    _ensure_header(out_biotin, SUMMARY_COLUMNS)
+    _ensure_header(out_all, SUMMARY_COLUMNS)
+    _ensure_header(out_dbg, DEBUG_COLUMNS)
+
+    existing_keys: set[tuple[str,str]] = set()  # (selection, UNIPROT)
+    biotin_rank = all_rank = 0
+    try:
+        with out_biotin.open('r', encoding='utf-8') as f:
+            rd = csv.DictReader(f, delimiter='\t')
+            for r in rd:
+                biotin_rank += 1
+                key = ((r.get('selection') or 'biotin').lower(), (r.get('uniprot') or '').upper())
+                existing_keys.add(key)
+    except Exception:
+        pass
+    try:
+        with out_all.open('r', encoding='utf-8') as f:
+            rd = csv.DictReader(f, delimiter='\t')
+            for r in rd:
+                all_rank += 1
+                key = ((r.get('selection') or 'any').lower(), (r.get('uniprot') or '').upper())
+                existing_keys.add(key)
+    except Exception:
+        pass
 
     candidates: List[Candidate] = []
     for i, q in enumerate(queries, 1):
@@ -988,6 +1129,59 @@ def run_target_generation(args):
             candidate = build_candidate(q, args.species, require_biotinylated_primary=require_biotin)
             if candidate:
                 candidates.append(candidate)
+                # Append to catalogs incrementally, de-duplicated by (selection, UNIPROT)
+                if candidate.selections.get('biotin'):
+                    key = ('biotin', candidate.uniprot.upper())
+                    if key not in existing_keys:
+                        biotin_rank += 1
+                        row = _selection_to_row('biotin', biotin_rank, candidate)
+                        if row:
+                            with out_biotin.open('a', newline='', encoding='utf-8') as f:
+                                csv.writer(f, delimiter='\t').writerow(row)
+                            existing_keys.add(key)
+                            log_info(f"[append] +biotin {candidate.gene} ({candidate.uniprot}) → rank {biotin_rank}")
+                        else:
+                            log_info(f"[append][skip] No biotin selection row for {candidate.gene}")
+                    else:
+                        log_info(f"[append][dup] biotin {candidate.gene} ({candidate.uniprot}) already present; skipping")
+
+                if candidate.selections.get('any'):
+                    key = ('any', candidate.uniprot.upper())
+                    if key not in existing_keys:
+                        all_rank += 1
+                        row = _selection_to_row('any', all_rank, candidate)
+                        if row:
+                            with out_all.open('a', newline='', encoding='utf-8') as f:
+                                csv.writer(f, delimiter='\t').writerow(row)
+                            existing_keys.add(key)
+                            log_info(f"[append] +any {candidate.gene} ({candidate.uniprot}) → rank {all_rank}")
+                        else:
+                            log_info(f"[append][skip] No any selection row for {candidate.gene}")
+                    else:
+                        log_info(f"[append][dup] any {candidate.gene} ({candidate.uniprot}) already present; skipping")
+
+                # Append debug rows (dedupe within candidate)
+                if candidate.debug_matches:
+                    with out_dbg.open('a', newline='', encoding='utf-8') as f:
+                        wdbg = csv.writer(f, delimiter='\t')
+                        seen = set()
+                        for r in candidate.debug_matches:
+                            keyd = (candidate.gene, candidate.uniprot, r.get('antigen_catalog'), r.get('pdb_id'), r.get('entity_id'))
+                            if keyd in seen:
+                                continue
+                            seen.add(keyd)
+                            wdbg.writerow([
+                                candidate.gene, candidate.uniprot, r.get('antigen_catalog',''), r.get('antigen_url',''),
+                                r.get('antigen_is_biotinylated', False),
+                                r.get('molecular_weight_kda', None),
+                                r.get('accession',''), r.get('vendor_range',''),
+                                r.get('pdb_id',''), r.get('entity_id',''), r.get('auth_chain',''),
+                                f"{(r.get('identity') or 0):.3f}" if r.get('identity') is not None else "",
+                                f"{(r.get('coverage') or 0):.3f}" if r.get('coverage') is not None else "",
+                                r.get('intersection',''), r.get('u_range',''),
+                                f"{(r.get('resolution_A') or 0):.2f}" if r.get('resolution_A') is not None else "",
+                                r.get('method',''), r.get('release_date',''), r.get('subunit_name',''),
+                            ])
         except Exception as e:
             log_info(f"[error] Failed processing query '{q}': {e}")
             import traceback
@@ -998,10 +1192,8 @@ def run_target_generation(args):
         log_info("[warn] No valid candidates were generated.")
         return []
 
-    prefix = f"{instruction_slug}_{RUN_TS}"
-    write_summaries(candidates, prefix=prefix)
-    write_debug(candidates, prefix=prefix)
-
+    # Summaries already appended incrementally.
+    
     log_info("[done] Target generation complete.")
     log_info(f"[note] Full debug (prompts, HTML bodies, LLM outputs) saved to: {LOG_PATH}")
     return candidates
@@ -1015,5 +1207,11 @@ if __name__ == "__main__":
     ap.add_argument("--prefer_tags", default="biotin")
     ap.add_argument("--no_browser_popup", action="store_true",
                     help="Run page fetches headless (no visible browser windows). Recommended for scale.")
+    # Exclusion control to avoid duplicates across catalogs
+    ap.add_argument("--avoid_tsv", type=str, nargs="*", default=None,
+                    help="One or more existing TSVs whose gene/protein names should be excluded from this run.")
+    # Output prefix to allow building a growing catalog across runs
+    ap.add_argument("--out_prefix", type=str, default=None,
+                    help="Output file prefix (under targets_catalog/). If omitted, uses instruction+timestamp.")
     a = ap.parse_args()
     run_target_generation(a)
