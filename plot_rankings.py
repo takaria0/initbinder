@@ -91,6 +91,28 @@ def plot_iptm_hist(iptm: np.ndarray, out: Path, thresholds: list[float], dpi: in
 
     safe_savefig(out, dpi=dpi)
 
+
+def plot_metric_hist_generic(values: np.ndarray, out: Path, bins: int, rng: tuple[float,float] | None, xlabel: str, title: str, dpi: int):
+    vals = np.asarray(values)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
+    plt.figure(figsize=(6,4))
+    if rng is None:
+        lo = float(np.nanmin(vals)) if vals.size else 0.0
+        hi = float(np.nanmax(vals)) if vals.size else 1.0
+        if hi <= lo:
+            hi = lo + 1e-3
+        rng = (lo, hi)
+    plt.hist(vals, bins=bins, range=rng, edgecolor='black', alpha=0.7)
+    plt.xlabel(xlabel)
+    plt.ylabel('Count')
+    plt.title(title)
+    mu, med = float(np.mean(vals)), float(np.median(vals))
+    add_vlines([mu], labels=[f"mean={mu:.3f}"], color='C1', linestyle='--', alpha=0.8)
+    add_vlines([med], labels=[f"median={med:.3f}"], color='C2', linestyle='-.', alpha=0.8)
+    safe_savefig(out, dpi=dpi)
+
 def plot_iptm_ecdf(iptm: np.ndarray, out: Path, thresholds: list[float], dpi: int):
     plt.figure(figsize=(6,4))
     xs, ys = ecdf(iptm)
@@ -354,6 +376,23 @@ def main():
 
             else:
                 print(f"[info] {metric_name} column found, but contains no valid numeric values.")
+
+    # --- ipSAE histograms (min/avg/max) if present ---
+    ipsae_cols = {
+        "ipSAE_min": find_column(df, ["ipsae_min", "ipSAE_min"], contains_any=None),
+        "ipSAE_avg": find_column(df, ["ipsae_avg", "ipSAE_avg"], contains_any=None),
+        "ipSAE_max": find_column(df, ["ipsae_max", "ipSAE_max"], contains_any=None),
+    }
+    for label, col in ipsae_cols.items():
+        if not col:
+            continue
+        vals = to_numeric(df.loc[base_mask, col]).to_numpy(dtype=float)
+        try:
+            plot_metric_hist_generic(vals, out_dir / (f"{label}_hist" + img_ext), bins=30, rng=(0,1), xlabel=label, title=f"{label} Distribution", dpi=args.dpi)
+            stats[label] = short_stats(vals[np.isfinite(vals)])
+            num_df_cols[label] = to_numeric(corr_df[col])
+        except Exception as e:
+            print(f"[warn] Failed to plot {label}: {e}")
 
     # Boxplot by epitope
     if epitope_col:

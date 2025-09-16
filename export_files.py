@@ -19,7 +19,7 @@ python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/
 
 """
 
-import argparse, csv, json, re, sys, time
+import argparse, csv, json, re, sys, time, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
@@ -245,6 +245,8 @@ def main():
 
     # Selection
     ap.add_argument("--top_n", type=int, default=48)
+    ap.add_argument("--order_by", type=str, choices=["iptm","ipsae_min","binder_rmsd"], default=None,
+                    help="Optional resort before taking top N: 'iptm' (desc), 'ipsae_min' (desc), or 'binder_rmsd' (asc)")
 
     # Adapters (defaults frequently used; case preserved)
     ap.add_argument("--prefix_raw", type=str,
@@ -284,7 +286,29 @@ def main():
     # Resolve out_dir (ROOT/targets/{pdb_id}/designs/exports by default)
     out_dir = resolve_out_dir(rankings_path, args.out_dir, rows)
 
-    # Take top N as-is
+    # Optional resort
+    if args.order_by:
+        key_candidates = {
+            "iptm": ["af3_iptm","iptm","iptm_mean","iptm_score"],
+            "ipsae_min": ["ipsae_min","ipSAE_min"],
+            "binder_rmsd": ["rmsd_binder_prepared_frame","rfdiff_vs_af3_pose_rmsd","binder_rmsd"],
+        }[args.order_by]
+
+        def get_num(r: dict) -> float:
+            for k in key_candidates:
+                if k in r and str(r[k]).strip() != "":
+                    try:
+                        return float(r[k])
+                    except Exception:
+                        continue
+            return float('nan')
+
+        reverse = (args.order_by in ("iptm","ipsae_min"))  # higher is better
+        rows_sorted = sorted(rows, key=lambda r: (-(get_num(r)) if reverse else get_num(r),), reverse=False)
+        rows = [r for r in rows_sorted if not (isinstance(get_num(r), float) and math.isnan(get_num(r)))] + \
+               [r for r in rows_sorted if (isinstance(get_num(r), float) and math.isnan(get_num(r)))]
+
+    # Take top N after optional resort
     picks = rows[: max(0, args.top_n)]
 
     # Derive label

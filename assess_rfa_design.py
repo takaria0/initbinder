@@ -1170,6 +1170,9 @@ def assess_rfa_all(
                 af3_frac_dis = None
                 af3_cif = af3_summary = None
                 pml_path = None
+                # ipSAE aggregates (initialize empty)
+                ipsae_min = ipsae_avg = ipsae_max = None
+                ipsae_pairs = None
 
                 # Pose metrics container (pre-fill)
                 pose_metrics: Dict[str, float | str | int] = {
@@ -1200,6 +1203,7 @@ def assess_rfa_all(
                 if best:
                     af3_summary = best["summary"]
                     af3_cif = best["cif"]
+                    af3_conf = best.get("conf")
                     try:
                         s = _loads_fast(af3_summary)
                         af3_rank = float(s.get("ranking_score", "nan"))
@@ -1249,6 +1253,27 @@ def assess_rfa_all(
                             print(f"[warn] build PML failed: {e}")
                             pml_path = None
 
+                    # ---- ipSAE metrics (AF3) ----
+                    try:
+                        ipsae_min = ipsae_avg = ipsae_max = None
+                        ipsae_pairs = None
+                        if af3_conf and Path(af3_conf).exists() and af3_cif and Path(af3_cif).exists():
+                            try:
+                                from scripts.ipsae_portable import compute_ipsae_af3  # type: ignore
+                            except Exception:
+                                compute_ipsae_af3 = None  # type: ignore
+                            if compute_ipsae_af3:
+                                r_ = compute_ipsae_af3(Path(af3_conf), Path(af3_cif), pae_cutoff=10.0, binder_chain_id=binder_chain_id)
+                                ipsae_min = r_.get("ipsae_min")
+                                ipsae_avg = r_.get("ipsae_avg")
+                                ipsae_max = r_.get("ipsae_max")
+                                ipsae_pairs = r_.get("ipsae_pairs")
+                                print(f"[design] ipSAE(min/avg/max) = {ipsae_min:.4f}/{ipsae_avg:.4f}/{ipsae_max:.4f} over {ipsae_pairs} pairs")
+                        else:
+                            print("[design][skip] ipSAE: missing AF3 confidences or CIF")
+                    except Exception as e:
+                        print(f"[warn] ipSAE calc failed for {design_name}: {e}")
+
                 final_score = af3_iptm if af3_iptm is not None and af3_iptm == af3_iptm else None
 
                 row_data = {
@@ -1265,6 +1290,7 @@ def assess_rfa_all(
                     "prepared_target_chain_id": prepared_chain_sel,
                     "af3_model_cif_path": str(af3_cif.resolve()) if af3_cif else "",
                     "af3_summary_json_path": str(af3_summary.resolve()) if af3_summary else "",
+                    "af3_confidences_json_path": str(af3_conf.resolve()) if af3_conf else "",
                     "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",
                     "af3_ranking_score": af3_rank if af3_rank is not None else "",
                     "af3_iptm": af3_iptm if af3_iptm is not None else "",
@@ -1272,6 +1298,11 @@ def assess_rfa_all(
                     "af3_has_clash": af3_has_clash if af3_has_clash is not None else "",
                     "af3_fraction_disordered": af3_frac_dis if af3_frac_dis is not None else "",
                     "pymol_script_path": str(pml_path.resolve()) if (pml_path and not skip_pml) else "",
+                    # ipSAE aggregates (binder vs others)
+                    "ipsae_min": f"{ipsae_min:.6f}" if isinstance(ipsae_min, (int,float)) and ipsae_min==ipsae_min else "",
+                    "ipsae_avg": f"{ipsae_avg:.6f}" if isinstance(ipsae_avg, (int,float)) and ipsae_avg==ipsae_avg else "",
+                    "ipsae_max": f"{ipsae_max:.6f}" if isinstance(ipsae_max, (int,float)) and ipsae_max==ipsae_max else "",
+                    "ipsae_pairs": int(ipsae_pairs) if isinstance(ipsae_pairs, (int,float)) and ipsae_pairs==ipsae_pairs else "",
                     "final_score": final_score if final_score is not None else ""
                 }
                 row_data.update(pose_metrics)
@@ -1302,7 +1333,7 @@ def assess_rfa_all(
         "design_name","binder_chain","binder_seq","binder_len",
         "mpnn_pdb_path",
         "prepared_pdb_path","prepared_target_chain_id",
-        "af3_model_cif_path","af3_summary_json_path",
+        "af3_model_cif_path","af3_summary_json_path","af3_confidences_json_path",
         "af3_ranking_score","af3_iptm","af3_ptm","af3_has_clash","af3_fraction_disordered",
         "rfdiffusion_pdb_path",
         # Key RMSD metrics (prepared frame)
@@ -1314,6 +1345,8 @@ def assess_rfa_all(
         "af3_target_fit_pairs", "af3_target_fit_rmsd", "af3_target_fit_map",
         "rf_target_fit_pairs", "rf_target_fit_rmsd", "rf_target_fit_map",
         "target_ca_count_prepared", "binder_ca_count_rfdiff", "binder_ca_count_af3",
+        # ipSAE aggregates (binder vs others)
+        "ipsae_min","ipsae_avg","ipsae_max","ipsae_pairs",
         # compatibility keys
         "rfdiff_vs_af3_pose_rmsd", "binder_rmsd_kabsch",
         "pymol_script_path",
