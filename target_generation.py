@@ -127,6 +127,8 @@ MIN_IDENTITY_SOFT = 0.95
 UNIPROT_GET = "https://rest.uniprot.org/uniprotkb/{acc}"
 UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
 RCSB_ENTRY = "https://data.rcsb.org/rest/v1/core/entry/{pdb}"
+NCBI_REQUEST_DELAY = 1.0  # Delay in seconds to avoid hitting NCBI rate limits (3 requests/sec)
+
 
 # -------------------- Helpers --------------------
 def _cache_key(url: str, params: Optional[dict] = None) -> Path:
@@ -555,6 +557,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
 
 # -------------------- PDB helpers --------------------
 def _get_ncbi_sequence(accession: str) -> str:
+    time.sleep(NCBI_REQUEST_DELAY)  # <-- ADDED: Throttle requests to NCBI
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
     params = {"db": "protein", "id": accession, "rettype": "fasta", "retmode": "text"}
     try:
