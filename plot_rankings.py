@@ -272,7 +272,7 @@ def main():
     print("[info] Detecting columns...")
     iptm_col = find_column(df, ["af3_iptm","iptm","iptm_global","iptm_score"], contains_any=["iptm"])
     pose_rmsd_col = find_column(df, ["rmsd_binder_target_aligned"])
-    binder_rmsd_col = find_column(df, ["binder_rmsd_kabsch"])
+    binder_rmsd_col = find_column(df, ["rmsd_binder_prepared_frame"])
     name_col = find_column(df, ["design_name","name","variant","id"], None)
     epitope_col = find_column(df, ["epitope","hotspot_category","hotspot","epitope_name"], None)
     dsasa_col = find_column(df, ["dsasa","delta_sasa","iface_dsasa"], contains_any=["dsasa"])
