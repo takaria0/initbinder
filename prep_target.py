@@ -89,7 +89,7 @@ def suggest_pipeline_command(pdb_id: str):
     # ==== デフォルト値（環境変数で上書き可）====
     total            = int(os.getenv("RFA_PIPELINE_TOTAL", str(len(arms))))  # 既定=検出 arm 数
     designs_per_task = int(os.getenv("RFA_PIPELINE_DPT",  "100"))
-    num_seq          = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "1"))
+    num_seq          = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "10"))
     temp             = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
     binder_chain_id  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
     seeds_env        = os.getenv("RFA_PIPELINE_MODEL_SEEDS", "1 2 3 4 5 6 7 8 9 10")

@@ -618,7 +618,7 @@ def main():
                         run_tag = f"{label}_{ts}"
                         total = int(os.getenv("RFA_PIPELINE_TOTAL", str(len(arms))))
                         dpt   = int(os.getenv("RFA_PIPELINE_DPT",  "100"))
-                        num_s = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "1"))
+                        num_s = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "10"))
                         temp  = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
                         bcid  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
                         seeds_env = os.getenv("RFA_PIPELINE_MODEL_SEEDS", "1 2 3 4 5 6 7 8 9 10")
