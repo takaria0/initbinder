@@ -10,12 +10,15 @@ export_simple_picks.py — Minimal, clean exporter for de novo binder orders.
 - Auto out_dir: ROOT/targets/{pdb_id}/designs/exports (from utils.ROOT).
 
 Example usage:
-python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+/pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+/pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv
+python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv \
     --top_n 48 \
-    --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA
+    --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA \
     --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
     --codon_host yeast --use_dnachisel --dnachisel_species saccharomyces_cerevisiae \
-    --gc_target 0.45 --gc_window 100
+    --gc_target 0.45 --gc_window 100 \
+    --order_by ipsae_min
 
 """
 
@@ -359,7 +362,7 @@ def main():
         despath = detect_design_path(r, rankings_dir)
 
         # FASTA
-        aa_fasta_lines += [f">{name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}", aa]
+        aa_fasta_lines += [f">{name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}|ipSAE_min={get_optional_float(r, ['ipsae_min','ipSAE_min']) if get_optional_float(r, ['ipsae_min','ipSAE_min']) is not None else 'NA'}|binder_rmsd={get_optional_float(r, ['rmsd_binder_prepared_frame','binder_rmsd']) if get_optional_float(r, ['rmsd_binder_prepared_frame','binder_rmsd']) is not None else 'NA'}", aa]
         dna_fasta_lines += [f">{name}|len_nt={len(dna_full)}|gc={gc_full:.3f}|prefix={len(pre)}|suffix={len(suf)}", dna_full]
 
         # Plate
@@ -379,6 +382,8 @@ def main():
             "prefix_len": len(pre),
             "suffix_len": len(suf),
             "iptm": iptm if iptm is not None else "",
+            "ipsae_min": get_optional_float(r, ["ipsae_min","ipSAE_min"]) if get_optional_float(r, ["ipsae_min","ipSAE_min"]) is not None else "",
+            "binder_rmsd": get_optional_float(r, ["rmsd_binder_prepared_frame","binder_rmsd"]) if get_optional_float(r, ["rmsd_binder_prepared_frame","binder_rmsd"]) is not None else "",
             "epitope": epitope,
             "design_path": despath,
         })
