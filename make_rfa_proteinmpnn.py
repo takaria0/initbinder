@@ -38,6 +38,7 @@ def make_rfa_proteinmpnn_command(pdb_id: str, epitope: str, num_seq: int, temp: 
     #SBATCH --gres=gpu:{SLURM_GPU_TYPE}
     #SBATCH --cpus-per-task=1
     #SBATCH --mem=16G
+    #SBATCH --time=08:00:00
     #SBATCH --output=slurm_logs/{job_name}_%j.out
     #SBATCH --error=slurm_logs/{job_name}_%j.err
     set -euo pipefail

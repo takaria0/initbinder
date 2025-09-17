@@ -491,6 +491,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         #SBATCH -A {SLURM_ACCOUNT}
         #SBATCH --gres=gpu:{SLURM_GPU_TYPE}
         #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=64G
+        #SBATCH --time=08:00:00
         #SBATCH --output=slurm_logs/{job1_name}_%j.out --error=slurm_logs/{job1_name}_%j.err
 
         set -euo pipefail
@@ -606,6 +607,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         #SBATCH -A {SLURM_ACCOUNT}
         #SBATCH --gres=gpu:{SLURM_GPU_TYPE}
         #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=16G
+        #SBATCH --time=08:00:00
         #SBATCH --array=1-{num_stage2_tasks}
         #SBATCH --output=slurm_logs/{job2_name}_%A_%a.out --error=slurm_logs/{job2_name}_%A_%a.err
 

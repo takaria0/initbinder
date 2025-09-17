@@ -118,6 +118,7 @@ def make_rfa_rfdiffusion_command(
     #SBATCH -A {SLURM_ACCOUNT}
     #SBATCH --gres=gpu:{SLURM_GPU_TYPE}
     #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=16G
+    #SBATCH --time=08:00:00
     #SBATCH --array=1-{num_array_tasks}
     #SBATCH --output=slurm_logs/{job_name}_%A_%a.out
     #SBATCH --error=slurm_logs/{job_name}_%A_%a.err
