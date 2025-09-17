@@ -1,5 +1,6 @@
 import os, re, math, json, yaml, textwrap
 from pathlib import Path
+from typing import Sequence
 from utils import _ensure_dir, ROOT, SCHEMA, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE, AF3_DATABASES_DIR, AF3_MODEL_PARAMS_DIR, AF3_SINGULARITY_IMAGE
 from jsonschema import validate
 
@@ -162,7 +163,9 @@ def _chains_for_epitope(tdir: Path, cfg: dict, epitope_name: str, hotspot_varian
 
 
 def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
-                         seed_idx: int = 0, hotspot_variant: str = "A", run_tag: str | None = None):
+                         seed_idx: int = 0, hotspot_variant: str = "A",
+                         run_tag: str | None = None,
+                         model_seeds: Sequence[int] | None = None):
     tdir = ROOT/"targets"/pdb_id.upper()
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
     arm_dir = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
@@ -176,6 +179,11 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     
     cfg = yaml.safe_load((tdir/"target.yaml").read_text()); validate(cfg, SCHEMA)
 
+    seeds = list(dict.fromkeys(int(s) for s in (model_seeds or list(range(1, 11)))))
+    if not seeds:
+        raise ValueError("model_seeds must contain at least one integer seed")
+    seed_list_str = " ".join(str(s) for s in seeds)
+
     prep_pdb_path = tdir / "prep" / "prepared.pdb"
     if not prep_pdb_path.exists():
         raise FileNotFoundError(f"Cannot find prepared target file: {prep_pdb_path}")
@@ -188,6 +196,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         raise ValueError("target.yaml 'chains' must be non-empty.")
 
     print(f'[info] Target chains for epitope "{epitope}": {target_chains_from_cfg}')
+    print(f"[info] AF3 model seeds: {seeds}")
     have_inputs = len(input_pdbs) > 0
     if have_inputs and (seed_idx < 0 or seed_idx >= len(input_pdbs)):
         raise IndexError(f"seed_idx {seed_idx} is out of range for {len(input_pdbs)} designs.")
@@ -218,7 +227,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     target_info_json.write_text(json.dumps({
         "binder_id": binder_chain_id,
         "targets": [{"id": cid, "sequence": seq} for cid, seq in zip(target_chain_ids, target_seqs)],
-        "modelSeeds": [42],
+        "modelSeeds": seeds,
         "dialect": "alphafold3",
         "version": 3
     }, indent=2))
@@ -257,7 +266,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
 
         seed_payload = {
             "name": seed_design_name,
-            "modelSeeds": [42],
+            "modelSeeds": seeds,
             "sequences": seq_entries,
             "dialect": "alphafold3",
             "version": 3
@@ -351,7 +360,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
             print(f"[ERR] binder id {args.binder_id} not found in sequences", file=sys.stderr)
             sys.exit(4)
 
-        J.setdefault("modelSeeds", [42])
+        J.setdefault("modelSeeds", list(range(1, 11)))
 
         with open(args.out, "w") as f:
             json.dump(J, f, indent=2)
@@ -441,7 +450,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         T = json.load(open(args.target_info))
         targets = T.get("targets", [])
         binder_id = T.get("binder_id", "H")
-        modelSeeds = T.get("modelSeeds", [42])
+        modelSeeds = T.get("modelSeeds", list(range(1, 11)))
         dialect = T.get("dialect", "alphafold3")
         version = T.get("version", 3)
 
@@ -487,6 +496,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         set -euo pipefail
         echo "--- AF3 Stage1 (seed, full data pipeline) ---"
         module load cuda/12.2.0 singularity
+        echo "[seed] Model seeds: {seed_list_str}"
 
         MPNN_DIR="{mpnn_dir.resolve()}"
         OUT_DIR="{af3_output_dir.resolve()}/{(seed_design_name or 'SEED').replace(' ','_')}"
@@ -602,6 +612,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         set -euo pipefail
         echo "--- AF3 Stage2 (batch inference-only; binder has NO MSA) ---"
         module load cuda/12.2.0 singularity
+        echo "[batch] Model seeds: {seed_list_str}"
 
         MPNN_DIR="{mpnn_dir.resolve()}"
         OUT_DIR="{af3_output_dir.resolve()}"

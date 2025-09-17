@@ -92,6 +92,10 @@ def suggest_pipeline_command(pdb_id: str):
     num_seq          = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "1"))
     temp             = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
     binder_chain_id  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
+    seeds_env        = os.getenv("RFA_PIPELINE_MODEL_SEEDS", "1 2 3 4 5 6 7 8 9 10")
+    model_seeds      = [tok for tok in re.split(r"[\s,]+", seeds_env.strip()) if tok]
+    if not model_seeds:
+        model_seeds = ["1","2","3","4","5","6","7","8","9","10"]
 
     total = max(1, min(total, len(arms)))  # 安全側
 
@@ -103,6 +107,7 @@ def suggest_pipeline_command(pdb_id: str):
     print(f"  --total {total} \\")
     print(f"  --designs_per_task {designs_per_task} \\")
     print(f"  --num_seq {num_seq} --temp {temp} \\")
+    print(f"  --model_seeds {' '.join(model_seeds)} \\")
     print(f"  --binder_chain_id {shlex.quote(binder_chain_id)} \\")
     print(f"  --run_tag {datetime.datetime.now().strftime('%Y%m%d_%H%M')}")
     print("===============================================\n")
@@ -112,7 +117,9 @@ def suggest_pipeline_command(pdb_id: str):
         f'python manage_rfa.py pipeline {pdb_id.upper()} '
         f'{one_liner_arms} '
         f'--total {total} --designs_per_task {designs_per_task} '
-        f'--num_seq {num_seq} --temp {temp} --binder_chain_id {shlex.quote(binder_chain_id)} --run_tag {datetime.datetime.now().strftime("%Y%m%d_%H%M")}'
+        f'--num_seq {num_seq} --temp {temp} '
+        f'--model_seeds {" ".join(model_seeds)} '
+        f'--binder_chain_id {shlex.quote(binder_chain_id)} --run_tag {datetime.datetime.now().strftime("%Y%m%d_%H%M")}'
     )
     print("[tip] One-liner:")
     print(one_liner + "\n")

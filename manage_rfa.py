@@ -430,6 +430,10 @@ def main():
     p_af3.add_argument("--arm", action="append", required=True)
     p_af3.add_argument("--binder_chain_id", default="H")
     p_af3.add_argument("--seed_idx", type=int, default=0)
+    p_af3.add_argument(
+        "--model_seeds", nargs="+", type=int, default=None,
+        help="Model seeds for AF3 inference (default: 1-10). Supply multiple values for multi-seed runs."
+    )
 
     # --- Assessment Commands ---
     p_assess_one = sub.add_parser("assess-rfa-design", help="Assess ONE design (RF2/AF3). If --seed/--sample_idx are omitted, auto-pick best AF3 sample.")
@@ -467,6 +471,10 @@ def main():
     p_pipe.add_argument("--cdr_h1", default="3-8"); p_pipe.add_argument("--cdr_h2", default="3-8"); p_pipe.add_argument("--cdr_h3", default="8-20")
     p_pipe.add_argument("--num_seq", type=int, default=1); p_pipe.add_argument("--temp", type=float, default=0.1)
     p_pipe.add_argument("--binder_chain_id", default="H")
+    p_pipe.add_argument(
+        "--model_seeds", nargs="+", type=int, default=None,
+        help="Model seeds for AF3 inference (default: 1-10)."
+    )
     p_pipe.add_argument("--submit", action="store_true")
     p_pipe.add_argument("--crop_radius", type=float, default=14.0,
         help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only.")
@@ -485,6 +493,10 @@ def main():
     p_follow.add_argument("--cdr_h1", default="3-8"); p_follow.add_argument("--cdr_h2", default="3-8"); p_follow.add_argument("--cdr_h3", default="8-20")
     p_follow.add_argument("--num_seq", type=int, default=16); p_follow.add_argument("--temp", type=float, default=0.1)
     p_follow.add_argument("--binder_chain_id", default="H")
+    p_follow.add_argument(
+        "--model_seeds", nargs="+", type=int, default=None,
+        help="Model seeds for AF3 inference in follow-up runs (default: 1-10)."
+    )
     p_follow.add_argument("--rank_by", default="final_score", choices=["final_score","af3_ranking_score","af3_iptm"])
     p_follow.add_argument("--assess_tsv", default=None)
     p_follow.add_argument("--submit", action="store_true",
@@ -608,6 +620,10 @@ def main():
                         num_s = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "1"))
                         temp  = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
                         bcid  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
+                        seeds_env = os.getenv("RFA_PIPELINE_MODEL_SEEDS", "1 2 3 4 5 6 7 8 9 10")
+                        seed_tokens = [tok for tok in re.split(r"[\s,]+", seeds_env.strip()) if tok]
+                        if not seed_tokens:
+                            seed_tokens = ["1","2","3","4","5","6","7","8","9","10"]
                         sh = launch_dir / f"pipeline_{pdb_id.upper()}_{label}_{ts}.sh"
                         lines = ["#!/bin/bash","set -euo pipefail","",
                                  f"python manage_rfa.py pipeline {pdb_id.upper()} \\"]
@@ -619,6 +635,7 @@ def main():
                             f"  --designs_per_task {dpt} \\",
                             f"  --num_seq {num_s} --temp {temp} \\",
                             f"  --binder_chain_id {bcid} \\",
+                            f"  --model_seeds {' '.join(seed_tokens)} \\",
                             f"  --run_tag {run_tag}",
                         ]
                         Path(sh).write_text("\n".join(lines) + "\n"); os.chmod(sh, 0o755)
@@ -629,7 +646,15 @@ def main():
                             "generated_from_catalog": Path(args.tsv).name,
                             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "arms": arms,
-                            "params": {"total": total, "designs_per_task": dpt, "num_seq": num_s, "temp": temp, "binder_chain_id": bcid, "run_tag": run_tag},
+                            "params": {
+                                "total": total,
+                                "designs_per_task": dpt,
+                                "num_seq": num_s,
+                                "temp": temp,
+                                "binder_chain_id": bcid,
+                                "model_seeds": [int(s) for s in seed_tokens],
+                                "run_tag": run_tag,
+                            },
                         })
                         ydoc["pipelines"] = pipelines
 
@@ -723,9 +748,16 @@ def main():
 
     elif args.cmd == "make-rfa-af3":
         arms = [ _parse_arm(s) for s in args.arm ]
+        model_seeds = args.model_seeds or list(range(1, 11))
         for ep, var in arms:
-            make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id,
-                                seed_idx=args.seed_idx, hotspot_variant=var)
+            make_rfa_af3_command(
+                args.pdb,
+                ep,
+                binder_chain_id=args.binder_chain_id,
+                seed_idx=args.seed_idx,
+                hotspot_variant=var,
+                model_seeds=model_seeds,
+            )
 
     elif args.cmd == "make-rfa-rf2":
         pass
@@ -743,6 +775,7 @@ def main():
     elif args.cmd == "pipeline":
         arms = [_parse_arm(s) for s in args.arm]
         allocs = _split_even(args.total, len(arms)) if args.total is not None else [args.num_designs]*len(arms)
+        model_seeds = args.model_seeds or list(range(1, 11))
         print("[plan] pipeline:", ", ".join(f"{e}@{v}={n}" for (e,v),n in zip(arms,allocs)))
 
         rfd_scripts, mpnn_scripts, af3_scripts = {}, {}, {}
@@ -757,8 +790,15 @@ def main():
                 run_tag=args.run_tag
             )
             mpn = make_rfa_proteinmpnn_command(args.pdb, ep, args.num_seq, args.temp, hotspot_variant=var, run_tag=args.run_tag)
-            af3 = make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id,
-                                    seed_idx=0, hotspot_variant=var, run_tag=args.run_tag)
+            af3 = make_rfa_af3_command(
+                args.pdb,
+                ep,
+                binder_chain_id=args.binder_chain_id,
+                seed_idx=0,
+                hotspot_variant=var,
+                run_tag=args.run_tag,
+                model_seeds=model_seeds,
+            )
             arm_key = f"{ep}@{var}"
             rfd_scripts[arm_key], mpnn_scripts[arm_key], af3_scripts[arm_key] = rfd, mpn, af3
 
@@ -840,6 +880,7 @@ def main():
         allocs = _split_even(args.total, len(picks))
         print("[followup] picks:", picks, "allocs:", allocs)
 
+        model_seeds = args.model_seeds or list(range(1, 11))
         rfd_scripts, mpnn_scripts, af3_scripts  = {}, {}, {}
         for (arm, n) in zip(picks, allocs):
             ep, var = _parse_arm(arm)
@@ -847,7 +888,14 @@ def main():
                                             args.framework_pdb, args.cdr_h1, args.cdr_h2, args.cdr_h3,
                                             hotspot_variant=var)
             mpn = make_rfa_proteinmpnn_command(args.pdb, ep, args.num_seq, args.temp, hotspot_variant=var)
-            af3 = make_rfa_af3_command(args.pdb, ep, binder_chain_id=args.binder_chain_id, seed_idx=0, hotspot_variant=var)
+            af3 = make_rfa_af3_command(
+                args.pdb,
+                ep,
+                binder_chain_id=args.binder_chain_id,
+                seed_idx=0,
+                hotspot_variant=var,
+                model_seeds=model_seeds,
+            )
             rfd_scripts[arm], mpnn_scripts[arm], af3_scripts[arm] = rfd, mpn, af3
 
         if args.submit:
