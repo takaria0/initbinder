@@ -79,7 +79,10 @@ def main():
         print(f"[ERR] binder id {args.binder_id} not found in sequences", file=sys.stderr)
         sys.exit(4)
 
-    J.setdefault("modelSeeds", [42])
+    model_seeds = J.get("modelSeeds")
+    if not model_seeds:
+        # Align default with Stage1 scripts (1..10) when legacy seed JSON lacks explicit seeds
+        J["modelSeeds"] = list(range(1, 11))
 
     with open(args.out, "w") as f:
         json.dump(J, f, indent=2)

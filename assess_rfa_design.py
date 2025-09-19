@@ -1098,6 +1098,7 @@ def assess_rfa_all(
 
     rows = []
     n_scanned = 0
+    keywords = _normalize_keywords(include_keyword)
     for ep_dir in sorted(designs_root.iterdir()):
         if not ep_dir.is_dir(): continue
         ep_name = ep_dir.name
@@ -1134,13 +1135,16 @@ def assess_rfa_all(
 
             print(f'[info] Scanning epitope "{ep_name}" variant "{variant}"... under {hs_dir}')
             for design_dir in sorted(af3_dir.iterdir()):
-                if not design_dir.is_dir(): continue
+                if not design_dir.is_dir():
+                    continue
+                if keywords and not _path_matches_keywords(design_dir, keywords):
+                    continue
                 design_name = design_dir.name
                 n_scanned += 1
                 if n_scanned % max(1, progress_every) == 0:
                     print(f"[scan] {n_scanned} designs processed...")
 
-                best = _find_af3_best_sample(design_dir, design_name, seed, sample_idx, include_keyword=include_keyword)
+                best = _find_af3_best_sample(design_dir, design_name, seed, sample_idx, include_keyword=keywords)
                 print(f"\n[design] ===============")
                 print(f"[design] epitope={ep_name} variant={variant} design={design_name}")
                 if best:
@@ -1169,6 +1173,7 @@ def assess_rfa_all(
                 af3_has_clash = None
                 af3_frac_dis = None
                 af3_cif = af3_summary = None
+                af3_conf = None
                 pml_path = None
                 # ipSAE aggregates (initialize empty)
                 ipsae_min = ipsae_avg = ipsae_max = None
