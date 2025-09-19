@@ -182,7 +182,10 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     seeds = list(dict.fromkeys(int(s) for s in (model_seeds or list(range(1, 11)))))
     if not seeds:
         raise ValueError("model_seeds must contain at least one integer seed")
-    seed_list_str = " ".join(str(s) for s in seeds)
+    stage2_seeds = seeds
+    stage1_seeds = [stage2_seeds[0]]
+    stage2_seed_list_str = " ".join(str(s) for s in stage2_seeds)
+    stage1_seed_list_str = " ".join(str(s) for s in stage1_seeds)
 
     prep_pdb_path = tdir / "prep" / "prepared.pdb"
     if not prep_pdb_path.exists():
@@ -227,7 +230,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     target_info_json.write_text(json.dumps({
         "binder_id": binder_chain_id,
         "targets": [{"id": cid, "sequence": seq} for cid, seq in zip(target_chain_ids, target_seqs)],
-        "modelSeeds": seeds,
+        "modelSeeds": stage2_seeds,
         "dialect": "alphafold3",
         "version": 3
     }, indent=2))
@@ -266,7 +269,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
 
         seed_payload = {
             "name": seed_design_name,
-            "modelSeeds": seeds,
+            "modelSeeds": stage1_seeds,
             "sequences": seq_entries,
             "dialect": "alphafold3",
             "version": 3
@@ -282,6 +285,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     packer_py.write_text(textwrap.dedent(r"""
     #!/usr/bin/env python3
     import json, argparse, csv, sys, os
+    from pathlib import Path
 
     def load_manifest(path):
         by_name = {}
@@ -313,6 +317,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         ap.add_argument("--design", required=True, help="design_name (basename without .pdb)")
         ap.add_argument("--binder_id", required=True)
         ap.add_argument("--out", required=True)
+        ap.add_argument("--target_info", required=False)
         args = ap.parse_args()
 
         if not os.path.exists(args.seed_json):
@@ -360,7 +365,38 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
             print(f"[ERR] binder id {args.binder_id} not found in sequences", file=sys.stderr)
             sys.exit(4)
 
-        J.setdefault("modelSeeds", list(range(1, 11)))
+        stage2_seeds = None
+        ti_candidates = []
+        if args.target_info:
+            ti_candidates.append(Path(args.target_info))
+        else:
+            try:
+                ti_candidates.append(Path(args.manifest).parent / "target_info.json")
+            except Exception:
+                pass
+
+        for ti in ti_candidates:
+            if not ti or not ti.exists():
+                continue
+            try:
+                TI = json.load(open(ti))
+                if isinstance(TI.get("modelSeeds"), list):
+                    stage2_seeds = []
+                    for s in TI["modelSeeds"]:
+                        try:
+                            stage2_seeds.append(int(s))
+                        except Exception:
+                            continue
+                    if stage2_seeds:
+                        break
+                    stage2_seeds = None
+            except Exception:
+                stage2_seeds = None
+
+        if stage2_seeds:
+            J["modelSeeds"] = stage2_seeds
+        else:
+            J.setdefault("modelSeeds", list(range(1, 11)))
 
         with open(args.out, "w") as f:
             json.dump(J, f, indent=2)
@@ -437,20 +473,33 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     seedify_py = tools_dir / "make_seed_from_manifest.py"
     seedify_py.write_text(textwrap.dedent(r"""
     #!/usr/bin/env python3
-    import argparse, json, csv, sys, os
+    import argparse, json, csv, sys, os, re
 
     def main():
         ap = argparse.ArgumentParser()
         ap.add_argument("--target_info", required=True)   # JSON with targets + binder_id + modelSeeds + dialect + version
         ap.add_argument("--manifest", required=True)      # TSV with index,design_name,pdb_path,binder_seq
         ap.add_argument("--seed_idx", type=int, default=1)
+        ap.add_argument("--model_seeds", type=str, default=None)
         ap.add_argument("--out_json", required=True)
         args = ap.parse_args()
 
         T = json.load(open(args.target_info))
         targets = T.get("targets", [])
         binder_id = T.get("binder_id", "H")
-        modelSeeds = T.get("modelSeeds", list(range(1, 11)))
+        if args.model_seeds and args.model_seeds.strip():
+            modelSeeds = []
+            for tok in re.split(r"[\s,]+", args.model_seeds.strip()):
+                if not tok:
+                    continue
+                try:
+                    modelSeeds.append(int(tok))
+                except Exception:
+                    continue
+            if not modelSeeds:
+                modelSeeds = T.get("modelSeeds", list(range(1, 11)))
+        else:
+            modelSeeds = T.get("modelSeeds", list(range(1, 11)))
         dialect = T.get("dialect", "alphafold3")
         version = T.get("version", 3)
 
@@ -496,7 +545,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         set -euo pipefail
         echo "--- AF3 Stage1 (seed, full data pipeline) ---"
         module load cuda/12.2.0 singularity
-        echo "[seed] Model seeds: {seed_list_str}"
+        echo "[seed] Model seeds: {stage1_seed_list_str}"
 
         MPNN_DIR="{mpnn_dir.resolve()}"
         OUT_DIR="{af3_output_dir.resolve()}/{(seed_design_name or 'SEED').replace(' ','_')}"
@@ -557,6 +606,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
             --target_info "{(job_dir/'target_info.json').resolve()}" \
             --manifest "{manifest_tsv_path.resolve()}" \
             --seed_idx 1 \
+            --model_seeds "{stage1_seed_list_str}" \
             --out_json "{(job_dir/'seed_input.json').resolve()}"
 
         SEED_NAME=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["name"])' "{(job_dir/'seed_input.json').resolve()}")
@@ -612,7 +662,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         set -euo pipefail
         echo "--- AF3 Stage2 (batch inference-only; binder has NO MSA) ---"
         module load cuda/12.2.0 singularity
-        echo "[batch] Model seeds: {seed_list_str}"
+        echo "[batch] Model seeds: {stage2_seed_list_str}"
 
         MPNN_DIR="{mpnn_dir.resolve()}"
         OUT_DIR="{af3_output_dir.resolve()}"
@@ -705,6 +755,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
               --manifest "$MANIFEST_TSV" \\
               --design "$DESIGN_NAME" \\
               --binder_id "{binder_chain_id}" \\
+              --target_info "{(job_dir/'target_info.json').resolve()}" \\
               --out "$PACKED_JSON"
 
             cp "$PACKED_JSON" "$DOUT/packed_input.json"

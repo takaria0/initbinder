@@ -1,6 +1,7 @@
 
 #!/usr/bin/env python3
 import json, argparse, csv, sys, os
+from pathlib import Path
 
 def load_manifest(path):
     by_name = {}
@@ -32,6 +33,7 @@ def main():
     ap.add_argument("--design", required=True, help="design_name (basename without .pdb)")
     ap.add_argument("--binder_id", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--target_info", required=False)
     args = ap.parse_args()
 
     if not os.path.exists(args.seed_json):
@@ -79,10 +81,41 @@ def main():
         print(f"[ERR] binder id {args.binder_id} not found in sequences", file=sys.stderr)
         sys.exit(4)
 
-    model_seeds = J.get("modelSeeds")
-    if not model_seeds:
-        # Align default with Stage1 scripts (1..10) when legacy seed JSON lacks explicit seeds
-        J["modelSeeds"] = list(range(1, 11))
+    stage2_seeds = None
+    ti_candidates = []
+    if args.target_info:
+        ti_candidates.append(Path(args.target_info))
+    else:
+        try:
+            ti_candidates.append(Path(args.manifest).parent / "target_info.json")
+        except Exception:
+            pass
+
+    for ti in ti_candidates:
+        if not ti or not ti.exists():
+            continue
+        try:
+            TI = json.load(open(ti))
+            if isinstance(TI.get("modelSeeds"), list):
+                stage2_seeds = []
+                for s in TI["modelSeeds"]:
+                    try:
+                        stage2_seeds.append(int(s))
+                    except Exception:
+                        continue
+                if stage2_seeds:
+                    break
+                stage2_seeds = None
+        except Exception:
+            stage2_seeds = None
+
+    if stage2_seeds:
+        J["modelSeeds"] = stage2_seeds
+    else:
+        model_seeds = J.get("modelSeeds")
+        if not model_seeds:
+            # Align default with Stage1 scripts (1..10) when legacy seed JSON lacks explicit seeds
+            J["modelSeeds"] = list(range(1, 11))
 
     with open(args.out, "w") as f:
         json.dump(J, f, indent=2)
