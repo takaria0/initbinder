@@ -53,6 +53,19 @@ def _unique_order(seq):
             seen.add(x); out.append(x)
     return out
 
+def _normalize_chain_ids(chains: List[str] | None) -> List[str]:
+    if not chains:
+        return []
+    out: List[str] = []
+    for cid in chains:
+        if not isinstance(cid, str):
+            continue
+        s = cid.strip()
+        if not s:
+            continue
+        out.append(s.upper())
+    return out
+
 def select_chains_by_uniprot(tdir: Path, uniprot_acc: str) -> List[str]:
     entry = _load_entry_json(tdir)
     if not entry: return []
@@ -70,7 +83,7 @@ def select_chains_by_uniprot(tdir: Path, uniprot_acc: str) -> List[str]:
     chosen = [chainmap.get(inst.get("auth_asym_id") or inst.get("asym_id"), inst.get("auth_asym_id") or inst.get("asym_id")) for inst in instances if entity_to_uniprot.get(inst.get("entity_id")) == uniprot_acc and (inst.get("auth_asym_id") or inst.get("asym_id"))]
     ordered = _unique_order(chosen)
     print(f"[debug] UniProt→auth_asym candidates for {uniprot_acc}: {ordered or '∅'}")
-    return ordered
+    return _normalize_chain_ids(ordered)
 
 def list_accessions_from_entry(entry_json: dict) -> List[str]:
     DB_OK = {"UniProt", "UniProtKB", "UNP"}
@@ -237,13 +250,13 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     cfg_from_yaml = yaml.safe_load(yml_path.read_text()) if yml_path.exists() else {}
 
     # === Generate Constraint Prompts ===
-    target_chains = cfg_from_yaml.get("chains", [])
+    target_chains = _normalize_chain_ids(cfg_from_yaml.get("chains"))
     target_name_from_yaml = cfg_from_yaml.get("target_name", "")
     allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
 
     # 1. Target Chain and Name Constraint
     target_focus_prompt = ""
-    if target_chains and target_name_from_yaml and all(isinstance(c, str) for c in target_chains):
+    if target_chains and target_name_from_yaml:
         chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
         target_focus_prompt = textwrap.dedent(f"""
             --- CRITICAL INSTRUCTION: TARGET FOCUS ---
@@ -309,8 +322,15 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
                 cfg["chains"] = auto_chains
                 print(f"[info] Auto-selected chains by UniProt({target_acc}): {auto_chains}")
 
+    if cfg.get("chains"):
+        cfg["chains"] = _normalize_chain_ids(cfg.get("chains"))
+
     base = cfg_from_yaml or {}
     base.update(cfg)
+    if base.get("chains"):
+        base["chains"] = _normalize_chain_ids(base.get("chains"))
+    if base.get("target_chains"):
+        base["target_chains"] = _normalize_chain_ids(base.get("target_chains"))
     _remove_parentheses_from_yaml(base)
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 

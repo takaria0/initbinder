@@ -12,6 +12,20 @@ from utils import make_key, THREE2ONE, build_epitope_metadata, build_metadata_do
 import os, re, shlex, yaml
 from pathlib import Path
 
+
+def _normalize_chain_ids(chains):
+    out = []
+    if not chains:
+        return out
+    for cid in chains:
+        if not isinstance(cid, str):
+            continue
+        s = cid.strip()
+        if not s:
+            continue
+        out.append(s.upper())
+    return out
+
 def _sanitize_epitope_name(name: str) -> str:
     """
     ファイル命名と一致させるサニタイズ。
@@ -159,7 +173,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     if not raw_pdb_path.exists(): raise FileNotFoundError(raw_pdb_path)
 
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
-    target_chains = cfg.get("chains", [])
+    target_chains = _normalize_chain_ids(cfg.get("chains"))
     if not target_chains:
         raise ValueError("[prep_target] target.yaml must include non-empty 'chains'.")
 
@@ -180,8 +194,11 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     io = PDBIO(); io.set_structure(structure)
 
     class _KeepChains(Select):
-        def __init__(self, chains): self.chains=set(chains)
-        def accept_chain(self, chain): return chain.id in self.chains
+        def __init__(self, chains):
+            self.chains = {c.strip().upper() for c in chains}
+
+        def accept_chain(self, chain):
+            return str(chain.id).strip().upper() in self.chains
 
     selector = _KeepChains(target_chains)
     selected_pdb_path = prep_dir / "prepared.pdb"
@@ -199,6 +216,16 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
     # --- 1.5) Build residue maps from selected structure ---
     sel_struct = parser.get_structure("sel", str(selected_pdb_path))
+    # Normalize chain IDs in prepared structure to uppercase for downstream tools (e.g., AF3)
+    need_resave = False
+    for chain in sel_struct.get_chains():
+        new_id = str(chain.id).strip().upper()
+        if chain.id != new_id:
+            chain.id = new_id
+            need_resave = True
+    if need_resave:
+        io_norm = PDBIO(); io_norm.set_structure(sel_struct)
+        io_norm.save(str(selected_pdb_path))
     resname_lookup = {}
     ca_xyz = {}
     res_bfac = {}
@@ -238,8 +265,9 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
                 one = THREE2ONE.get(resname.upper(), "X")
                 seq.append(one); idx_map.append((resseq,resname))
-            chain_seq[ch] = "".join(seq)
-            chain_index_map[ch] = idx_map
+            norm_ch = ch.strip().upper()
+            chain_seq[norm_ch] = "".join(seq)
+            chain_index_map[norm_ch] = idx_map
 
     # --- 2) SASA (FreeSASA on selected PDB) ---
     struct = freesasa.Structure(str(selected_pdb_path))
@@ -251,13 +279,14 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     for i in range(struct.nAtoms()):
         area = result.atomArea(i)
         ch   = struct.chainLabel(i)
-        chain_labels.add(ch)
+        norm_ch = ch.strip().upper()
+        chain_labels.add(norm_ch)
         # integer化（挿入コードは落とす）
         res_num = struct.residueNumber(i).strip()
         m = re.match(r"^-?\d+", res_num)
         if not m: continue
         resn_int = int(m.group(0))
-        res_sasa[make_key(ch, resn_int)] += area
+        res_sasa[make_key(norm_ch, resn_int)] += area
 
     print(f"[debug] Chains seen by FreeSASA: {sorted(chain_labels)}")
     # If requested chains are missing, trim to present ones (warn) rather than abort.
@@ -284,6 +313,7 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
         # Collect declared residue keys
         for span in epi.get("residues", []):
             ch, rng = span.split(":")
+            ch = ch.strip().upper()
             a, b = rng.split("-")
             a_i, b_i = int(a), int(b)
             if a_i > b_i: a_i, b_i = b_i, a_i

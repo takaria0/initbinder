@@ -36,6 +36,12 @@ def main():
     ap.add_argument("--target_info", required=False)
     args = ap.parse_args()
 
+    binder_id = str(args.binder_id).strip().upper()
+
+    if not binder_id:
+        print("[ERR] binder_id must be a non-empty string", file=sys.stderr)
+        sys.exit(5)
+
     if not os.path.exists(args.seed_json):
         print(f"[ERR] seed_json not found: {args.seed_json}", file=sys.stderr)
         sys.exit(2)
@@ -52,7 +58,7 @@ def main():
     found = False
     for E in J.get("sequences", []):
         pid = E.get("protein", {}).get("id")
-        if pid == args.binder_id:
+        if pid == binder_id:
             P = E.get("protein", {})
             # ---- swap binder sequence ----
             P["sequence"] = binder_seq
@@ -70,15 +76,15 @@ def main():
                 E.pop(k, None)
 
             # prune template maps for binder at any level
-            _prune_binder_templates(J, args.binder_id)
+            _prune_binder_templates(J, binder_id)
             if isinstance(J.get("features"), dict):
-                _prune_binder_templates(J["features"], args.binder_id)
+                _prune_binder_templates(J["features"], binder_id)
 
             E["protein"] = P
             found = True
 
     if not found:
-        print(f"[ERR] binder id {args.binder_id} not found in sequences", file=sys.stderr)
+        print(f"[ERR] binder id {binder_id} not found in sequences", file=sys.stderr)
         sys.exit(4)
 
     stage2_seeds = None

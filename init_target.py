@@ -9,6 +9,21 @@ from bs4 import BeautifulSoup
 import difflib
 from Bio.PDB.Polypeptide import three_to_index, index_to_one
 from playwright.sync_api import sync_playwright
+from typing import Iterable
+
+
+def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
+    out: list[str] = []
+    if not chains:
+        return out
+    for cid in chains:
+        if not isinstance(cid, str):
+            continue
+        s = cid.strip()
+        if not s:
+            continue
+        out.append(s.upper())
+    return out
 
 def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
     """
@@ -55,6 +70,9 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     Required:
       - antigen_url: vendor product page (currently tuned for Sino Biological)
     """
+    if chain_id:
+        chain_id = str(chain_id).strip().upper()
+
     if not antigen_url or not isinstance(antigen_url, str):
         raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
 
@@ -98,7 +116,7 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
             "id": pdb_id.upper(),
             "target_name": target_name or "",
             "assembly_id": "1",
-            "chains": [chain_id] if chain_id else [],
+            "chains": [chain_id.upper()] if chain_id else [],
             "target_chains": [],  # added (will be populated below)
             "antigen_catalog_url": antigen_url,  # added
             "sequences": {                      # added (debug info)
@@ -114,6 +132,11 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     # Load current config
     with yml_path.open('r') as f:
         config = yaml.safe_load(f) or {}
+
+    if config.get("chains"):
+        config["chains"] = _normalize_chain_ids(config.get("chains"))
+    if config.get("target_chains"):
+        config["target_chains"] = _normalize_chain_ids(config.get("target_chains"))
 
     # Always set/refresh antigen URL
     config["antigen_catalog_url"] = antigen_url
@@ -144,6 +167,8 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
                 start, end, chosen_chain = verification_result
             else:
                 start, end, chosen_chain, accession_id, accession_seq = verification_result
+            if chosen_chain:
+                chosen_chain = str(chosen_chain).strip().upper()
             allowed_range = (start, end)
             config["allowed_epitope_range"] = f"{start}-{end}"
             print(f"[ok] Verified vendor overlap {start}-{end} on chain '{chosen_chain}'")
@@ -162,14 +187,14 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     # - keep existing 'chains' if user provided; otherwise, adopt verified chain if available
     if not config.get("chains"):
         if chosen_chain:
-            config["chains"] = [chosen_chain]
+            config["chains"] = _normalize_chain_ids([chosen_chain])
     # - ensure 'target_chains' exists and mirrors best knowledge
     if config.get("chains"):
-        config["target_chains"] = list(config["chains"])
+        config["target_chains"] = _normalize_chain_ids(config["chains"])
     elif chosen_chain:
-        config["target_chains"] = [chosen_chain]
+        config["target_chains"] = _normalize_chain_ids([chosen_chain])
     elif pdb_sequences:
-        config["target_chains"] = list(pdb_sequences.keys())
+        config["target_chains"] = _normalize_chain_ids(pdb_sequences.keys())
     else:
         config.setdefault("target_chains", [])
 
@@ -196,9 +221,13 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
     """Parses a PDB file and returns sequences for each polymer chain."""
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("PDB_STRUCTURE", pdb_path)
-    sequences = {}
+    sequences: dict[str, str] = {}
     for model in structure:
         for chain in model:
+            chain_id = str(chain.id).strip()
+            if not chain_id:
+                continue
+            norm_chain_id = chain_id.upper()
             seq = ""
             for residue in chain:
                 if residue.get_id()[0] == ' ':
@@ -207,7 +236,7 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
                     except (KeyError, ValueError):
                         seq += 'X'
             if seq:
-                sequences[chain.id] = seq
+                sequences[norm_chain_id] = seq
         break
     return sequences
 

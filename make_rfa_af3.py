@@ -166,6 +166,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
                          seed_idx: int = 0, hotspot_variant: str = "A",
                          run_tag: str | None = None,
                          model_seeds: Sequence[int] | None = None):
+    binder_chain_id = str(binder_chain_id).strip().upper() or "H"
     tdir = ROOT/"targets"/pdb_id.upper()
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
     arm_dir = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
@@ -191,7 +192,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     if not prep_pdb_path.exists():
         raise FileNotFoundError(f"Cannot find prepared target file: {prep_pdb_path}")
 
-    target_chains_from_cfg = sorted(cfg.get("chains", []))
+    target_chains_from_cfg = [str(c).strip().upper() for c in (cfg.get("chains", []) or []) if str(c).strip()]
     print(f'--- Epitope: {epitope} (variant {hotspot_variant}) ---')
     # This would make the clash logic incorrect, so need to use the whole chain to predict
     # target_chains_from_cfg = _chains_for_epitope(tdir, cfg, epitope, hotspot_variant)

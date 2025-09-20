@@ -13,7 +13,7 @@ def main():
 
     T = json.load(open(args.target_info))
     targets = T.get("targets", [])
-    binder_id = T.get("binder_id", "H")
+    binder_id = str(T.get("binder_id", "H")).strip().upper() or "H"
     if args.model_seeds and args.model_seeds.strip():
         modelSeeds = []
         for tok in re.split(r"[\s,]+", args.model_seeds.strip()):
