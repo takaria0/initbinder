@@ -71,7 +71,22 @@ python manage_rfa.py prep-target 4DOH --sasa_cutoff 10.0
 python manage_rfa.py prep-target 8ES8 --sasa_cutoff 10.0
 python manage_rfa.py prep-target 7FJD --sasa_cutoff 10.0
 
-
+python manage_rfa.py pipeline 7FJD \
+  --arm "Ig-like domain N-terminal loop@A" \
+  --arm "Ig-like domain N-terminal loop@B" \
+  --arm "Ig-like domain N-terminal loop@C" \
+  --arm "Ig-like domain central loop@A" \
+  --arm "Ig-like domain central loop@B" \
+  --arm "Ig-like domain central loop@C" \
+  --arm "Ig-like domain C-terminal surface@A" \
+  --arm "Ig-like domain C-terminal surface@B" \
+  --arm "Ig-like domain C-terminal surface@C" \
+  --total 9 \
+  --designs_per_task 1 \
+  --num_seq 10 --temp 0.1 \
+  --model_seeds 1 2 3 4 5 6 7 8 9 10 \
+  --binder_chain_id H \
+  --run_tag 20250919_1548
 
 
 python manage_rfa.py pipeline 8SK7 \
@@ -106,6 +121,25 @@ python manage_rfa.py pipeline 8ES8 \
   --binder_chain_id H \
   --run_tag 20250910_0409
   
+  python manage_rfa.py pipeline 6M17 \
+  --arm "Receptor Binding Motif Core@A" \
+  --arm "Receptor Binding Motif Core@B" \
+  --arm "Receptor Binding Motif Core@C" \
+  --arm "RBM Flank and Crest@A" \
+  --arm "RBM Flank and Crest@B" \
+  --arm "RBM Flank and Crest@C" \
+  --arm "Conserved Structural Site@A" \
+  --arm "Conserved Structural Site@B" \
+  --arm "Conserved Structural Site@C" \
+  --total 18 \
+  --designs_per_task 2 \
+  --num_seq 10 --temp 0.1 \
+  --model_seeds 1 2 3 4 5 6 7 8 9 10 \
+  --binder_chain_id H \
+  --run_tag 20250919_1311
+
+python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250919 --include_keyword "20250919"
+
 python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 20250908 --include_keyword "20250904"
 python manage_rfa.py assess-rfa-all 8ES8 --binder_chain_id H --run_label 20250910 --include_keyword "20250910"
 python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250910 --include_keyword "design"

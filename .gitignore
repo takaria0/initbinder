@@ -8,3 +8,6 @@ targets/
 .DS_Store
 
 env.py
+
+exports/
+plots/
