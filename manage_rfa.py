@@ -353,7 +353,13 @@ from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
 from assess_rfa_design import assess_rfa_all
 from decide_scope import llm_scope, submit_llm_scope_job
 from target_generation import run_target_generation
-from utils import DEFAULT_NANOBODY_FRAMEWORK, _ensure_dir, ROOT
+from utils import (
+    DEFAULT_NANOBODY_FRAMEWORK,
+    _ensure_dir,
+    ROOT,
+    SLURM_CPU_PARTITION,
+    SLURM_CPU_ACCOUNT,
+)
 
 from typing import List
 import csv
@@ -379,6 +385,207 @@ def _sbatch(path: Path, extra_env: dict[str,str] = None, dep: str | None = None)
 def _split_even(total: int, n: int) -> List[int]:
     q, r = divmod(total, n)
     return [q + 1 if i < r else q for i in range(n)]
+
+
+def _write_assess_rfa_all_sbatch(
+    pdb_id: str,
+    *,
+    binder_chain_id: str,
+    run_label: str | None,
+    include_keyword: str | None,
+    seed: int | None,
+    sample_idx: int | None,
+    rank_by: str,
+    skip_pml: bool,
+    skip_seq: bool,
+    time_h: int,
+    mem_gb: int,
+    cpus: int = 4,
+    shard_mod: int = 1,
+    shard_idx: int | None = None,
+    array_size: int = 1,
+) -> dict:
+    """Create sbatch + launcher scripts for assess-rfa-all (supports SLURM arrays)."""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    label_tag = run_label or "auto"
+    safe_suffix = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{pdb_id}_{label_tag}")
+    job_base = f"assess_{safe_suffix}"
+
+    job_dir = ROOT / "tools" / "assess"
+    launch_dir = ROOT / "tools" / "launchers"
+    _ensure_dir(job_dir)
+    _ensure_dir(launch_dir)
+    _ensure_dir(ROOT / "slurm_logs")
+
+    effective_shard_mod = max(1, shard_mod, array_size)
+    use_array = effective_shard_mod > 1 and array_size > 1
+
+    manage_py = Path(__file__).resolve()
+
+    def _base_cmd_parts() -> List[str]:
+        parts: List[str] = [
+            "python",
+            str(manage_py),
+            "assess-rfa-all",
+            pdb_id,
+            "--binder_chain_id",
+            binder_chain_id,
+            "--rank_by",
+            rank_by,
+        ]
+        if run_label:
+            parts.extend(["--run_label", run_label])
+        if include_keyword:
+            parts.extend(["--include_keyword", include_keyword])
+        if seed is not None:
+            parts.extend(["--seed", str(seed)])
+        if sample_idx is not None:
+            parts.extend(["--sample_idx", str(sample_idx)])
+        if skip_pml:
+            parts.append("--skip_pml")
+        if skip_seq:
+            parts.append("--skip_seq")
+        return parts
+
+    def _cmd_str(parts: List[str], replacements: dict[str, str] | None = None) -> str:
+        cmd = " ".join(shlex.quote(part) for part in parts)
+        if replacements:
+            for token, repl in replacements.items():
+                cmd = cmd.replace(shlex.quote(token), repl)
+        return cmd
+
+    run_parts = _base_cmd_parts()
+    replacements: dict[str, str] | None = None
+    if effective_shard_mod > 1:
+        run_parts.extend(["--shard_mod", str(effective_shard_mod)])
+        if use_array:
+            run_parts.extend(["--shard_idx", "__SHARD_IDX__"])
+            replacements = {"__SHARD_IDX__": "${SLURM_ARRAY_TASK_ID}"}
+        else:
+            if shard_idx is None:
+                raise ValueError("--shard_idx is required when shard_mod > 1 and no array is used")
+            run_parts.extend(["--shard_idx", str(int(shard_idx))])
+
+    run_cmd = _cmd_str(run_parts, replacements)
+
+    wall_h = max(1, int(time_h))
+    mem_spec = f"{int(mem_gb)}G"
+    cpus_val = int(max(1, cpus))
+
+    scripts: dict[str, Path | None] = {"launch": None, "primary": None, "merge": None}
+
+    if use_array:
+        array_name = f"{job_base}_array"
+        array_script = job_dir / f"submit_{array_name}_{ts}.sh"
+        job_lines = [
+            "#!/bin/bash",
+            f"#SBATCH --job-name={array_name}",
+            f"#SBATCH --partition={SLURM_CPU_PARTITION}",
+            f"#SBATCH -A {SLURM_CPU_ACCOUNT}",
+            "#SBATCH --nodes=1 --ntasks=1",
+            f"#SBATCH --cpus-per-task={cpus_val}",
+            f"#SBATCH --mem={mem_spec}",
+            f"#SBATCH --time={wall_h}:00:00",
+            f"#SBATCH --array=0-{effective_shard_mod-1}",
+            f"#SBATCH --output=slurm_logs/{array_name}_%A_%a.out",
+            f"#SBATCH --error=slurm_logs/{array_name}_%A_%a.err",
+            "",
+            "set -euo pipefail",
+            f"cd {shlex.quote(str(ROOT))}",
+            "echo \"[assess][array] shard ${SLURM_ARRAY_TASK_ID}/{0}\"".format(effective_shard_mod),
+            run_cmd,
+            "echo \"[assess][array] done $(date)\"",
+        ]
+        array_script.write_text("\n".join(job_lines) + "\n")
+        os.chmod(array_script, 0o755)
+        scripts["primary"] = array_script
+
+        merge_name = f"{job_base}_merge"
+        merge_script = job_dir / f"submit_{merge_name}_{ts}.sh"
+        merge_parts = _base_cmd_parts()
+        merge_parts.extend(["--shard_mod", str(effective_shard_mod), "--merge_only"])
+        merge_cmd = _cmd_str(merge_parts)
+        merge_lines = [
+            "#!/bin/bash",
+            f"#SBATCH --job-name={merge_name}",
+            f"#SBATCH --partition={SLURM_CPU_PARTITION}",
+            f"#SBATCH -A {SLURM_CPU_ACCOUNT}",
+            "#SBATCH --nodes=1 --ntasks=1",
+            f"#SBATCH --cpus-per-task={cpus_val}",
+            f"#SBATCH --mem={mem_spec}",
+            f"#SBATCH --time={wall_h}:00:00",
+            f"#SBATCH --output=slurm_logs/{merge_name}_%j.out",
+            f"#SBATCH --error=slurm_logs/{merge_name}_%j.err",
+            "",
+            "set -euo pipefail",
+            f"cd {shlex.quote(str(ROOT))}",
+            "echo \"[assess][merge] start $(date)\"",
+            merge_cmd,
+            "echo \"[assess][merge] done $(date)\"",
+        ]
+        merge_script.write_text("\n".join(merge_lines) + "\n")
+        os.chmod(merge_script, 0o755)
+        scripts["merge"] = merge_script
+
+        launch_script = launch_dir / f"launch_{job_base}_{ts}.sh"
+        launch_lines = [
+            "#!/bin/bash",
+            "set -euo pipefail",
+            f'echo "[launch] sbatch {array_script.name}"',
+            f"jid_array=$(sbatch {shlex.quote(str(array_script))} | awk '{{print $4}}')",
+            'echo "[launch] submitted array job ${jid_array}"',
+            f'echo "[launch] sbatch --dependency=afterok:${{jid_array}} {merge_script.name}"',
+            f"jid_merge=$(sbatch --dependency=afterok:${{jid_array}} {shlex.quote(str(merge_script))} | awk '{{print $4}}')",
+            'echo "[launch] submitted merge job ${jid_merge}"',
+        ]
+        launch_script.write_text("\n".join(launch_lines) + "\n")
+        os.chmod(launch_script, 0o755)
+        scripts["launch"] = launch_script
+    else:
+        job_name = job_base
+        job_script = job_dir / f"submit_{job_name}_{ts}.sh"
+        job_lines = [
+            "#!/bin/bash",
+            f"#SBATCH --job-name={job_name}",
+            f"#SBATCH --partition={SLURM_CPU_PARTITION}",
+            f"#SBATCH -A {SLURM_CPU_ACCOUNT}",
+            "#SBATCH --nodes=1 --ntasks=1",
+            f"#SBATCH --cpus-per-task={cpus_val}",
+            f"#SBATCH --mem={mem_spec}",
+            f"#SBATCH --time={wall_h}:00:00",
+            f"#SBATCH --output=slurm_logs/{job_name}_%j.out",
+            f"#SBATCH --error=slurm_logs/{job_name}_%j.err",
+            "",
+            "set -euo pipefail",
+            f"cd {shlex.quote(str(ROOT))}",
+            "echo \"[assess] host: $(hostname)\"",
+            "echo \"[assess] start: $(date)\"",
+            run_cmd,
+            "echo \"[assess] done: $(date)\"",
+        ]
+        job_script.write_text("\n".join(job_lines) + "\n")
+        os.chmod(job_script, 0o755)
+        scripts["primary"] = job_script
+
+        launch_script = launch_dir / f"launch_{job_name}_{ts}.sh"
+        launch_lines = [
+            "#!/bin/bash",
+            "set -euo pipefail",
+            f'echo "[launch] sbatch {job_script.name}"',
+            f"jid=$(sbatch {shlex.quote(str(job_script))} | awk '{{print $4}}')",
+            'echo "[launch] submitted job ${jid}"',
+        ]
+        launch_script.write_text("\n".join(launch_lines) + "\n")
+        os.chmod(launch_script, 0o755)
+        scripts["launch"] = launch_script
+
+    return {
+        "launch": scripts["launch"],
+        "primary": scripts["primary"],
+        "merge": scripts["merge"],
+        "use_array": use_array,
+        "effective_shard_mod": effective_shard_mod,
+    }
 
 def _parse_arm(s: str):
     # "RBM Core@A" -> ("RBM Core", "A"); "RBM Core" -> ("RBM Core","A")
@@ -492,6 +699,24 @@ def main():
     p_assess_all.add_argument("--skip_seq", action="store_true",
                                 help="If set, skip writing designed sequences to text files to reduce clutter when assessing many epitopes.")
     p_assess_all.add_argument("--include_keyword", default="", help="If set, only include designs with this keyword in the filename.")
+    p_assess_all.add_argument("--cpus", type=int, default=8,
+                              help="CPU cores for sbatch jobs (used with --sbatch; default: 8).")
+    p_assess_all.add_argument("--mem_gb", type=int, default=32,
+                              help="Memory (GB) for sbatch jobs (used with --sbatch; default: 32).")
+    p_assess_all.add_argument("--time_h", type=int, default=12,
+                              help="Walltime hours for sbatch jobs (used with --sbatch; default: 12).")
+    p_assess_all.add_argument("--sbatch", action="store_true",
+                              help="Write an sbatch script instead of running locally.")
+    p_assess_all.add_argument("--submit", action="store_true",
+                              help="If set with --sbatch, immediately submit the generated launcher (bash launch_*.sh).")
+    p_assess_all.add_argument("--shard_mod", type=int, default=1,
+                              help="Total number of shards when splitting the assessment.")
+    p_assess_all.add_argument("--shard_idx", type=int, default=None,
+                              help="Shard index (0-based) to process when shard_mod>1.")
+    p_assess_all.add_argument("--merge_only", action="store_true",
+                              help="Merge existing shard TSVs into a combined ranking without rescanning designs.")
+    p_assess_all.add_argument("--array", type=int, default=1,
+                              help="SLURM array size when using --sbatch (sets shard count).")
 
     p_report = sub.add_parser("report-scope", help="Generate a Markdown report of the project scope.")
     p_report.add_argument("pdb")
@@ -801,8 +1026,74 @@ def main():
         pass
 
     elif args.cmd == "assess-rfa-all":
-        assess_rfa_all(args.pdb, binder_chain_id=args.binder_chain_id, seed=args.seed, sample_idx=args.sample_idx,
-                       run_label=args.run_label, skip_pml=args.skip_pml, skip_seq=False, include_keyword=args.include_keyword)
+        include_kw = args.include_keyword or None
+        if args.merge_only and not args.run_label:
+            raise ValueError("--run_label is required when using --merge_only")
+        if args.merge_only and args.shard_mod <= 1:
+            raise ValueError("--merge_only requires --shard_mod > 1")
+        if getattr(args, "submit", False) and not getattr(args, "sbatch", False):
+            args.sbatch = True
+        if getattr(args, "sbatch", False):
+            if args.merge_only:
+                raise ValueError("--merge_only is not supported with --sbatch (array launches already create a merge job)")
+            array_size = max(1, int(args.array or 1))
+            effective_shard_mod = max(1, args.shard_mod, array_size)
+            job_info = _write_assess_rfa_all_sbatch(
+                args.pdb,
+                binder_chain_id=args.binder_chain_id,
+                run_label=args.run_label,
+                include_keyword=include_kw,
+                seed=args.seed,
+                sample_idx=args.sample_idx,
+                rank_by=args.rank_by,
+                skip_pml=args.skip_pml,
+                skip_seq=args.skip_seq,
+                time_h=args.time_h,
+                mem_gb=args.mem_gb,
+                cpus=args.cpus,
+                shard_mod=effective_shard_mod,
+                shard_idx=args.shard_idx,
+                array_size=array_size,
+            )
+            primary = job_info.get("primary")
+            launch_script = job_info.get("launch")
+            merge_script = job_info.get("merge")
+            if primary:
+                print(f"[ok] Wrote sbatch script: {primary}")
+            if merge_script:
+                print(f"[ok] Wrote merge script: {merge_script}")
+            if launch_script:
+                print(f"[ok] Wrote launcher: {launch_script}")
+                print(f"Run: bash {launch_script}")
+            if getattr(args, "submit", False) and launch_script:
+                res = subprocess.run(["bash", str(launch_script)], capture_output=True, text=True)
+                if res.returncode != 0:
+                    if res.stdout:
+                        print(res.stdout)
+                    if res.stderr:
+                        print(res.stderr)
+                    raise RuntimeError(f"launcher submission failed (exit {res.returncode})")
+                else:
+                    if res.stdout.strip():
+                        print(res.stdout.strip())
+                    if res.stderr.strip():
+                        print(res.stderr.strip())
+        else:
+            if args.shard_mod > 1 and not args.merge_only and args.shard_idx is None:
+                raise ValueError("--shard_idx is required when --shard_mod > 1 (unless using --merge_only)")
+            assess_rfa_all(
+                args.pdb,
+                binder_chain_id=args.binder_chain_id,
+                seed=args.seed,
+                sample_idx=args.sample_idx,
+                run_label=args.run_label,
+                skip_pml=args.skip_pml,
+                skip_seq=args.skip_seq,
+                include_keyword=include_kw,
+                shard_mod=max(1, args.shard_mod),
+                shard_idx=args.shard_idx,
+                merge_only=args.merge_only,
+            )
 
     elif args.cmd == "report-scope":
         pass

@@ -67,6 +67,10 @@ SLURM_ACCOUNT = "ccl_lab_gpu"
 # Default GPU type to request
 SLURM_GPU_TYPE = "A30:1"
 
+# Default SLURM settings for CPU-only jobs (used by assessment scripts, etc.)
+SLURM_CPU_PARTITION = os.environ.get("SLURM_CPU_PARTITION", "ccl_lab")
+SLURM_CPU_ACCOUNT = os.environ.get("SLURM_CPU_ACCOUNT", SLURM_ACCOUNT)
+
 
 # --- AlphaFold 3 Configuration (NEW) ---
 # Absolute path to your AlphaFold 3 singularity image
@@ -80,7 +84,7 @@ AF3_DATABASES_DIR = "/pub/inagakit/af3/databases"
 # --- Global Constants ---
 # ROOT = Path(__file__).resolve().parent
 ROOT = Path("/pub/inagakit/Projects/initbinder")  # hardcoded for simplicity
-# ROOT = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder")  # hardcoded for simplicity
+ROOT = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder")  # hardcoded for simplicity
 print(f'[info] Running manage_rfa_eco.py from {ROOT}')
 SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 

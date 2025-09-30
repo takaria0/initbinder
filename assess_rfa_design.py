@@ -1052,6 +1052,23 @@ def _extract_chain_seq_from_pdb(pdb_path: Path, chain_id: str) -> str:
         seq.append(AA3_TO_1.get(aa3, "X"))
     return "".join(seq)
 
+
+def _shard_filename(shard_idx: int, shard_mod: int) -> str:
+    return f"af3_rankings_shard{shard_idx:03d}of{shard_mod:03d}.tsv"
+
+
+def _load_assessment_shards(out_dir: Path, shard_mod: int) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for idx in range(shard_mod):
+        shard_path = out_dir / _shard_filename(idx, shard_mod)
+        if not shard_path.exists():
+            raise FileNotFoundError(f"Missing shard TSV: {shard_path}")
+        with shard_path.open() as f:
+            rd = csv.DictReader(f, delimiter="\t")
+            rows.extend(dict(r) for r in rd)
+    return rows
+
+
 def assess_rfa_all(
     pdb_id: str,
     *,
@@ -1065,6 +1082,9 @@ def assess_rfa_all(
     skip_seq: bool = False,
     progress_every: int = 200,
     include_keyword: Optional[Iterable[str] | str] = None,
+    shard_mod: int = 1,
+    shard_idx: int | None = None,
+    merge_only: bool = False,
 ):
     """
     Scan all designs and write a rankings TSV (includes binder RMSD in prepared frame).
@@ -1096,267 +1116,297 @@ def assess_rfa_all(
         except Exception:
             return json.loads(p.read_text())
 
-    rows = []
-    n_scanned = 0
-    keywords = _normalize_keywords(include_keyword)
-    for ep_dir in sorted(designs_root.iterdir()):
-        if not ep_dir.is_dir(): continue
-        ep_name = ep_dir.name
-        if ep_name.startswith("_"): continue
-        print(f'[info] Processing epitope folder: {ep_name}')
+    shard_mod = int(shard_mod or 1)
+    if shard_mod < 1:
+        raise ValueError("shard_mod must be >= 1")
 
-        # optional masks/hotspots
-        name_sanitized = ep_name
-        mask_path_base = tdir / "prep" / f"epitope_{name_sanitized}.json"
-        epitope_mask = []
-        try:
-            if mask_path_base.exists():
-                epitope_mask = _loads_fast(mask_path_base)
-        except Exception:
+    shard_idx_effective = int(shard_idx or 0)
+
+    if merge_only:
+        if shard_mod <= 1:
+            raise ValueError("merge_only requires shard_mod > 1")
+        rows = _load_assessment_shards(out_dir, shard_mod)
+        print(f"[merge] Loaded {len(rows)} rows from {shard_mod} shard TSVs")
+    else:
+        if shard_mod > 1:
+            if shard_idx is None:
+                raise ValueError("shard_idx is required when shard_mod > 1")
+            shard_idx_effective = int(shard_idx)
+            if shard_idx_effective < 0 or shard_idx_effective >= shard_mod:
+                raise ValueError(f"shard_idx must be in [0, {shard_mod-1}]")
+            print(f"[shard] Processing shard {shard_idx_effective+1}/{shard_mod}")
+
+        rows = []
+        n_scanned = 0
+        keywords = _normalize_keywords(include_keyword)
+        eligible_idx = -1
+
+        for ep_dir in sorted(designs_root.iterdir()):
+            if not ep_dir.is_dir():
+                continue
+            ep_name = ep_dir.name
+            if ep_name.startswith("_"):
+                continue
+            print(f'[info] Processing epitope folder: {ep_name}')
+
+            # optional masks/hotspots
+            name_sanitized = ep_name
+            mask_path_base = tdir / "prep" / f"epitope_{name_sanitized}.json"
             epitope_mask = []
+            try:
+                if mask_path_base.exists():
+                    epitope_mask = _loads_fast(mask_path_base)
+            except Exception:
+                epitope_mask = []
 
-        for hs_dir in sorted(ep_dir.glob("hs-*")):
-            variant = hs_dir.name.split("-", 1)[1] if "-" in hs_dir.name else "A"
+            for hs_dir in sorted(ep_dir.glob("hs-*")):
+                variant = hs_dir.name.split("-", 1)[1] if "-" in hs_dir.name else "A"
 
-            def _load_hotspots():
-                hp_var = tdir / "prep" / f"epitope_{name_sanitized}_hotspots{variant}.json"
-                hp_def = tdir / "prep" / f"epitope_{name_sanitized}_hotspots.json"
-                if hp_var.exists():
-                    return _loads_fast(hp_var)
-                if hp_def.exists():
-                    return _loads_fast(hp_def)
-                return []
-            hotspots = _load_hotspots()
+                def _load_hotspots():
+                    hp_var = tdir / "prep" / f"epitope_{name_sanitized}_hotspots{variant}.json"
+                    hp_def = tdir / "prep" / f"epitope_{name_sanitized}_hotspots.json"
+                    if hp_var.exists():
+                        return _loads_fast(hp_var)
+                    if hp_def.exists():
+                        return _loads_fast(hp_def)
+                    return []
 
-            af3_dir = hs_dir / "rfa_af3"
-            mpnn_dir = hs_dir / "rfa_mpnn"
-            rfdiff_root = hs_dir / "rfa_rfdiff"
-            if not af3_dir.exists(): continue
+                hotspots = _load_hotspots()
 
-            print(f'[info] Scanning epitope "{ep_name}" variant "{variant}"... under {hs_dir}')
-            for design_dir in sorted(af3_dir.iterdir()):
-                if not design_dir.is_dir():
+                af3_dir = hs_dir / "rfa_af3"
+                mpnn_dir = hs_dir / "rfa_mpnn"
+                rfdiff_root = hs_dir / "rfa_rfdiff"
+                if not af3_dir.exists():
                     continue
-                if keywords and not _path_matches_keywords(design_dir, keywords):
-                    continue
-                design_name = design_dir.name
-                n_scanned += 1
-                if n_scanned % max(1, progress_every) == 0:
-                    print(f"[scan] {n_scanned} designs processed...")
 
-                best = _find_af3_best_sample(design_dir, design_name, seed, sample_idx, include_keyword=keywords)
-                print(f"\n[design] ===============")
-                print(f"[design] epitope={ep_name} variant={variant} design={design_name}")
-                if best:
-                    print(f"[design] AF3 summary={best['summary']}")
-                    print(f"[design] AF3 cif    ={best['cif']}")
-                else:
-                    print(f"[design][warn] no AF3 sample found under {design_dir}")
-                print(f"[design] rfdiff_root={rfdiff_root}")
+                print(f'[info] Scanning epitope "{ep_name}" variant "{variant}"... under {hs_dir}')
+                for design_dir in sorted(af3_dir.iterdir()):
+                    if not design_dir.is_dir():
+                        continue
+                    if keywords and not _path_matches_keywords(design_dir, keywords):
+                        continue
+                    eligible_idx += 1
+                    if shard_mod > 1 and (eligible_idx % shard_mod) != shard_idx_effective:
+                        continue
+                    design_name = design_dir.name
+                    n_scanned += 1
+                    if n_scanned % max(1, progress_every) == 0:
+                        print(f"[scan] {n_scanned} designs processed...")
 
-                rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id=binder_chain_id, target_chain_id=rf_target_chain_id)
+                    best = _find_af3_best_sample(design_dir, design_name, seed, sample_idx, include_keyword=keywords)
+                    print(f"\n[design] ===============")
+                    print(f"[design] epitope={ep_name} variant={variant} design={design_name}")
+                    if best:
+                        print(f"[design] AF3 summary={best['summary']}")
+                        print(f"[design] AF3 cif    ={best['cif']}")
+                    else:
+                        print(f"[design][warn] no AF3 sample found under {design_dir}")
+                    print(f"[design] rfdiff_root={rfdiff_root}")
 
-                mpnn_pdb = mpnn_dir / f"{design_name}.pdb"
-                if not mpnn_pdb.exists():
-                    cand = list(mpnn_dir.rglob(f"{design_name}*.pdb"))
-                    mpnn_pdb = cand[0] if cand else None
-                binder_seq = ""
-                if (not skip_seq) and mpnn_pdb and mpnn_pdb.exists():
-                    try:
-                        binder_seq = _extract_chain_seq_from_pdb(mpnn_pdb, binder_chain_id)
-                    except Exception:
-                        binder_seq = ""
-                        print(f"[warn] Could not extract seq from {mpnn_pdb}")
+                    rfdiff_pdb = _find_rfdiffusion_pdb(rfdiff_root, design_name, binder_chain_id=binder_chain_id, target_chain_id=rf_target_chain_id)
 
-                # AF3 summary fields
-                af3_rank = af3_iptm = af3_ptm = None
-                af3_has_clash = None
-                af3_frac_dis = None
-                af3_cif = af3_summary = None
-                af3_conf = None
-                pml_path = None
-                # ipSAE aggregates (initialize empty)
-                ipsae_min = ipsae_avg = ipsae_max = None
-                ipsae_pairs = None
-
-                # Pose metrics container (pre-fill)
-                pose_metrics: Dict[str, float | str | int] = {
-                    'rmsd_binder_prepared_frame': "",
-                    'rmsd_binder_after_kabsch': "",
-                    'binder_com_distance': "",
-                    'min_dist_rfdiff_binder_prepared_target': "",
-                    'min_dist_af3_binder_prepared_target': "",
-                    'binder_seq_align_pairs': "",
-                    'binder_seq_align_score': "",
-                    'binder_seq_cov_rfdiff_pct': "",
-                    'binder_seq_cov_af3_pct': "",
-                    'af3_target_fit_pairs': "", 'af3_target_fit_rmsd': "", 'af3_target_fit_map': "",
-                    'rf_target_fit_pairs': "", 'rf_target_fit_rmsd': "", 'rf_target_fit_map': "",
-                    'target_ca_count_prepared': "", 'binder_ca_count_rfdiff': "", 'binder_ca_count_af3': "",
-                    # compatibility keys
-                    'rfdiff_vs_af3_pose_rmsd': "", 'binder_rmsd_kabsch': ""
-                }
-
-                # ---- AUTO-PICK prepared target chain (by seq vs RF target) ----
-                prepared_chain_sel = None
-                if rfdiff_pdb:
-                    prepared_chain_sel = _auto_select_prepared_target_chain(prepared_pdb, rfdiff_pdb, rf_target_chain_id)
-                if not prepared_chain_sel:
-                    prepared_chain_sel = "T"  # graceful fallback
-                    print(f"[auto-chain][fallback] using '{prepared_chain_sel}'")
-
-                if best:
-                    af3_summary = best["summary"]
-                    af3_cif = best["cif"]
-                    af3_conf = best.get("conf")
-                    try:
-                        s = _loads_fast(af3_summary)
-                        af3_rank = float(s.get("ranking_score", "nan"))
-                        af3_iptm = float(s.get("iptm", "nan"))
-                        af3_ptm  = float(s.get("ptm", "nan"))
-                        af3_has_clash = bool(s.get("has_clash", True))
-                        af3_frac_dis  = float(s.get("fraction_disordered", "nan"))
-                    except Exception:
-                        pass
-
-                    try:
-                        if rfdiff_pdb and Path(af3_cif).exists():
-                            print(f"[design] computing RMSD (prepared frame)... binder_chain={binder_chain_id} prepared_chain={prepared_chain_sel}")
-                            rmsd_results = _compute_rmsd_binder_prepared_frame(
-                                prepared_pdb=prepared_pdb,
-                                rfdiff_pdb=rfdiff_pdb,
-                                af3_cif=af3_cif,
-                                prepared_target_chain_id=prepared_chain_sel,
-                                binder_chain_id=binder_chain_id,
-                            )
-                            if rmsd_results:
-                                for k, v in rmsd_results.items():
-                                    pose_metrics[k] = v if (isinstance(v, str) or (v == v)) else ""
-                                print(f"[design] RMSD_binder (prepared) = {pose_metrics.get('rmsd_binder_prepared_frame')}")
-                            else:
-                                print(f"[design][fail] RMSD calculation returned None")
-                        else:
-                            print(f"[design][skip] RMSD: rfdiff_pdb={rfdiff_pdb} exists={bool(rfdiff_pdb and Path(rfdiff_pdb).exists())}, "
-                                  f"af3_cif={af3_cif} exists={bool(af3_cif and Path(af3_cif).exists())}")
-                    except Exception as e:
-                        print(f"[warn] RMSD calc failed for {design_name}: {e}")
-
-                    if not skip_pml and rfdiff_pdb and af3_cif:
-                        pml_path = pml_dir / f"{name_sanitized}__hs-{variant}__{design_name}.pml"
+                    mpnn_pdb = mpnn_dir / f"{design_name}.pdb"
+                    if not mpnn_pdb.exists():
+                        cand = list(mpnn_dir.rglob(f"{design_name}*.pdb"))
+                        mpnn_pdb = cand[0] if cand else None
+                    binder_seq = ""
+                    if (not skip_seq) and mpnn_pdb and mpnn_pdb.exists():
                         try:
-                            _make_pml_quickview(
-                                pml_path=pml_path,
-                                prepared_pdb_path=prepared_pdb,
-                                prepared_target_chain_id=prepared_chain_sel,
-                                af3_model_path=af3_cif,
-                                rfdiff_model_path=rfdiff_pdb,
-                                binder_chain_id=binder_chain_id,
-                                epitope_mask_keys=epitope_mask,
-                                hotspot_keys=hotspots,
-                            )
+                            binder_seq = _extract_chain_seq_from_pdb(mpnn_pdb, binder_chain_id)
+                        except Exception:
+                            binder_seq = ""
+                            print(f"[warn] Could not extract seq from {mpnn_pdb}")
+
+                    # AF3 summary fields
+                    af3_rank = af3_iptm = af3_ptm = None
+                    af3_has_clash = None
+                    af3_frac_dis = None
+                    af3_cif = af3_summary = None
+                    af3_conf = None
+                    pml_path = None
+                    # ipSAE aggregates (initialize empty)
+                    ipsae_min = ipsae_avg = ipsae_max = None
+                    ipsae_pairs = None
+
+                    # Pose metrics container (pre-fill)
+                    pose_metrics: Dict[str, float | str | int] = {
+                        'rmsd_binder_prepared_frame': "",
+                        'rmsd_binder_after_kabsch': "",
+                        'binder_com_distance': "",
+                        'min_dist_rfdiff_binder_prepared_target': "",
+                        'min_dist_af3_binder_prepared_target': "",
+                        'binder_seq_align_pairs': "",
+                        'binder_seq_align_score': "",
+                        'binder_seq_cov_rfdiff_pct': "",
+                        'binder_seq_cov_af3_pct': "",
+                        'af3_target_fit_pairs': "", 'af3_target_fit_rmsd': "", 'af3_target_fit_map': "",
+                        'rf_target_fit_pairs': "", 'rf_target_fit_rmsd': "", 'rf_target_fit_map': "",
+                        'target_ca_count_prepared': "", 'binder_ca_count_rfdiff': "", 'binder_ca_count_af3': "",
+                        # compatibility keys
+                        'rfdiff_vs_af3_pose_rmsd': "", 'binder_rmsd_kabsch': ""
+                    }
+
+                    # ---- AUTO-PICK prepared target chain (by seq vs RF target) ----
+                    prepared_chain_sel = None
+                    if rfdiff_pdb:
+                        prepared_chain_sel = _auto_select_prepared_target_chain(prepared_pdb, rfdiff_pdb, rf_target_chain_id)
+                    if not prepared_chain_sel:
+                        prepared_chain_sel = "T"  # graceful fallback
+                        print(f"[auto-chain][fallback] using '{prepared_chain_sel}'")
+
+                    if best:
+                        af3_summary = best["summary"]
+                        af3_cif = best["cif"]
+                        af3_conf = best.get("conf")
+                        try:
+                            s = _loads_fast(af3_summary)
+                            af3_rank = float(s.get("ranking_score", "nan"))
+                            af3_iptm = float(s.get("iptm", "nan"))
+                            af3_ptm  = float(s.get("ptm", "nan"))
+                            af3_has_clash = bool(s.get("has_clash", True))
+                            af3_frac_dis  = float(s.get("fraction_disordered", "nan"))
+                        except Exception:
+                            pass
+
+                        try:
+                            if rfdiff_pdb and Path(af3_cif).exists():
+                                print(f"[design] computing RMSD (prepared frame)... binder_chain={binder_chain_id} prepared_chain={prepared_chain_sel}")
+                                rmsd_results = _compute_rmsd_binder_prepared_frame(
+                                    prepared_pdb=prepared_pdb,
+                                    rfdiff_pdb=rfdiff_pdb,
+                                    af3_cif=af3_cif,
+                                    prepared_target_chain_id=prepared_chain_sel,
+                                    binder_chain_id=binder_chain_id,
+                                )
+                                if rmsd_results:
+                                    for k, v in rmsd_results.items():
+                                        pose_metrics[k] = v if (isinstance(v, str) or (v == v)) else ""
+                                    print(f"[design] RMSD_binder (prepared) = {pose_metrics.get('rmsd_binder_prepared_frame')}")
+                                else:
+                                    print(f"[design][fail] RMSD calculation returned None")
+                            else:
+                                print(f"[design][skip] RMSD: rfdiff_pdb={rfdiff_pdb} exists={bool(rfdiff_pdb and Path(rfdiff_pdb).exists())}, "
+                                      f"af3_cif={af3_cif} exists={bool(af3_cif and Path(af3_cif).exists())}")
                         except Exception as e:
-                            print(f"[warn] build PML failed: {e}")
-                            pml_path = None
+                            print(f"[warn] RMSD calc failed for {design_name}: {e}")
 
-                    # ---- ipSAE metrics (AF3) ----
-                    try:
-                        ipsae_min = ipsae_avg = ipsae_max = None
-                        ipsae_pairs = None
-                        if af3_conf and Path(af3_conf).exists() and af3_cif and Path(af3_cif).exists():
-                            print(f"[ipSAE] inputs: conf={af3_conf} exists={Path(af3_conf).exists()}  cif={af3_cif} exists={Path(af3_cif).exists()}")
-                            # Debug inputs
+                        if not skip_pml and rfdiff_pdb and af3_cif:
+                            pml_path = pml_dir / f"{name_sanitized}__hs-{variant}__{design_name}.pml"
                             try:
-                                conf_data = json.loads(Path(af3_conf).read_text())
-                                keys = list(conf_data.keys())
-                                print(f"[ipSAE][debug] confidences keys: {keys[:10]}{'...' if len(keys)>10 else ''}")
-                                if 'pae' in conf_data:
-                                    try:
-                                        print(f"[ipSAE][debug] PAE shape: {np.array(conf_data['pae']).shape}")
-                                    except Exception:
-                                        pass
-                                elif 'predicted_aligned_error' in conf_data:
-                                    try:
-                                        print(f"[ipSAE][debug] predicted_aligned_error shape: {np.array(conf_data['predicted_aligned_error']).shape}")
-                                    except Exception:
-                                        pass
-                                if 'atom_plddts' in conf_data:
-                                    try:
-                                        print(f"[ipSAE][debug] atom_plddts len: {len(conf_data['atom_plddts'])}")
-                                    except Exception:
-                                        pass
+                                _make_pml_quickview(
+                                    pml_path=pml_path,
+                                    prepared_pdb_path=prepared_pdb,
+                                    prepared_target_chain_id=prepared_chain_sel,
+                                    af3_model_path=af3_cif,
+                                    rfdiff_model_path=rfdiff_pdb,
+                                    binder_chain_id=binder_chain_id,
+                                    epitope_mask_keys=epitope_mask,
+                                    hotspot_keys=hotspots,
+                                )
                             except Exception as e:
-                                print(f"[ipSAE][debug] failed reading confidences JSON: {e}")
+                                print(f"[warn] build PML failed: {e}")
+                                pml_path = None
 
-                            # Debug AF3 CIF chain IDs
-                            try:
-                                ext = Path(af3_cif).suffix.lower()
-                                parser = MMCIFParser(QUIET=True) if ext in ('.cif','.mmcif') else PDBParser(QUIET=True)
-                                s = parser.get_structure('af3', str(af3_cif))
-                                af3_chains = [str(ch.id) for ch in s[0].get_chains()]
-                                print(f"[ipSAE][debug] AF3 chains: {sorted(set(af3_chains))}")
-                                print(f"[ipSAE][debug] binder_chain_id param: {binder_chain_id} present={binder_chain_id in af3_chains}")
-                            except Exception as e:
-                                print(f"[ipSAE][debug] failed parsing AF3 CIF chains: {e}")
-
-                            try:
-                                from scripts.ipsae_portable import compute_ipsae_af3  # type: ignore
-                            except Exception:
-                                compute_ipsae_af3 = None  # type: ignore
-                            if compute_ipsae_af3:
-                                print("[ipSAE] computing ipSAE via portable helper...")
-                                r_ = compute_ipsae_af3(Path(af3_conf), Path(af3_cif), pae_cutoff=10.0, binder_chain_id=binder_chain_id)
-                                ipsae_min = r_.get("ipsae_min")
-                                ipsae_avg = r_.get("ipsae_avg")
-                                ipsae_max = r_.get("ipsae_max")
-                                ipsae_pairs = r_.get("ipsae_pairs")
+                        # ---- ipSAE metrics (AF3) ----
+                        try:
+                            ipsae_min = ipsae_avg = ipsae_max = None
+                            ipsae_pairs = None
+                            if af3_conf and Path(af3_conf).exists() and af3_cif and Path(af3_cif).exists():
+                                print(f"[ipSAE] inputs: conf={af3_conf} exists={Path(af3_conf).exists()}  cif={af3_cif} exists={Path(af3_cif).exists()}")
+                                # Debug inputs
                                 try:
-                                    print(f"[design] ipSAE(min/avg/max) = {float(ipsae_min):.4f}/{float(ipsae_avg):.4f}/{float(ipsae_max):.4f} over {int(ipsae_pairs)} pairs")
+                                    conf_data = json.loads(Path(af3_conf).read_text())
+                                    keys = list(conf_data.keys())
+                                    print(f"[ipSAE][debug] confidences keys: {keys[:10]}{'...' if len(keys)>10 else ''}")
+                                    if 'pae' in conf_data:
+                                        try:
+                                            print(f"[ipSAE][debug] PAE shape: {np.array(conf_data['pae']).shape}")
+                                        except Exception:
+                                            pass
+                                    elif 'predicted_aligned_error' in conf_data:
+                                        try:
+                                            print(f"[ipSAE][debug] predicted_aligned_error shape: {np.array(conf_data['predicted_aligned_error']).shape}")
+                                        except Exception:
+                                            pass
+                                    if 'atom_plddts' in conf_data:
+                                        try:
+                                            print(f"[ipSAE][debug] atom_plddts len: {len(conf_data['atom_plddts'])}")
+                                        except Exception:
+                                            pass
+                                except Exception as e:
+                                    print(f"[ipSAE][debug] failed reading confidences JSON: {e}")
+
+                                # Debug AF3 CIF chain IDs
+                                try:
+                                    ext = Path(af3_cif).suffix.lower()
+                                    parser = MMCIFParser(QUIET=True) if ext in ('.cif','.mmcif') else PDBParser(QUIET=True)
+                                    s = parser.get_structure('af3', str(af3_cif))
+                                    af3_chains = [str(ch.id) for ch in s[0].get_chains()]
+                                    print(f"[ipSAE][debug] AF3 chains: {sorted(set(af3_chains))}")
+                                    print(f"[ipSAE][debug] binder_chain_id param: {binder_chain_id} present={binder_chain_id in af3_chains}")
+                                except Exception as e:
+                                    print(f"[ipSAE][debug] failed parsing AF3 CIF chains: {e}")
+
+                                try:
+                                    from scripts.ipsae_portable import compute_ipsae_af3  # type: ignore
                                 except Exception:
-                                    print(f"[design] ipSAE(min/avg/max) = {ipsae_min}/{ipsae_avg}/{ipsae_max} over {ipsae_pairs} pairs")
-                        else:
-                            print("[design][skip] ipSAE: missing AF3 confidences or CIF")
-                    except Exception as e:
-                        print(f"[warn] ipSAE calc failed for {design_name}: {e}")
+                                    compute_ipsae_af3 = None  # type: ignore
+                                if compute_ipsae_af3:
+                                    print("[ipSAE] computing ipSAE via portable helper...")
+                                    r_ = compute_ipsae_af3(Path(af3_conf), Path(af3_cif), pae_cutoff=10.0, binder_chain_id=binder_chain_id)
+                                    ipsae_min = r_.get("ipsae_min")
+                                    ipsae_avg = r_.get("ipsae_avg")
+                                    ipsae_max = r_.get("ipsae_max")
+                                    ipsae_pairs = r_.get("ipsae_pairs")
+                                    try:
+                                        print(f"[design] ipSAE(min/avg/max) = {float(ipsae_min):.4f}/{float(ipsae_avg):.4f}/{float(ipsae_max):.4f} over {int(ipsae_pairs)} pairs")
+                                    except Exception:
+                                        print(f"[design] ipSAE(min/avg/max) = {ipsae_min}/{ipsae_avg}/{ipsae_max} over {ipsae_pairs} pairs")
+                            else:
+                                print("[design][skip] ipSAE: missing AF3 confidences or CIF")
+                        except Exception as e:
+                            print(f"[warn] ipSAE calc failed for {design_name}: {e}")
 
-                final_score = af3_iptm if af3_iptm is not None and af3_iptm == af3_iptm else None
+                    final_score = af3_iptm if af3_iptm is not None and af3_iptm == af3_iptm else None
 
-                row_data = {
-                    "pdb_id": pdb_id.upper(),
-                    "epitope": ep_name,
-                    "hotspot_variant": variant,
-                    "arm": f"{ep_name}@{variant}",
-                    "design_name": design_name,
-                    "binder_chain": binder_chain_id,
-                    "binder_seq": binder_seq,
-                    "binder_len": len(binder_seq) if binder_seq else "",
-                    "mpnn_pdb_path": str(mpnn_pdb.resolve()) if mpnn_pdb else "",
-                    "prepared_pdb_path": str(prepared_pdb.resolve()),
-                    "prepared_target_chain_id": prepared_chain_sel,
-                    "af3_model_cif_path": str(af3_cif.resolve()) if af3_cif else "",
-                    "af3_summary_json_path": str(af3_summary.resolve()) if af3_summary else "",
-                    "af3_confidences_json_path": str(af3_conf.resolve()) if af3_conf else "",
-                    "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",
-                    "af3_ranking_score": af3_rank if af3_rank is not None else "",
-                    "af3_iptm": af3_iptm if af3_iptm is not None else "",
-                    "af3_ptm": af3_ptm if af3_ptm is not None else "",
-                    "af3_has_clash": af3_has_clash if af3_has_clash is not None else "",
-                    "af3_fraction_disordered": af3_frac_dis if af3_frac_dis is not None else "",
-                    "pymol_script_path": str(pml_path.resolve()) if (pml_path and not skip_pml) else "",
-                    # ipSAE aggregates (binder vs others)
-                    "ipsae_min": f"{ipsae_min:.6f}" if isinstance(ipsae_min, (int,float)) and ipsae_min==ipsae_min else "",
-                    "ipsae_avg": f"{ipsae_avg:.6f}" if isinstance(ipsae_avg, (int,float)) and ipsae_avg==ipsae_avg else "",
-                    "ipsae_max": f"{ipsae_max:.6f}" if isinstance(ipsae_max, (int,float)) and ipsae_max==ipsae_max else "",
-                    "ipsae_pairs": int(ipsae_pairs) if isinstance(ipsae_pairs, (int,float)) and ipsae_pairs==ipsae_pairs else "",
-                    "final_score": final_score if final_score is not None else ""
-                }
-                row_data.update(pose_metrics)
-                rows.append(row_data)
+                    row_data = {
+                        "pdb_id": pdb_id.upper(),
+                        "epitope": ep_name,
+                        "hotspot_variant": variant,
+                        "arm": f"{ep_name}@{variant}",
+                        "design_name": design_name,
+                        "binder_chain": binder_chain_id,
+                        "binder_seq": binder_seq,
+                        "binder_len": len(binder_seq) if binder_seq else "",
+                        "mpnn_pdb_path": str(mpnn_pdb.resolve()) if mpnn_pdb else "",
+                        "prepared_pdb_path": str(prepared_pdb.resolve()),
+                        "prepared_target_chain_id": prepared_chain_sel,
+                        "af3_model_cif_path": str(af3_cif.resolve()) if af3_cif else "",
+                        "af3_summary_json_path": str(af3_summary.resolve()) if af3_summary else "",
+                        "af3_confidences_json_path": str(af3_conf.resolve()) if af3_conf else "",
+                        "rfdiffusion_pdb_path": str(rfdiff_pdb.resolve()) if rfdiff_pdb else "",
+                        "af3_ranking_score": af3_rank if af3_rank is not None else "",
+                        "af3_iptm": af3_iptm if af3_iptm is not None else "",
+                        "af3_ptm": af3_ptm if af3_ptm is not None else "",
+                        "af3_has_clash": af3_has_clash if af3_has_clash is not None else "",
+                        "af3_fraction_disordered": af3_frac_dis if af3_frac_dis is not None else "",
+                        "pymol_script_path": str(pml_path.resolve()) if (pml_path and not skip_pml) else "",
+                        # ipSAE aggregates (binder vs others)
+                        "ipsae_min": f"{ipsae_min:.6f}" if isinstance(ipsae_min, (int,float)) and ipsae_min==ipsae_min else "",
+                        "ipsae_avg": f"{ipsae_avg:.6f}" if isinstance(ipsae_avg, (int,float)) and ipsae_avg==ipsae_avg else "",
+                        "ipsae_max": f"{ipsae_max:.6f}" if isinstance(ipsae_max, (int,float)) and ipsae_max==ipsae_max else "",
+                        "ipsae_pairs": int(ipsae_pairs) if isinstance(ipsae_pairs, (int,float)) and ipsae_pairs==ipsae_pairs else "",
+                        "final_score": final_score if final_score is not None else ""
+                    }
+                    row_data.update(pose_metrics)
+                    rows.append(row_data)
 
         print(f'[info] Completed epitope "{ep_name}"  processed={n_scanned}  total_rows={len(rows)}')
 
     if not rows:
         print("[warn] No designs found to assess.")
-        return
+        if shard_mod <= 1 and not merge_only:
+            return
 
     # Rank by AF3 iPTM (desc)
     def _score_key(r):
@@ -1370,8 +1420,18 @@ def assess_rfa_all(
     for i, r in enumerate(rows, start=1):
         r["rank"] = i
 
-    # TSV header
-    tsv_path = out_dir / f"af3_rankings.tsv"
+    if merge_only or shard_mod <= 1:
+        tsv_path = out_dir / "af3_rankings.tsv"
+        effective_shard_mod = 1
+    else:
+        tsv_path = out_dir / _shard_filename(shard_idx_effective, shard_mod)
+        effective_shard_mod = shard_mod
+
+    if effective_shard_mod > 1:
+        print(f"[shard] Writing shard TSV: {tsv_path}")
+    else:
+        print(f"[output] Writing combined TSV: {tsv_path}")
+
     headers = [
         "rank","pdb_id","epitope","hotspot_variant","arm",
         "design_name","binder_chain","binder_seq","binder_len",
@@ -1411,16 +1471,17 @@ def assess_rfa_all(
         print(f"  #{r['rank']:>3}  {r['epitope']} / hs-{r['hotspot_variant']} / {r['design_name']}  "
               f"iptm={r['af3_iptm']}  rmsd_binder={r.get('rmsd_binder_prepared_frame','')}  clash={r['af3_has_clash']}")
 
-    # Optional gallery
-    try:
-        build_pymol_gallery_from_rankings(
-            pdb_id, tsv_path, top_n=50,
-            binder_chain_id=binder_chain_id,
-            prepared_target_chain_id=None,  # read per-TSV (consistent for a target)
-            make_pse=False
-        )
-    except Exception as e:
-        print(f"[warn] gallery build failed: {e}")
+    # Optional gallery (only for combined runs)
+    if effective_shard_mod == 1:
+        try:
+            build_pymol_gallery_from_rankings(
+                pdb_id, tsv_path, top_n=50,
+                binder_chain_id=binder_chain_id,
+                prepared_target_chain_id=None,  # read per-TSV (consistent for a target)
+                make_pse=False
+            )
+        except Exception as e:
+            print(f"[warn] gallery build failed: {e}")
 
 if __name__ == "__main__":
     import argparse
