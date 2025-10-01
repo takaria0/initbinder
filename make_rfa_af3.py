@@ -643,7 +643,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     # =========================
     # Stage 2 script (batched; packs JSON via helper; no inline python)
     # =========================
-    DESIGNS_PER_TASK_DEFAULT = 200
+    DESIGNS_PER_TASK_DEFAULT = 10000
     est_count = len(input_pdbs) if have_inputs else 0
     num_stage2_tasks = max(1, math.ceil(est_count / DESIGNS_PER_TASK_DEFAULT))
 
