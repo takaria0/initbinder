@@ -67,9 +67,61 @@ python manage_rfa.py decide-scope 8SK7 --submit --time_h 1 --mem_gb 24
 
 3) Prepare structure + generate epitope masks and hotspot variants (A/B/C)
 python manage_rfa.py prep-target 8SK7 --sasa_cutoff 10.0
+python manage_rfa.py prep-target 6M17 --sasa_cutoff 10.0
 python manage_rfa.py prep-target 4DOH --sasa_cutoff 10.0
 python manage_rfa.py prep-target 8ES8 --sasa_cutoff 10.0
 python manage_rfa.py prep-target 7FJD --sasa_cutoff 10.0
+
+python manage_rfa.py pipeline 6M17 \
+  --arm "Receptor Binding Motif Core@A" \
+  --arm "Receptor Binding Motif Core@B" \
+  --arm "Receptor Binding Motif Core@C" \
+  --arm "RBM Flank and Crest@A" \
+  --arm "RBM Flank and Crest@B" \
+  --arm "RBM Flank and Crest@C" \
+  --arm "Conserved Structural Site@A" \
+  --arm "Conserved Structural Site@B" \
+  --arm "Conserved Structural Site@C" \
+  --total 9000 \
+  --designs_per_task 1000 \
+  --num_seq 1 --temp 0.1 \
+  --model_seeds 42 \
+  --binder_chain_id H \
+  --run_tag 20250929_9k_runs
+
+python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250929_9k_runs --include_keyword "20250929_9k_runs"
+/pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv
+# plot
+python plot_rankings.py \
+    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
+    --out_dir ./plots/6M17_20250929_9k_runs \
+    --img_format pdf --dpi 300 \
+    --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
+    --topN 50 --max_categories 12
+python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
+    --top_n 48 \
+    --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA \
+    --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
+    --codon_host yeast --use_dnachisel --dnachisel_species saccharomyces_cerevisiae \
+    --gc_target 0.45 --gc_window 100
+
+# === assess-rfa-all helpers (local sharding + SLURM launcher) ===
+# Split locally across N shards (run each shard separately, then merge):
+python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label debug --shard_mod 4 --shard_idx 0
+python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label debug --shard_mod 4 --shard_idx 1
+python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label debug --shard_mod 4 --shard_idx 2
+python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label debug --shard_mod 4 --shard_idx 3
+python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label debug --merge_only --shard_mod 4
+
+# Auto-write sbatch + launcher scripts (tools/assess + tools/launchers):
+python manage_rfa.py assess-rfa-all 6M17 \
+  --binder_chain_id H --run_label 20250929_9k_runs --include_keyword "20250929_9k_runs" \
+  --skip_pml --sbatch --array 9 --time_h 8 --mem_gb 4 --cpus 1
+# => launch script prints the final path (bash tools/launchers/launch_assess_*.sh)
+#   Add --submit to run the launcher automatically after generation.
+#   Omit --array to create a single sbatch job; otherwise the array size defines shard_mod.
+
+
 
 python manage_rfa.py pipeline 7FJD \
   --arm "Ig-like domain N-terminal loop@A" \
@@ -81,13 +133,22 @@ python manage_rfa.py pipeline 7FJD \
   --arm "Ig-like domain C-terminal surface@A" \
   --arm "Ig-like domain C-terminal surface@B" \
   --arm "Ig-like domain C-terminal surface@C" \
-  --total 9 \
-  --designs_per_task 1 \
-  --num_seq 10 --temp 0.1 \
-  --model_seeds 1 2 3 4 5 6 7 8 9 10 \
+  --total 90 \
+  --designs_per_task 10 \
+  --num_seq 5 --temp 0.1 \
+  --model_seeds 1 2 3 4 5 \
   --binder_chain_id H \
-  --run_tag 20250919_1548
+  --run_tag 20250926_0007
 
+# assess-all
+python manage_rfa.py assess-rfa-all 7FJD --binder_chain_id H --run_label 20250926 --include_keyword "20250926"
+# plot
+python plot_rankings.py \
+    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/7FJD/designs/_assessments/20250926/af3_rankings.tsv \
+    --out_dir ./plots/7FJD_20250926 \
+    --img_format pdf --dpi 300 \
+    --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
+    --topN 50 --max_categories 12
 
 python manage_rfa.py pipeline 8SK7 \
   --arm "Validated Globular Head Site@A" \
@@ -492,7 +553,7 @@ def _write_assess_rfa_all_sbatch(
             "",
             "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
-            "echo \"[assess][array] shard ${SLURM_ARRAY_TASK_ID}/{0}\"".format(effective_shard_mod),
+            "echo \"[assess][array] shard ${{SLURM_ARRAY_TASK_ID}}/{0}\"".format(effective_shard_mod),
             run_cmd,
             "echo \"[assess][array] done $(date)\"",
         ]
