@@ -591,6 +591,7 @@ def _compute_rmsd_binder_prepared_frame(
 
             # final metrics
             'rmsd_binder_prepared_frame': float(final_rmsd),   # ← Binder_RMSD
+            'rmsd_binder_diego': float(final_rmsd),
             'rmsd_binder_after_kabsch': float(final_rmsd_kabsch),       # debug
             'binder_com_distance': float(com_dist),
 
@@ -1241,7 +1242,7 @@ def assess_rfa_all(
         "af3_ranking_score","af3_iptm","af3_ptm","af3_has_clash","af3_fraction_disordered",
         "rfdiffusion_pdb_path",
         # Key RMSD metrics (prepared frame)
-        "rmsd_binder_prepared_frame", "rmsd_binder_after_kabsch", "binder_com_distance",
+        "rmsd_binder_prepared_frame", "rmsd_binder_diego", "rmsd_binder_after_kabsch", "binder_com_distance",
         "min_dist_rfdiff_binder_prepared_target", "min_dist_af3_binder_prepared_target",
         "binder_seq_align_pairs", "binder_seq_align_score",
         "binder_seq_cov_rfdiff_pct", "binder_seq_cov_af3_pct",
@@ -1458,6 +1459,7 @@ def assess_rfa_all(
                         # Pose metrics container (pre-fill)
                         pose_metrics: Dict[str, float | str | int] = {
                             'rmsd_binder_prepared_frame': "",
+                            'rmsd_binder_diego': "",
                             'rmsd_binder_after_kabsch': "",
                             'binder_com_distance': "",
                             'min_dist_rfdiff_binder_prepared_target': "",
