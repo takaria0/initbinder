@@ -47,6 +47,81 @@ def _kabsch(P: np.ndarray, Q: np.ndarray) -> Tuple[np.ndarray, float]:
     return P_aln, float(rmsd)
 
 # =========================
+# Biotite-based RMSD helpers
+# =========================
+try:
+    import biotite.structure as _bt_struc
+    from biotite.structure.io import load_structure as _bt_load_structure
+except ImportError:  # pragma: no cover - optional dependency
+    _bt_struc = None
+    _bt_load_structure = None
+
+_BIOTITE_AVAILABLE = _bt_struc is not None and _bt_load_structure is not None
+
+
+def _biotite_load_atomarray(struct_path: Path):
+    """Load structure as a single AtomArray using Biotite."""
+    if not _BIOTITE_AVAILABLE:
+        raise ImportError("biotite is not installed")
+    structure = _bt_load_structure(str(struct_path))
+    if isinstance(structure, _bt_struc.AtomArrayStack):
+        if len(structure) == 0:
+            raise ValueError(f"No models found in {struct_path}")
+        structure = structure[0]
+    return structure
+
+
+def _biotite_align_structures_by_chain(
+    rf_atoms,
+    af3_atoms,
+    rf_chain_id: str = "T",
+    af3_chain_id: Optional[str] = None,
+):
+    """Align AF3 onto RF atoms using the provided chain identifiers."""
+    if af3_chain_id is None:
+        af3_chain_id = rf_chain_id
+
+    rf_chain = rf_atoms[rf_atoms.chain_id == rf_chain_id]
+    af3_chain = af3_atoms[af3_atoms.chain_id == af3_chain_id]
+    if len(rf_chain) == 0:
+        raise ValueError(f"Target chain '{rf_chain_id}' not present in RF structure")
+    if len(af3_chain) == 0:
+        raise ValueError(f"Target chain '{af3_chain_id}' not present in AF3 structure")
+
+    _, transform, _, _ = _bt_struc.superimpose_homologs(
+        fixed=rf_chain,
+        mobile=af3_chain,
+        substitution_matrix="BLOSUM62",
+    )
+    return transform.apply(af3_atoms)
+
+
+def _compute_biotite_nanobody_rmsd(
+    rf_path: Path,
+    af3_path: Path,
+    *,
+    target_chain_rf: str = "T",
+    target_chain_af3: Optional[str] = None,
+    nanobody_chain: str = "H",
+) -> float:
+    """Compute nanobody RMSD after aligning AF3 to RF using Biotite."""
+    if not _BIOTITE_AVAILABLE:
+        raise ImportError("biotite is not installed")
+    rf_atoms = _biotite_load_atomarray(Path(rf_path))
+    af3_atoms = _biotite_load_atomarray(Path(af3_path))
+    af3_aligned = _biotite_align_structures_by_chain(
+        rf_atoms,
+        af3_atoms,
+        rf_chain_id=target_chain_rf,
+        af3_chain_id=target_chain_af3,
+    )
+    rf_h_ca = rf_atoms[(rf_atoms.chain_id == nanobody_chain) & (rf_atoms.atom_name == "CA")]
+    af3_h_ca = af3_aligned[(af3_aligned.chain_id == nanobody_chain) & (af3_aligned.atom_name == "CA")]
+    if len(rf_h_ca) == 0 or len(af3_h_ca) == 0:
+        raise ValueError(f"Nanobody chain '{nanobody_chain}' lacks C-alpha atoms for RMSD computation")
+    return float(_bt_struc.rmsd(rf_h_ca, af3_h_ca))
+
+# =========================
 # PDB/mmCIF readers
 # =========================
 def _load_chain_ca_coords(struct_path: Path, chain_id: str) -> Tuple[List[int], np.ndarray]:
@@ -450,9 +525,45 @@ def _compute_rmsd_binder_prepared_frame(
         _, rmsd_binder_kabsch = _kabsch(Pc, Qc)
         com_dist = float(np.linalg.norm(P_b.mean(0) - Q_b.mean(0)))
 
+        final_rmsd = rmsd_binder_prepared
+        final_rmsd_kabsch = rmsd_binder_kabsch
+
         print(f"[pose] binder COM distance = {com_dist:.2f} Å")
-        print(f"[pose][ok] RMSD_binder (prepared frame) = {rmsd_binder_prepared:.3f} Å  (N={len(idxP)})")
-        print(f"[pose][ok] RMSD_binder (after Kabsch)    = {rmsd_binder_kabsch:.3f} Å")
+
+        rf_target_chain_id = None
+        af3_target_chain_id = None
+        if isinstance(map_rf, dict):
+            entry_rf = map_rf.get(prepared_target_chain_id)
+            if entry_rf and entry_rf[0]:
+                rf_target_chain_id = str(entry_rf[0])
+        if isinstance(map_af, dict):
+            entry_af = map_af.get(prepared_target_chain_id)
+            if entry_af and entry_af[0]:
+                af3_target_chain_id = str(entry_af[0])
+
+        if _BIOTITE_AVAILABLE:
+            try:
+                print(
+                    f"[pose] Biotite target chains: RF={rf_target_chain_id or 'T'} "
+                    f"AF3={af3_target_chain_id or rf_target_chain_id or 'T'}"
+                )
+                final_rmsd = _compute_biotite_nanobody_rmsd(
+                    Path(rfdiff_pdb),
+                    Path(af3_cif),
+                    target_chain_rf=rf_target_chain_id or "T",
+                    target_chain_af3=af3_target_chain_id or None,
+                    nanobody_chain=binder_chain_id,
+                )
+                final_rmsd_kabsch = final_rmsd
+                print(f"[pose][ok] RMSD_binder (Biotite align) = {final_rmsd:.3f} Å")
+            except Exception as biotite_exc:
+                print(f"[pose][warn] Biotite RMSD failed: {biotite_exc}; falling back to prepared-frame RMSD")
+                print(f"[pose][ok] RMSD_binder (prepared frame) = {rmsd_binder_prepared:.3f} Å  (N={len(idxP)})")
+                print(f"[pose][ok] RMSD_binder (after Kabsch)    = {rmsd_binder_kabsch:.3f} Å")
+        else:
+            print("[pose][warn] Biotite not installed; using prepared-frame RMSD")
+            print(f"[pose][ok] RMSD_binder (prepared frame) = {rmsd_binder_prepared:.3f} Å  (N={len(idxP)})")
+            print(f"[pose][ok] RMSD_binder (after Kabsch)    = {rmsd_binder_kabsch:.3f} Å")
 
         return {
             # AF3 target → prepared fit
@@ -479,13 +590,13 @@ def _compute_rmsd_binder_prepared_frame(
             'min_dist_af3_binder_prepared_target': float(min_d_af),
 
             # final metrics
-            'rmsd_binder_prepared_frame': float(rmsd_binder_prepared),   # ← Binder_RMSD
-            'rmsd_binder_after_kabsch': float(rmsd_binder_kabsch),       # debug
+            'rmsd_binder_prepared_frame': float(final_rmsd),   # ← Binder_RMSD
+            'rmsd_binder_after_kabsch': float(final_rmsd_kabsch),       # debug
             'binder_com_distance': float(com_dist),
 
             # compatibility (old names)
-            'rfdiff_vs_af3_pose_rmsd': float(rmsd_binder_prepared),
-            'binder_rmsd_kabsch': float(rmsd_binder_kabsch),
+            'rfdiff_vs_af3_pose_rmsd': float(final_rmsd),
+            'binder_rmsd_kabsch': float(final_rmsd_kabsch),
         }
 
     except Exception as e:
