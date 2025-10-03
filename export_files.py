@@ -12,8 +12,8 @@ export_simple_picks.py — Minimal, clean exporter for de novo binder orders.
 Example usage:
 /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
 /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv
-python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv \
-    --top_n 48 --order_by iptm binder_rmsd_diego --drop_if iptm<0.7 --drop_if binder_rmsd_diego>10 \
+python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20251002_all_runs_diego_rmsd/af3_rankings.tsv \
+    --top_n 48 --order_by iptm binder_rmsd_diego --drop_if "iptm<0.7" --drop_if "binder_rmsd_diego>10" \
     --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA \
     --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
     --codon_host yeast --use_dnachisel --dnachisel_species saccharomyces_cerevisiae \
