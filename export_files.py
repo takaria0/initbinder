@@ -664,6 +664,7 @@ def export_pymol_gallery_bundle(
         hot_expr = str(entry["hot_expr"])
 
         pml_lines.extend([
+            f"create target_prepared, prepared_ref and chain {prepared_chain}, 1, {idx}",
             f"load {entry['bundle_rfd']}, {obj_rf}",
             f"load {entry['bundle_cif']}, {obj_af}",
             f"align ({obj_af} and name CA and not chain {binder_chain}), (target_prepared and name CA)",
@@ -720,6 +721,7 @@ def export_pymol_gallery_bundle(
             "enable binder_gallery_rfdiff",
             "enable epi_mask_gallery",
             "enable epi_hot_gallery",
+            f"set state, {idx}, target_prepared",
             f"set state, {idx}, target_rfcrop_gallery",
             f"set state, {idx}, target_af3_gallery",
             f"set state, {idx}, binder_gallery_af3",
@@ -733,6 +735,8 @@ def export_pymol_gallery_bundle(
 
     total_states = len(entries)
 
+    pml_lines.append("delete prepared_ref")
+
     pml_lines.extend([
         "disable all",
         "enable target_prepared",
@@ -742,6 +746,7 @@ def export_pymol_gallery_bundle(
         "enable binder_gallery_rfdiff",
         "enable epi_mask_gallery",
         "enable epi_hot_gallery",
+        "set all_states, on, target_prepared",
         "set all_states, on, target_rfcrop_gallery",
         "set all_states, on, target_af3_gallery",
         "set all_states, on, binder_gallery_af3",
@@ -760,12 +765,14 @@ def export_pymol_gallery_bundle(
         "enable binder_gallery_rfdiff",
         "enable epi_mask_gallery",
         "enable epi_hot_gallery",
+        "set all_states, off, target_prepared",
         "set all_states, off, target_rfcrop_gallery",
         "set all_states, off, target_af3_gallery",
         "set all_states, off, binder_gallery_af3",
         "set all_states, off, binder_gallery_rfdiff",
         "set all_states, off, epi_mask_gallery",
         "set all_states, off, epi_hot_gallery",
+        "set state, 1, target_prepared",
         "set state, 1, target_rfcrop_gallery",
         "set state, 1, target_af3_gallery",
         "set state, 1, binder_gallery_af3",
