@@ -13,18 +13,17 @@ Example usage:
 /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
 /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv
 python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250910/af3_rankings.tsv \
-    --top_n 48 \
+    --top_n 48 --order_by iptm binder_rmsd_diego --drop_if iptm<0.7 --drop_if binder_rmsd_diego>10 \
     --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA \
     --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
     --codon_host yeast --use_dnachisel --dnachisel_species saccharomyces_cerevisiae \
-    --gc_target 0.45 --gc_window 100 \
-    --order_by ipsae_min
+    --gc_target 0.45 --gc_window 100
 
 """
 
 import argparse, csv, json, re, sys, time, math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 # ----- Optional DNA Chisel -----
@@ -64,6 +63,146 @@ CODON_TABLES = {
         "W":"TGG","Y":"TAC","X":"NNK"
     }
 }
+
+# Metric alias groups (canonical -> candidate columns)
+METRIC_ALIAS_GROUPS = {
+    "iptm": ["iptm", "af3_iptm", "iptm_mean", "iptm_score"],
+    "ipsae_min": ["ipsae_min", "ipSAE_min"],
+    "binder_rmsd": [
+        "binder_rmsd",
+        "rmsd_binder_prepared_frame",
+        "rfdiff_vs_af3_pose_rmsd",
+        "binder_rmsd_kabsch",
+    ],
+    "binder_rmsd_diego": ["binder_rmsd_diego", "rmsd_binder_diego", "rmsd_diego"],
+}
+
+
+def _build_alias_maps(alias_groups: Dict[str, List[str]]) -> Tuple[Dict[str, Tuple[str, ...]], Dict[str, str]]:
+    """Construct lookups from alias => candidate columns, alias => canonical key."""
+    alias_to_candidates: Dict[str, Tuple[str, ...]] = {}
+    alias_to_canonical: Dict[str, str] = {}
+    for canonical, raw_candidates in alias_groups.items():
+        seen = []
+        # Ensure canonical appears first and remove duplicates while preserving order
+        for item in [canonical, *raw_candidates]:
+            if item not in seen:
+                seen.append(item)
+        candidates = tuple(seen)
+        for alias in candidates:
+            alias_lower = alias.lower()
+            alias_to_candidates[alias] = candidates
+            alias_to_candidates[alias_lower] = candidates
+            alias_to_canonical[alias] = canonical
+            alias_to_canonical[alias_lower] = canonical
+    return alias_to_candidates, alias_to_canonical
+
+
+COLUMN_ALIASES, ORDER_ALIAS_TO_CANONICAL = _build_alias_maps(METRIC_ALIAS_GROUPS)
+
+ORDER_FIELD_SETTINGS = {
+    "iptm": {"descending": True},
+    "ipsae_min": {"descending": True},
+    "binder_rmsd": {"descending": False},
+    "binder_rmsd_diego": {"descending": False},
+}
+
+DROP_OPERATOR_FUNCS: Dict[str, Callable[[float, float], bool]] = {
+    "<": lambda v, t: v < t,
+    "<=": lambda v, t: v <= t,
+    ">": lambda v, t: v > t,
+    ">=": lambda v, t: v >= t,
+    "==": lambda v, t: v == t,
+    "!=": lambda v, t: v != t,
+}
+
+RESTRICTION_SITES: Dict[str, Tuple[str, ...]] = {
+    "BsaI": ("GGTCTC", "GAGACC"),
+    "ScaI": ("AGTACT",),
+}
+
+
+def parse_order_specs(specs: List[str]) -> List[Dict[str, object]]:
+    """Convert CLI --order_by specs into alias + direction tuples."""
+    parsed: List[Dict[str, object]] = []
+    for raw in specs:
+        if raw is None:
+            continue
+        spec = str(raw).strip()
+        if not spec:
+            continue
+
+        descending_override: Optional[bool] = None
+        alias_part = spec
+
+        if ":" in spec:
+            alias_part, direction_part = spec.split(":", 1)
+            alias_part = alias_part.strip()
+            direction_token = direction_part.strip().lower()
+            if direction_token in ("desc", "descending"):
+                descending_override = True
+            elif direction_token in ("asc", "ascending"):
+                descending_override = False
+            else:
+                raise ValueError(f"Unknown sort direction token '{direction_part}' in '{raw}'.")
+        elif spec[0] in "+-":
+            alias_part = spec[1:].strip()
+            descending_override = (spec[0] == "-")
+
+        if not alias_part:
+            raise ValueError(f"Missing sort field in spec '{raw}'.")
+
+        alias_lookup = alias_part.lower()
+        canonical = ORDER_ALIAS_TO_CANONICAL.get(alias_lookup) or ORDER_ALIAS_TO_CANONICAL.get(alias_part)
+        default_desc = ORDER_FIELD_SETTINGS.get(canonical or alias_lookup, {}).get("descending", False)
+        descending = descending_override if descending_override is not None else default_desc
+
+        parsed.append({
+            "alias": alias_part,
+            "alias_lookup": alias_lookup,
+            "descending": descending,
+            "raw": raw,
+        })
+
+    return parsed
+
+
+_DROP_EXPR_RE = re.compile(
+    r"^\s*([A-Za-z0-9_]+)\s*(<=|>=|==|!=|<|>)\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$"
+)
+
+
+def parse_drop_conditions(exprs: List[str]) -> List[Dict[str, object]]:
+    """Parse --drop_if expressions (alias comparator threshold)."""
+    parsed: List[Dict[str, object]] = []
+    for raw in exprs:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        match = _DROP_EXPR_RE.match(text)
+        if not match:
+            raise ValueError(
+                f"Invalid --drop_if expression '{raw}'. Use form <metric><op><value>, e.g. iptm<0.7"
+            )
+        alias, op, value_str = match.groups()
+        func = DROP_OPERATOR_FUNCS.get(op)
+        if func is None:
+            raise ValueError(f"Unsupported operator '{op}' in expression '{raw}'.")
+        try:
+            threshold = float(value_str)
+        except ValueError as exc:
+            raise ValueError(f"Invalid numeric value '{value_str}' in expression '{raw}'.") from exc
+        parsed.append({
+            "alias": alias,
+            "alias_lookup": alias.lower(),
+            "op": op,
+            "func": func,
+            "threshold": threshold,
+            "raw": raw,
+        })
+    return parsed
 
 # ----- Helpers -----
 def now_tag() -> str:
@@ -118,11 +257,45 @@ def get_name_and_aa(row: dict) -> Tuple[Optional[str], Optional[str]]:
     aa   = pick_first_nonempty(row, ["binder_seq","aa_seq","sequence_aa","protein_sequence","seq"])
     return name, aa
 
+def _metric_candidates(alias: str) -> Tuple[str, ...]:
+    alias_key = alias
+    if alias_key in COLUMN_ALIASES:
+        return COLUMN_ALIASES[alias_key]
+    alias_lower = alias_key.lower()
+    if alias_lower in COLUMN_ALIASES:
+        return COLUMN_ALIASES[alias_lower]
+    if alias_lower != alias_key:
+        return (alias_key, alias_lower)
+    return (alias_key,)
+
+def resolve_metric_value(row: dict, alias: str) -> Optional[float]:
+    for candidate in _metric_candidates(alias):
+        val = row.get(candidate)
+        if val is None:
+            continue
+        if isinstance(val, str):
+            sval = val.strip()
+            if not sval:
+                continue
+        else:
+            sval = str(val).strip()
+            if not sval:
+                continue
+        try:
+            num = float(sval)
+        except Exception:
+            continue
+        if isinstance(num, float) and math.isnan(num):
+            continue
+        return num
+    return None
+
 def get_optional_float(row: dict, keys: List[str]) -> Optional[float]:
-    s = pick_first_nonempty(row, keys)
-    if s is None: return None
-    try: return float(s)
-    except Exception: return None
+    for k in keys:
+        val = resolve_metric_value(row, k)
+        if val is not None:
+            return val
+    return None
 
 def back_translate(aa_seq: str, codon_table: Dict[str,str]) -> str:
     aa = re.sub(r"[\s*]", "", aa_seq.upper())
@@ -133,6 +306,24 @@ def gc_fraction(dna: str) -> float:
     g = s.count("G"); c = s.count("C"); a = s.count("A"); t = s.count("T")
     n = g+c+a+t
     return (g+c)/n if n>0 else 0.0
+
+def detect_internal_restriction_sites(dna_full: str, prefix_len: int, core_len: int) -> List[Tuple[str, str, int]]:
+    """Return list of (enzyme, motif, start_index) for sites outside adapters."""
+    dna_upper = dna_full.upper()
+    hits: List[Tuple[str, str, int]] = []
+    suffix_start = prefix_len + core_len
+    for enzyme, motifs in RESTRICTION_SITES.items():
+        for motif in motifs:
+            motif_upper = motif.upper()
+            start = dna_upper.find(motif_upper)
+            while start != -1:
+                end = start + len(motif_upper)
+                in_prefix = end <= prefix_len
+                in_suffix = start >= suffix_start
+                if not in_prefix and not in_suffix:
+                    hits.append((enzyme, motif_upper, start))
+                start = dna_upper.find(motif_upper, start + 1)
+    return hits
 
 def try_dnachisel_optimize(dna: str, organism: Optional[str], gc_target: Optional[float], gc_window: int) -> Tuple[str, bool]:
     if not DNACHISEL_AVAILABLE:
@@ -248,8 +439,25 @@ def main():
 
     # Selection
     ap.add_argument("--top_n", type=int, default=48)
-    ap.add_argument("--order_by", type=str, choices=["iptm","ipsae_min","binder_rmsd"], default=None,
-                    help="Optional resort before taking top N: 'iptm' (desc), 'ipsae_min' (desc), or 'binder_rmsd' (asc)")
+    ap.add_argument(
+        "--order_by",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional multi-level resort before taking top N. "
+            "Example: --order_by iptm binder_rmsd_diego (default directions applied). "
+            "Prefix with '-' or '+', or use :desc/:asc to override direction."
+        ),
+    )
+    ap.add_argument(
+        "--drop_if",
+        action="append",
+        default=[],
+        help=(
+            "Exclude rows that satisfy the expression (e.g. iptm<0.7 drops low-iptm designs). "
+            "Supports <, <=, >, >=, ==, !=. Can be repeated."
+        ),
+    )
 
     # Adapters (defaults frequently used; case preserved)
     ap.add_argument("--prefix_raw", type=str,
@@ -276,6 +484,12 @@ def main():
         print(f"[error] rankings_tsv not found: {rankings_path}", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        drop_conditions = parse_drop_conditions(args.drop_if or [])
+    except ValueError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
     # Load TSV preserving order
     rows: List[dict] = []
     with open(rankings_path, "r", newline="") as f:
@@ -286,30 +500,57 @@ def main():
         print("[error] rankings.tsv is empty.", file=sys.stderr)
         sys.exit(1)
 
+    if drop_conditions:
+        filtered_rows: List[dict] = []
+        dropped_records: List[Tuple[str, str]] = []
+        for idx, row in enumerate(rows):
+            drop_reason: Optional[str] = None
+            for cond in drop_conditions:
+                value = resolve_metric_value(row, cond["alias"])
+                if value is None:
+                    drop_reason = f"{cond['raw']} (value missing)"
+                    break
+                if cond["func"](value, cond["threshold"]):
+                    drop_reason = f"{cond['raw']} (value {value:.4g})"
+                    break
+            if drop_reason:
+                name, _ = get_name_and_aa(row)
+                row_name = name or row.get("design_name") or row.get("name") or f"row_{idx+1}"
+                dropped_records.append((str(row_name), drop_reason))
+            else:
+                filtered_rows.append(row)
+        if dropped_records:
+            preview = "; ".join(f"{n}: {reason}" for n, reason in dropped_records[:5])
+            if len(dropped_records) > 5:
+                preview += "; ..."
+            print(f"[info] Excluded {len(dropped_records)} rows via drop_if filters. {preview}")
+        rows = filtered_rows
+
     # Resolve out_dir (ROOT/targets/{pdb_id}/designs/exports by default)
     out_dir = resolve_out_dir(rankings_path, args.out_dir, rows)
 
-    # Optional resort
-    if args.order_by:
-        key_candidates = {
-            "iptm": ["af3_iptm","iptm","iptm_mean","iptm_score"],
-            "ipsae_min": ["ipsae_min","ipSAE_min"],
-            "binder_rmsd": ["rmsd_binder_prepared_frame","rfdiff_vs_af3_pose_rmsd","binder_rmsd"],
-        }[args.order_by]
+    order_specs_input = args.order_by or []
+    try:
+        order_fields = parse_order_specs(order_specs_input)
+    except ValueError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
 
-        def get_num(r: dict) -> float:
-            for k in key_candidates:
-                if k in r and str(r[k]).strip() != "":
-                    try:
-                        return float(r[k])
-                    except Exception:
-                        continue
-            return float('nan')
+    if order_fields:
+        def sort_key(row: dict) -> Tuple[Tuple[int, float], ...]:
+            parts: List[Tuple[int, float]] = []
+            for field in order_fields:
+                val = resolve_metric_value(row, field["alias"])
+                if val is None:
+                    parts.append((1, 0.0))
+                else:
+                    order_val = -val if field["descending"] else val
+                    parts.append((0, order_val))
+            return tuple(parts)
 
-        reverse = (args.order_by in ("iptm","ipsae_min"))  # higher is better
-        rows_sorted = sorted(rows, key=lambda r: (-(get_num(r)) if reverse else get_num(r),), reverse=False)
-        rows = [r for r in rows_sorted if not (isinstance(get_num(r), float) and math.isnan(get_num(r)))] + \
-               [r for r in rows_sorted if (isinstance(get_num(r), float) and math.isnan(get_num(r)))]
+        rows = sorted(rows, key=sort_key)
+        sort_phrases = [f"{fld['alias']} ({'desc' if fld['descending'] else 'asc'})" for fld in order_fields]
+        print(f"[info] Applied sort order: {', '.join(sort_phrases)}")
 
     # Take top N after optional resort
     picks = rows[: max(0, args.top_n)]
@@ -335,6 +576,7 @@ def main():
     names_and_dna_for_plate: List[Tuple[str,str]] = []
 
     rankings_dir = rankings_path.parent
+    restriction_alerts: List[Tuple[str, str]] = []
 
     for r in picks:
         name, aa = get_name_and_aa(r)
@@ -357,13 +599,34 @@ def main():
         # Metrics
         gc_core = gc_fraction(dna_core)
         gc_full = gc_fraction(dna_full)
-        iptm    = get_optional_float(r, ["af3_iptm","iptm","iptm_mean"])
+        iptm = get_optional_float(r, ["iptm"])
+        ipsae_min = get_optional_float(r, ["ipsae_min"])
+        binder_rmsd = get_optional_float(r, ["binder_rmsd"])
+        binder_rmsd_diego = get_optional_float(r, ["binder_rmsd_diego"])
         epitope = pick_first_nonempty(r, ["epitope","hotspot","target_site"]) or ""
         despath = detect_design_path(r, rankings_dir)
 
+        restriction_hits = detect_internal_restriction_sites(dna_full, len(pre), len(dna_core))
+        restriction_info = ";".join(
+            f"{enzyme}@{pos+1}({motif})" for enzyme, motif, pos in restriction_hits
+        )
+        if restriction_info:
+            restriction_alerts.append((name, restriction_info))
+        restriction_flag = restriction_info if restriction_info else "OK"
+
         # FASTA
-        aa_fasta_lines += [f">{name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}|ipSAE_min={get_optional_float(r, ['ipsae_min','ipSAE_min']) if get_optional_float(r, ['ipsae_min','ipSAE_min']) is not None else 'NA'}|binder_rmsd={get_optional_float(r, ['rmsd_binder_prepared_frame','binder_rmsd']) if get_optional_float(r, ['rmsd_binder_prepared_frame','binder_rmsd']) is not None else 'NA'}", aa]
-        dna_fasta_lines += [f">{name}|len_nt={len(dna_full)}|gc={gc_full:.3f}|prefix={len(pre)}|suffix={len(suf)}", dna_full]
+        aa_fasta_lines += [
+            f">{name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}|"
+            f"ipSAE_min={ipsae_min if ipsae_min is not None else 'NA'}|"
+            f"binder_rmsd={binder_rmsd if binder_rmsd is not None else 'NA'}|"
+            f"binder_rmsd_diego={binder_rmsd_diego if binder_rmsd_diego is not None else 'NA'}",
+            aa,
+        ]
+        dna_fasta_lines += [
+            f">{name}|len_nt={len(dna_full)}|gc={gc_full:.3f}|prefix={len(pre)}|suffix={len(suf)}|"
+            f"restriction={restriction_flag}",
+            dna_full,
+        ]
 
         # Plate
         names_and_dna_for_plate.append((name, dna_full))
@@ -382,14 +645,24 @@ def main():
             "prefix_len": len(pre),
             "suffix_len": len(suf),
             "iptm": iptm if iptm is not None else "",
-            "ipsae_min": get_optional_float(r, ["ipsae_min","ipSAE_min"]) if get_optional_float(r, ["ipsae_min","ipSAE_min"]) is not None else "",
-            "binder_rmsd": get_optional_float(r, ["rmsd_binder_prepared_frame","binder_rmsd"]) if get_optional_float(r, ["rmsd_binder_prepared_frame","binder_rmsd"]) is not None else "",
+            "ipsae_min": ipsae_min if ipsae_min is not None else "",
+            "binder_rmsd": binder_rmsd if binder_rmsd is not None else "",
+            "binder_rmsd_diego": binder_rmsd_diego if binder_rmsd_diego is not None else "",
+            "restriction_sites": restriction_flag,
             "epitope": epitope,
             "design_path": despath,
         })
 
     # Plate split
     plates = split_into_plates(names_and_dna_for_plate, 96)
+
+    if restriction_alerts:
+        preview = "; ".join(f"{n}: {info}" for n, info in restriction_alerts[:5])
+        if len(restriction_alerts) > 5:
+            preview += "; ..."
+        print(
+            f"[warn] Detected internal BsaI/ScaI sites in {len(restriction_alerts)} designs: {preview}"
+        )
 
     # ----- Write outputs -----
     base = f"{label}_top{len(names_and_dna_for_plate)}_{tag}"
@@ -419,6 +692,9 @@ def main():
                 "Name": names,
                 "gc_full": [info_map.get(n,{}).get("gc_full","") for n in names],
                 "iptm":    [info_map.get(n,{}).get("iptm","") for n in names],
+                "binder_rmsd": [info_map.get(n,{}).get("binder_rmsd","") for n in names],
+                "binder_rmsd_diego": [info_map.get(n,{}).get("binder_rmsd_diego","") for n in names],
+                "restriction_sites": [info_map.get(n,{}).get("restriction_sites","") or "OK" for n in names],
                 "design_path": [info_map.get(n,{}).get("design_path","") for n in names],
             })
             sheet_info = "Design Paths" if len(plates)==1 else f"Paths {idx:02d}"
