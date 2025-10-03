@@ -21,7 +21,7 @@ python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/
 
 """
 
-import argparse, csv, json, re, sys, time, math
+import argparse, csv, json, math, os, re, shutil, sys, time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import pandas as pd
@@ -120,6 +120,58 @@ RESTRICTION_SITES: Dict[str, Tuple[str, ...]] = {
     "BsaI": ("GGTCTC", "GAGACC"),
     "ScaI": ("AGTACT",),
 }
+
+AF3_MODEL_PATH_KEYS = [
+    "af3_model_cif_path",
+    "af3_model_path",
+    "model_cif",
+    "model_path",
+    "af3_model",
+]
+
+RFDIFF_MODEL_PATH_KEYS = [
+    "rfdiffusion_pdb_path",
+    "rfdiffusion_complex_pdb",
+    "rfdiffusion_model_path",
+    "rfdiffusion_pdb",
+    "rfdiffusion_model",
+]
+
+PREPARED_PDB_KEYS = [
+    "prepared_pdb_path",
+    "prepared_model_path",
+    "prepared_path",
+    "prepared_target_path",
+]
+
+EPITOPE_NAME_KEYS = [
+    "epitope",
+    "epitope_name",
+    "target_site",
+]
+
+HOTSPOT_VARIANT_KEYS = [
+    "hotspot_variant",
+    "hotspot",
+    "hotspot_variant_id",
+    "hotspot_label",
+]
+
+BINDER_CHAIN_KEYS = [
+    "binder_chain_id",
+    "binder_chain",
+]
+
+PREPARED_CHAIN_KEYS = [
+    "prepared_target_chain_id",
+    "prepared_chain",
+]
+
+ARM_NAME_KEYS = [
+    "arm",
+    "design_arm",
+    "target_arm",
+]
 
 
 def parse_order_specs(specs: List[str]) -> List[Dict[str, object]]:
@@ -325,6 +377,416 @@ def detect_internal_restriction_sites(dna_full: str, prefix_len: int, core_len: 
                 start = dna_upper.find(motif_upper, start + 1)
     return hits
 
+
+def _parse_keys_to_chain_resi(keys, default_chain: Optional[str] = None) -> Dict[str, List[int]]:
+    mapping: Dict[str, List[int]] = {}
+    if not keys:
+        return mapping
+    for raw in keys:
+        if raw is None:
+            continue
+        token = str(raw).strip()
+        if not token:
+            continue
+        ch: Optional[str] = None
+        resi: Optional[int] = None
+        m1 = re.match(r"^([A-Za-z])[:_\-]?(-?\d+)$", token)
+        m2 = re.match(r"^([A-Za-z])(-?\d+)$", token)
+        if m1:
+            ch, resi = m1.group(1), int(m1.group(2))
+        elif m2:
+            ch, resi = m2.group(1), int(m2.group(2))
+        elif token.isdigit() and default_chain:
+            ch, resi = default_chain, int(token)
+        if ch and resi is not None:
+            mapping.setdefault(ch, []).append(resi)
+    for ch in list(mapping.keys()):
+        mapping[ch] = sorted(set(mapping[ch]))
+    return mapping
+
+
+def _sel_from_map(obj_name: str, chain_map: Dict[str, List[int]]) -> str:
+    parts = []
+    for chain_id, residues in chain_map.items():
+        if residues:
+            resi_str = "+".join(str(r) for r in residues)
+            parts.append(f"( {obj_name} and chain {chain_id} and resi {resi_str} )")
+    return " or ".join(parts)
+
+
+def _sanitize_epitope_name(name: Optional[str]) -> str:
+    s = (name or "").strip()
+    return s.replace(" ", "_").replace("/", "_").replace("\\", "_")
+
+
+def _sanitize_token(token: Optional[str], fallback: str) -> str:
+    s = (token or "").strip()
+    if not s:
+        s = fallback
+    cleaned = re.sub(r"[^A-Za-z0-9_.\-]+", "_", s)
+    return cleaned[:180] or fallback
+
+
+def _ensure_copied(src: Path, dst: Path) -> None:
+    if dst.exists():
+        dst.unlink()
+    try:
+        os.link(src, dst)
+    except Exception:
+        try:
+            rel = os.path.relpath(src, dst.parent)
+            os.symlink(rel, dst)
+        except Exception:
+            shutil.copy2(src, dst)
+
+
+def _resolve_path_from_row(row: dict, keys: List[str], base_dir: Path) -> Optional[Path]:
+    for key in keys:
+        val = row.get(key)
+        if not val:
+            continue
+        candidate = str(val).strip()
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = (base_dir / candidate).resolve()
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_prepared_pdb(pdb_id: Optional[str], rows: List[dict], rankings_path: Path) -> Optional[Path]:
+    rankings_dir = rankings_path.parent
+    for row in rows:
+        prepared = _resolve_path_from_row(row, PREPARED_PDB_KEYS, rankings_dir)
+        if prepared:
+            return prepared
+    if ROOT is not None and pdb_id:
+        candidate = ROOT / "targets" / pdb_id.upper() / "prep" / "prepared.pdb"
+        if candidate.exists():
+            return candidate
+        alt = ROOT / "target" / pdb_id.upper() / "prep" / "prepared.pdb"
+        if alt.exists():
+            return alt
+    # Walk upwards from rankings path to locate prep/prepared.pdb
+    for parent in rankings_path.parents:
+        prep_candidate = parent / "prep" / "prepared.pdb"
+        if prep_candidate.exists():
+            return prep_candidate
+    return None
+
+
+def _load_json_list(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, list):
+            return [str(x) for x in data if x is not None]
+    except Exception:
+        return []
+    return []
+
+
+def _gather_epitope_exprs(
+    prep_dir: Path,
+    epitope_name: Optional[str],
+    hotspot_variant: Optional[str],
+    prepared_chain_id: str,
+) -> Tuple[str, str]:
+    epi_file_base = _sanitize_epitope_name(epitope_name)
+    hot_variant = (hotspot_variant or "A").strip() or "A"
+    mask_json = prep_dir / f"epitope_{epi_file_base}.json"
+    hot_json = prep_dir / f"epitope_{epi_file_base}_hotspots{hot_variant}.json"
+    mask_keys = _load_json_list(mask_json)
+    hot_keys = _load_json_list(hot_json)
+    mask_map = _parse_keys_to_chain_resi(mask_keys, default_chain=prepared_chain_id)
+    hot_map = _parse_keys_to_chain_resi(hot_keys, default_chain=prepared_chain_id)
+    return _sel_from_map("target_prepared", mask_map), _sel_from_map("target_prepared", hot_map)
+
+
+def export_pymol_gallery_bundle(
+    bundle_root: Path,
+    base_name: str,
+    rankings_path: Path,
+    picks: List[dict],
+    pdb_id: Optional[str],
+    binder_chain_override: Optional[str] = None,
+    prepared_chain_override: Optional[str] = None,
+) -> Tuple[Optional[Path], int, List[Tuple[str, str]]]:
+    if not picks:
+        return None, 0, []
+
+    prepared_pdb = _resolve_prepared_pdb(pdb_id, picks, rankings_path)
+    if not prepared_pdb or not prepared_pdb.exists():
+        print("[warn] Skipping PyMOL bundle: could not locate prepared target structure.")
+        return None, 0, []
+
+    rankings_dir = rankings_path.parent
+    prep_dir = prepared_pdb.parent
+
+    binder_chain = (binder_chain_override or "").strip()
+    if not binder_chain:
+        for row in picks:
+            val = pick_first_nonempty(row, BINDER_CHAIN_KEYS)
+            if val:
+                binder_chain = val.strip()
+                if binder_chain:
+                    break
+    binder_chain = binder_chain or "H"
+
+    prepared_chain = (prepared_chain_override or "").strip()
+    if not prepared_chain:
+        for row in picks:
+            val = pick_first_nonempty(row, PREPARED_CHAIN_KEYS)
+            if val:
+                prepared_chain = val.strip()
+                if prepared_chain:
+                    break
+    prepared_chain = prepared_chain or "T"
+
+    bundle_dir = bundle_root / f"{base_name}_pymol"
+    models_dir = bundle_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    _ensure_copied(prepared_pdb, models_dir / "prepared.pdb")
+
+    entries: List[Dict[str, object]] = []
+    skipped: List[Tuple[str, str]] = []
+
+    for idx, row in enumerate(picks, start=1):
+        design_name, _ = get_name_and_aa(row)
+        design_label = design_name or pick_first_nonempty(row, ["design","name","id"]) or f"design_{idx:03d}"
+
+        af3_src = _resolve_path_from_row(row, AF3_MODEL_PATH_KEYS, rankings_dir)
+        rfd_src = _resolve_path_from_row(row, RFDIFF_MODEL_PATH_KEYS, rankings_dir)
+        missing_bits: List[str] = []
+        if af3_src is None:
+            missing_bits.append("AF3 model")
+        if rfd_src is None:
+            missing_bits.append("RFdiff model")
+        if missing_bits:
+            skipped.append((str(design_label), ", ".join(missing_bits)))
+            continue
+
+        arm_label = pick_first_nonempty(row, ARM_NAME_KEYS)
+        epitope_name = pick_first_nonempty(row, EPITOPE_NAME_KEYS) or arm_label or "epitope"
+        hotspot_variant = pick_first_nonempty(row, HOTSPOT_VARIANT_KEYS) or "A"
+
+        arm_token = _sanitize_token(arm_label or epitope_name, f"arm_{idx:03d}")
+        design_token = _sanitize_token(design_label, f"design_{idx:03d}")
+
+        af3_suffix = af3_src.suffix or ".cif"
+        rfd_suffix = rfd_src.suffix or ".pdb"
+        dst_cif = models_dir / f"{idx:03d}__{arm_token}__{design_token}{af3_suffix}"
+        dst_rfd = models_dir / f"{idx:03d}__{arm_token}__{design_token}__rfdiff{rfd_suffix}"
+
+        _ensure_copied(af3_src, dst_cif)
+        _ensure_copied(rfd_src, dst_rfd)
+
+        mask_expr, hot_expr = ("", "")
+        if prep_dir.exists():
+            mask_expr, hot_expr = _gather_epitope_exprs(prep_dir, epitope_name, hotspot_variant, prepared_chain)
+
+        entries.append({
+            "idx": idx,
+            "design": design_label,
+            "bundle_cif": (Path("models") / dst_cif.name).as_posix(),
+            "bundle_rfd": (Path("models") / dst_rfd.name).as_posix(),
+            "mask_expr": mask_expr,
+            "hot_expr": hot_expr,
+        })
+
+    if not entries:
+        print("[warn] PyMOL bundle export skipped: no designs with both AF3 and RFdiff models located.")
+        return None, 0, skipped
+
+    pml_lines: List[str] = []
+    pml_lines.extend([
+        "reinitialize",
+        "hide everything",
+        "hide labels, all",
+        "set ray_opaque_background, off",
+        "bg_color white",
+        "set auto_zoom, off",
+        "set depth_cue, 0",
+        "set antialias, 2",
+        "set stick_radius, 0.25",
+        "set sphere_scale, 0.6",
+        "",
+        "delete prepared_ref",
+        "load models/prepared.pdb, prepared_ref",
+        f"create target_prepared, prepared_ref and chain {prepared_chain}",
+        "set cartoon_transparency, 0.45, target_prepared",
+        "color tan, target_prepared",
+        "delete prepared_ref",
+        "",
+        "delete target_rfcrop_gallery",
+        "create target_rfcrop_gallery, none",
+        "set all_states, off, target_rfcrop_gallery",
+        "delete target_af3_gallery",
+        "create target_af3_gallery, none",
+        "set all_states, off, target_af3_gallery",
+        "delete binder_gallery_af3",
+        "create binder_gallery_af3, none",
+        "set all_states, off, binder_gallery_af3",
+        "delete binder_gallery_rfdiff",
+        "create binder_gallery_rfdiff, none",
+        "set all_states, off, binder_gallery_rfdiff",
+        "delete epi_mask_gallery",
+        "create epi_mask_gallery, none",
+        "set all_states, off, epi_mask_gallery",
+        "delete epi_hot_gallery",
+        "create epi_hot_gallery, none",
+        "set all_states, off, epi_hot_gallery",
+        "hide everything, epi_mask_gallery",
+        "hide everything, epi_hot_gallery",
+        "show sticks, epi_mask_gallery",
+        "color yellow, epi_mask_gallery",
+        "show spheres, epi_hot_gallery",
+        "color red, epi_hot_gallery",
+        "alias both_on, enable binder_gallery_af3; enable binder_gallery_rfdiff; enable target_prepared; enable target_af3_gallery; enable target_rfcrop_gallery; enable epi_mask_gallery; enable epi_hot_gallery",
+        "",
+    ])
+
+    for entry in entries:
+        idx = int(entry["idx"])
+        obj_rf = f"rf{idx:03d}"
+        obj_af = f"d{idx:03d}"
+        tmp_tg_rf = f"__tgt_rf_{idx:03d}"
+        tmp_tg_af = f"__tgt_af_{idx:03d}"
+        tmp_bd_rf = f"__bd_rf_{idx:03d}"
+        tmp_bd_af = f"__bd_af3_{idx:03d}"
+        mask_expr = str(entry["mask_expr"])
+        hot_expr = str(entry["hot_expr"])
+
+        pml_lines.extend([
+            f"load {entry['bundle_rfd']}, {obj_rf}",
+            f"load {entry['bundle_cif']}, {obj_af}",
+            f"align ({obj_af} and name CA and not chain {binder_chain}), (target_prepared and name CA)",
+            f"align ({obj_rf} and name CA and chain T), (target_prepared and name CA)",
+            f"create {tmp_tg_rf}, {obj_rf} and chain T",
+            f"create {tmp_tg_af}, {obj_af} and not chain {binder_chain}",
+            f"create {tmp_bd_rf}, {obj_rf} and chain {binder_chain}",
+            f"create {tmp_bd_af}, {obj_af} and chain {binder_chain}",
+            f"delete {obj_af}",
+            f"delete {obj_rf}",
+            f"show cartoon, {tmp_tg_rf}",
+            f"color wheat, {tmp_tg_rf}",
+            f"set cartoon_transparency, 0.15, {tmp_tg_rf}",
+            f"show cartoon, {tmp_tg_af}",
+            f"color gray70, {tmp_tg_af}",
+            f"set cartoon_transparency, 0.35, {tmp_tg_af}",
+            f"show cartoon, {tmp_bd_af}",
+            f"color marine, {tmp_bd_af}",
+            f"show cartoon, {tmp_bd_rf}",
+            f"color purple, {tmp_bd_rf}",
+            f"create target_rfcrop_gallery, {tmp_tg_rf}, 1, {idx}",
+            f"create target_af3_gallery, {tmp_tg_af}, 1, {idx}",
+            f"create binder_gallery_af3, {tmp_bd_af}, 1, {idx}",
+            f"create binder_gallery_rfdiff, {tmp_bd_rf}, 1, {idx}",
+        ])
+
+        if mask_expr:
+            pml_lines.extend([
+                f"create __epi_mask_tmp, {mask_expr}",
+                "show sticks, __epi_mask_tmp",
+                "color yellow, __epi_mask_tmp",
+                f"create epi_mask_gallery, __epi_mask_tmp, 1, {idx}",
+                "delete __epi_mask_tmp",
+            ])
+        if hot_expr:
+            pml_lines.extend([
+                f"create __epi_hot_tmp, {hot_expr}",
+                "show spheres, __epi_hot_tmp",
+                "color red, __epi_hot_tmp",
+                f"create epi_hot_gallery, __epi_hot_tmp, 1, {idx}",
+                "delete __epi_hot_tmp",
+            ])
+
+        pml_lines.extend([
+            f"delete {tmp_bd_af}",
+            f"delete {tmp_bd_rf}",
+            f"delete {tmp_tg_rf}",
+            f"delete {tmp_tg_af}",
+            "disable all",
+            "enable target_prepared",
+            "enable target_rfcrop_gallery",
+            "enable target_af3_gallery",
+            "enable binder_gallery_af3",
+            "enable binder_gallery_rfdiff",
+            "enable epi_mask_gallery",
+            "enable epi_hot_gallery",
+            f"set state, {idx}, target_rfcrop_gallery",
+            f"set state, {idx}, target_af3_gallery",
+            f"set state, {idx}, binder_gallery_af3",
+            f"set state, {idx}, binder_gallery_rfdiff",
+            f"set state, {idx}, epi_mask_gallery",
+            f"set state, {idx}, epi_hot_gallery",
+            "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff or epi_mask_gallery or epi_hot_gallery",
+            f"scene top_{idx:03d}, store, view=1, animate=0",
+            "",
+        ])
+
+    total_states = len(entries)
+
+    pml_lines.extend([
+        "disable all",
+        "enable target_prepared",
+        "enable target_rfcrop_gallery",
+        "enable target_af3_gallery",
+        "enable binder_gallery_af3",
+        "enable binder_gallery_rfdiff",
+        "enable epi_mask_gallery",
+        "enable epi_hot_gallery",
+        "set all_states, on, target_rfcrop_gallery",
+        "set all_states, on, target_af3_gallery",
+        "set all_states, on, binder_gallery_af3",
+        "set all_states, on, binder_gallery_rfdiff",
+        "set all_states, on, epi_mask_gallery",
+        "set all_states, on, epi_hot_gallery",
+        "set cartoon_transparency, 0.75, binder_gallery_af3",
+        "set cartoon_transparency, 0.75, binder_gallery_rfdiff",
+        "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff or epi_mask_gallery or epi_hot_gallery",
+        "scene overview, store, view=1, animate=0",
+        "disable all",
+        "enable target_prepared",
+        "enable target_rfcrop_gallery",
+        "enable target_af3_gallery",
+        "enable binder_gallery_af3",
+        "enable binder_gallery_rfdiff",
+        "enable epi_mask_gallery",
+        "enable epi_hot_gallery",
+        "set all_states, off, target_rfcrop_gallery",
+        "set all_states, off, target_af3_gallery",
+        "set all_states, off, binder_gallery_af3",
+        "set all_states, off, binder_gallery_rfdiff",
+        "set all_states, off, epi_mask_gallery",
+        "set all_states, off, epi_hot_gallery",
+        "set state, 1, target_rfcrop_gallery",
+        "set state, 1, target_af3_gallery",
+        "set state, 1, binder_gallery_af3",
+        "set state, 1, binder_gallery_rfdiff",
+        "set state, 1, epi_mask_gallery",
+        "set state, 1, epi_hot_gallery",
+        "frame 1",
+        "zoom target_prepared or target_rfcrop_gallery or target_af3_gallery or binder_gallery_af3 or binder_gallery_rfdiff",
+        f"mset 1 x{total_states}",
+        "",
+    ])
+
+    gallery_path = bundle_dir / "gallery.pml"
+    gallery_path.write_text("\n".join(pml_lines) + "\n")
+
+    readme_path = bundle_dir / "README.txt"
+    readme_path.write_text(
+        "PyMOL gallery bundle generated by export_files.py.\n"
+        f"Open {gallery_path.name} in PyMOL to view the top designs ({total_states} states).\n"
+    )
+
+    return bundle_dir, total_states, skipped
+
 def try_dnachisel_optimize(dna: str, organism: Optional[str], gc_target: Optional[float], gc_window: int) -> Tuple[str, bool]:
     if not DNACHISEL_AVAILABLE:
         return dna, False
@@ -458,6 +920,23 @@ def main():
             "Supports <, <=, >, >=, ==, !=. Can be repeated."
         ),
     )
+    ap.add_argument(
+        "--export_pymol",
+        action="store_true",
+        help="Export a PyMOL gallery bundle (models + script) for the selected designs.",
+    )
+    ap.add_argument(
+        "--binder_chain_id",
+        type=str,
+        default=None,
+        help="Override binder chain ID for PyMOL bundle (default inferred or 'H').",
+    )
+    ap.add_argument(
+        "--prepared_chain_id",
+        type=str,
+        default=None,
+        help="Override prepared target chain ID for PyMOL bundle (default inferred or 'T').",
+    )
 
     # Adapters (defaults frequently used; case preserved)
     ap.add_argument("--prefix_raw", type=str,
@@ -525,6 +1004,8 @@ def main():
                 preview += "; ..."
             print(f"[info] Excluded {len(dropped_records)} rows via drop_if filters. {preview}")
         rows = filtered_rows
+
+    pdb_id = get_pdb_id(rows, rankings_path)
 
     # Resolve out_dir (ROOT/targets/{pdb_id}/designs/exports by default)
     out_dir = resolve_out_dir(rankings_path, args.out_dir, rows)
@@ -667,6 +1148,10 @@ def main():
     # ----- Write outputs -----
     base = f"{label}_top{len(names_and_dna_for_plate)}_{tag}"
 
+    pymol_bundle_path: Optional[Path] = None
+    pymol_state_count = 0
+    pymol_skipped: List[Tuple[str, str]] = []
+
     aa_fasta_path  = out_dir / f"{base}_aa.fasta"
     dna_fasta_path = out_dir / f"{base}_dna.fasta"
     csv_path       = out_dir / f"{base}_summary.csv"
@@ -700,6 +1185,22 @@ def main():
             sheet_info = "Design Paths" if len(plates)==1 else f"Paths {idx:02d}"
             df_info.to_excel(writer, index=False, sheet_name=sheet_info)
 
+    if args.export_pymol:
+        pymol_bundle_path, pymol_state_count, pymol_skipped = export_pymol_gallery_bundle(
+            out_dir,
+            base,
+            rankings_path,
+            picks,
+            pdb_id,
+            args.binder_chain_id,
+            args.prepared_chain_id,
+        )
+        if pymol_skipped:
+            preview = "; ".join(f"{name}: {reason}" for name, reason in pymol_skipped[:5])
+            if len(pymol_skipped) > 5:
+                preview += "; ..."
+            print(f"[warn] PyMOL bundle skipped {len(pymol_skipped)} designs: {preview}")
+
     # Summary
     print("[ok] Exports written to:", out_dir)
     print(f"  AA FASTA : {aa_fasta_path.name}")
@@ -711,6 +1212,16 @@ def main():
     else:
         print("[info] No template (or failed to read); minimal 3-column IDT layout used.")
     print(f"[info] Picks exported: {len(names_and_dna_for_plate)} (top N as-is).")
+    if args.export_pymol:
+        if pymol_bundle_path:
+            try:
+                rel = pymol_bundle_path.relative_to(out_dir)
+                shown = rel.as_posix()
+            except Exception:
+                shown = str(pymol_bundle_path)
+            print(f"[ok] PyMOL bundle: {shown} ({pymol_state_count} states)")
+        else:
+            print("[warn] PyMOL bundle was requested but could not be created.")
 
 if __name__ == "__main__":
     main()
