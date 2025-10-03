@@ -256,6 +256,70 @@ def plot_scatter(x: np.ndarray, y: np.ndarray, xlabel: str, ylabel: str, out: Pa
         plt.title(f"{ylabel} vs {xlabel}")
     safe_savefig(out, dpi=dpi)
 
+
+def plot_scatter_with_marginals(
+    x: np.ndarray,
+    y: np.ndarray,
+    xlabel: str,
+    ylabel: str,
+    out: Path,
+    dpi: int,
+    x_threshold: float | None = None,
+    y_threshold: float | None = None,
+    bins: int | None = None,
+):
+    """Scatter with marginal histograms to highlight joint behaviour of two metrics."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 2:
+        return
+
+    x_valid = x[mask]
+    y_valid = y[mask]
+    if bins is None:
+        bins = max(15, min(60, int(np.sqrt(len(x_valid)))))
+
+    fig = plt.figure(figsize=(7, 7))
+    gs = fig.add_gridspec(4, 4, hspace=0.05, wspace=0.05)
+    ax_scatter = fig.add_subplot(gs[1:, :-1])
+    ax_histx = fig.add_subplot(gs[0, :-1], sharex=ax_scatter)
+    ax_histy = fig.add_subplot(gs[1:, -1], sharey=ax_scatter)
+
+    ax_scatter.scatter(x_valid, y_valid, s=14, alpha=0.7, edgecolors='none', color='C0')
+    ax_scatter.set_xlabel(xlabel)
+    ax_scatter.set_ylabel(ylabel)
+
+    ax_histx.hist(x_valid, bins=bins, color='C0', alpha=0.7, edgecolor='black')
+    ax_histy.hist(y_valid, bins=bins, orientation='horizontal', color='C0', alpha=0.7, edgecolor='black')
+
+    ax_histx.tick_params(axis='x', labelbottom=False)
+    ax_histy.tick_params(axis='y', labelleft=False)
+    ax_histy.yaxis.set_ticks_position('right')
+    ax_histy.yaxis.set_label_position('right')
+    ax_histx.set_ylabel('Count')
+    ax_histy.set_xlabel('Count')
+
+    if x_threshold is not None:
+        for ax in (ax_scatter, ax_histx):
+            ax.axvline(x_threshold, color='r', linestyle='--', linewidth=1.5, alpha=0.8)
+    if y_threshold is not None:
+        for ax in (ax_scatter, ax_histy):
+            ax.axhline(y_threshold, color='r', linestyle='--', linewidth=1.5, alpha=0.8)
+
+    ax_scatter.text(
+        0.98,
+        0.95,
+        f"N = {len(x_valid):,}",
+        transform=ax_scatter.transAxes,
+        ha='right',
+        va='top',
+        fontsize=12,
+    )
+
+    fig.tight_layout()
+    safe_savefig(out, dpi=dpi, tight=False)
+
 def plot_corr_heatmap(df_num: pd.DataFrame, out: Path, dpi: int):
     if df_num.shape[1] < 2:
         return
@@ -299,6 +363,7 @@ def main():
     iptm_col = find_column(df, ["af3_iptm","iptm","iptm_global","iptm_score"], contains_any=["iptm"])
     pose_rmsd_col = find_column(df, ["rmsd_binder_target_aligned"])
     binder_rmsd_col = find_column(df, ["rmsd_binder_prepared_frame"])
+    diego_rmsd_col = find_column(df, ["rmsd_binder_diego", "binder_rmsd_diego", "rmsd_diego"])
     name_col = find_column(df, ["design_name","name","variant","id"], None)
     epitope_col = find_column(df, ["epitope","hotspot_category","hotspot","epitope_name"], None)
     dsasa_col = find_column(df, ["dsasa","delta_sasa","iface_dsasa"], contains_any=["dsasa"])
@@ -344,11 +409,13 @@ def main():
             stats["iptm"][f"frac_ge_{t:.2f}"] = float(np.mean(iptm >= t))
             
     corr_df = df.loc[base_mask].copy()
+    iptm_corr = to_numeric(corr_df[iptm_col]).to_numpy(dtype=float)
     num_df_cols = {"ipTM": to_numeric(corr_df[iptm_col])}
     
     rmsd_metrics_to_plot = {
         "Pose RMSD": {"col": pose_rmsd_col, "file_prefix": "pose_rmsd"},
-        "Binder RMSD": {"col": binder_rmsd_col, "file_prefix": "binder_rmsd"}
+        "Binder RMSD": {"col": binder_rmsd_col, "file_prefix": "binder_rmsd"},
+        "Diego RMSD": {"col": diego_rmsd_col, "file_prefix": "diego_rmsd"},
     }
     
     for metric_name, config in rmsd_metrics_to_plot.items():
@@ -377,6 +444,21 @@ def main():
                 
                 num_df_cols[metric_name] = to_numeric(corr_df[col])
                 plot_scatter(to_numeric(corr_df[col]).to_numpy(), iptm, f"{metric_name} (Å)", "ipTM", out_dir / (f"iptm_vs_{prefix}" + img_ext), args.dpi)
+
+                if metric_name == "Diego RMSD":
+                    diego_vals = to_numeric(corr_df[col]).to_numpy(dtype=float)
+                    x_thr = args.rmsd_thresholds[0] if args.rmsd_thresholds else None
+                    y_thr = args.iptm_thresholds[0] if args.iptm_thresholds else None
+                    plot_scatter_with_marginals(
+                        diego_vals,
+                        iptm_corr,
+                        xlabel=f"{metric_name} (Å)",
+                        ylabel="ipTM",
+                        out=out_dir / ("iptm_vs_diego_rmsd_joint" + img_ext),
+                        dpi=args.dpi,
+                        x_threshold=x_thr,
+                        y_threshold=y_thr,
+                    )
 
             else:
                 print(f"[info] {metric_name} column found, but contains no valid numeric values.")
@@ -443,6 +525,7 @@ def main():
         - iptm_hist / ecdf / topN_bar: ipTM distribution and top designs.
         - pose_rmsd_hist / ecdf / topN_bar: Pose RMSD (RFdiff vs AF3) distribution and top designs (if available).
         - binder_rmsd_hist / ecdf / topN_bar: Binder RMSD (after Kabsch fit) distribution and top designs (if available).
+        - iptm_vs_diego_rmsd_joint: ipTM vs Diego-frame RMSD scatter with marginal histograms (if available).
         - iptm_by_epitope_box: ipTM distribution grouped by epitope category (if available).
         - iptm_vs_*: Scatter plots of ipTM against other metrics like binder length, RMSDs, dSASA, etc.
         - corr_heatmap: Correlation heatmap across all available numeric metrics.
