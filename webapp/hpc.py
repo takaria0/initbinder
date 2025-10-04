@@ -30,11 +30,18 @@ class ClusterClient:
         self._mock_root = app_cfg.paths.workspace_root / ".cluster-mock" if app_cfg.paths.workspace_root else Path(".cluster-mock")
         if self.cfg.mock:
             self._mock_root.mkdir(parents=True, exist_ok=True)
+        print(f"[cluster] init -> local_root={self.local_root} remote_root={self.cfg.remote_root} mock={self.cfg.mock}", flush=True)
 
     def _run(self, cmd: Iterable[str], *, check: bool = True) -> CommandResult:
+        cmd_list = list(cmd)
+        print(f"[cluster] exec: {' '.join(cmd_list)}", flush=True)
         process = subprocess.run(list(cmd), capture_output=True, text=True)
         if check and process.returncode != 0:
             raise RuntimeError(f"Command failed ({process.returncode}): {' '.join(cmd)}\n{process.stderr}")
+        if process.stdout:
+            print(f"[cluster] stdout: {process.stdout.strip()}", flush=True)
+        if process.stderr:
+            print(f"[cluster] stderr: {process.stderr.strip()}", flush=True)
         return CommandResult(process.returncode, process.stdout, process.stderr)
 
     # -- path helpers -----------------------------------------------------
@@ -67,10 +74,12 @@ class ClusterClient:
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(local, dest)
+            print(f"[cluster] rsync_push (mock) {local} -> {dest}", flush=True)
             return CommandResult(0, f"[mock] copied {local} -> {dest}", "")
 
         remote_path = self._resolve_remote(remote_relative)
         target = f"{self._ssh_target()}:{remote_path}"
+        print(f"[cluster] rsync_push {local} -> {target} delete={delete}", flush=True)
         args = [self.cfg.rsync_path, "-az", str(local) + "/", str(target) + "/"]
         if delete:
             args.insert(1, "--delete")
@@ -87,6 +96,7 @@ class ClusterClient:
             if local.exists():
                 shutil.rmtree(local)
             shutil.copytree(src, local)
+            print(f"[cluster] rsync_pull (mock) {src} -> {local}", flush=True)
             return CommandResult(0, f"[mock] copied {src} -> {local}", "")
 
         remote_path = self._resolve_remote(remote_relative)
@@ -106,6 +116,7 @@ class ClusterClient:
         if use_login_shell:
             command = f"bash -lc {shlex.quote(command)}"
         args = ["ssh", self._ssh_target(), command]
+        print(f"[cluster] ssh -> {' '.join(args)}", flush=True)
         return self._run(args, check=check)
 
     def run(self, command: str, *, check: bool = True) -> CommandResult:
@@ -115,6 +126,7 @@ class ClusterClient:
             raise RuntimeError("remote_root not configured; set cluster.remote_root in cfg/webapp.yaml")
         remote_root = shlex.quote(str(self.cfg.remote_root))
         full_cmd = f"cd {remote_root} && {command}"
+        print(f"[cluster] run -> {full_cmd}", flush=True)
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
     # -- high-level helpers ----------------------------------------------
@@ -132,6 +144,7 @@ class ClusterClient:
                     shutil.rmtree(backup)
                 dest.rename(backup)
                 backup_rel = Path("mock") / backup.relative_to(self._mock_root)
+                print(f"[cluster] backup (mock) {dest} -> {backup}", flush=True)
         else:
             self.run(f"mkdir -p {shlex.quote(str(rel.parent))}", check=True)
             exists_result = self.run(
@@ -144,6 +157,7 @@ class ClusterClient:
                     f"mv {shlex.quote(str(rel))} {shlex.quote(str(backup_rel))}",
                     check=True,
                 )
+                print(f"[cluster] backup {rel} -> {backup_rel}", flush=True)
 
         result = self.rsync_push(local_dir, rel, delete=delete)
         return result, str(backup_rel) if backup_rel else None
@@ -231,6 +245,8 @@ class ClusterClient:
             """
         ).strip()
 
+        print(f"[cluster] submit_assessment -> sbatch opts: {' '.join(sbatch_opts)}", flush=True)
+        print(f"[cluster] submit_assessment -> command: {python_cmd}", flush=True)
         result = self.run(script, check=True)
         match = re.search(r"Submitted batch job (\d+)", result.stdout)
         return match.group(1) if match else None

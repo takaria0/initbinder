@@ -139,6 +139,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
     if backup_rel:
         job_store.append_log(job_id, f"[sync] Remote target backup → {backup_rel}")
+    job_store.append_log(job_id, f"[cmd] sync_target {request.pdb_id.upper()}")
     if sync_result.stdout:
         for line in sync_result.stdout.splitlines():
             job_store.append_log(job_id, line)
@@ -148,6 +149,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, err)
 
     job_store.update(job_id, message="Syncing tools to cluster")
+    job_store.append_log(job_id, "[cmd] sync_tools")
     tools_result = cluster.sync_tools()
     if tools_result.stdout:
         for line in tools_result.stdout.splitlines():
@@ -160,6 +162,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label)
     remote_cmd = shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
     job_store.update(job_id, message="Generating pipeline scripts on cluster")
+    job_store.append_log(job_id, f"[cmd] {remote_cmd}")
     pipeline_result = cluster.run(remote_cmd)
 
     log_buffer: List[str] = []
@@ -200,11 +203,14 @@ path.write_text("\n".join(patched) + "\n")
 PY
         """
     ).strip()
+    job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
     cluster.run(instrument_script, check=True)
     job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
 
     job_store.update(job_id, message="Submitting SLURM pipeline")
-    sbatch_result = cluster.run(f"bash {shlex.quote(launcher_path)}")
+    submit_cmd = f"bash {shlex.quote(launcher_path)}"
+    job_store.append_log(job_id, f"[cmd] {submit_cmd}")
+    sbatch_result = cluster.run(submit_cmd)
     job_ids: Dict[str, str] = {}
     if sbatch_result.stdout:
         for line in sbatch_result.stdout.splitlines():
