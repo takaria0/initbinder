@@ -108,7 +108,6 @@ def _build_pipeline_args(
         args.extend(["--binder_chain_id", request.binder_chain_id])
     if run_label:
         args.extend(["--run_tag", run_label])
-    args.append("--submit")
     return args
 
 
@@ -161,7 +160,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, err)
 
     pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label)
-    binder_root = cluster.target_root or cluster.remote_root
+    binder_root = cluster.remote_root
     if binder_root is None:
         raise RuntimeError("Neither target_root nor remote_root configured on cluster; cannot run pipeline")
     env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))}"
@@ -180,20 +179,68 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, line)
             log_buffer.append(line)
 
+    launcher_path = None
+    if log_buffer:
+        launcher = _parse_launcher_path(log_buffer)
+        if launcher:
+            launcher_path = str(launcher)
+    if not launcher_path:
+        raise FileNotFoundError("Could not locate generated launcher script on the cluster; check manage_rfa output")
+
+    env_prefix = f"LAUNCHER_PATH={shlex.quote(launcher_path)}"
+    instrument_script = textwrap.dedent(
+        f"""
+        {env_prefix} python - <<'PY'
+import os
+import re
+from pathlib import Path
+
+path = Path(os.environ['LAUNCHER_PATH'])
+lines = path.read_text().splitlines()
+assign_pattern = re.compile(r'^([A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
+patched = []
+for line in lines:
+    patched.append(line)
+    m = assign_pattern.match(line.strip())
+    if m:
+        var_name = m.group(1)
+        patched.append(f"echo '[JOB] {var_name}=${{{var_name}}}'")
+path.write_text("\n".join(patched) + "\n")
+PY
+        """
+    ).strip()
+    job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
+    cluster.run(instrument_script, check=True, use_conda=True)
+    job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
+
+    job_store.update(job_id, message="Submitting SLURM pipeline")
+    submit_cmd = f"conda deactivate >/dev/null 2>&1 || true; conda deactivate >/dev/null 2>&1 || true; bash {shlex.quote(launcher_path)}"
+    job_store.append_log(job_id, f"[cmd] {submit_cmd}")
+    sbatch_result = cluster.run(submit_cmd)
     job_ids: Dict[str, str] = {}
     stage2_ids: List[str] = []
-    launcher_path = None
-    for line in log_buffer:
-        if launcher_path is None:
-            launch_match = _parse_launcher_path([line])
-            if launch_match:
-                launcher_path = str(launch_match)
-        submit_match = re.search(r"\[submit\]\s+(\S+)\s+→ job\s+(\d+)", line)
-        if submit_match:
-            script_name = submit_match.group(1)
-            jid = submit_match.group(2)
-            job_ids[script_name] = jid
-            if "af3batch" in script_name:
+    if sbatch_result.stdout:
+        for line in sbatch_result.stdout.splitlines():
+            job_store.append_log(job_id, line)
+            match = re.search(r"Submitted batch job\s+(\d+)", line)
+            if match:
+                job_id_value = match.group(1)
+                job_store.append_log(job_id, f"[JOB] submitted={job_id_value}")
+                job_ids[f"job_{len(job_ids)+1}"] = job_id_value
+        # captured via instrumentation echo lines as well
+    if sbatch_result.stderr:
+        err = sbatch_result.stderr.strip()
+        if err:
+            job_store.append_log(job_id, err)
+
+    # Parse instrumentation echoes to map job IDs to script names
+    for line in sbatch_result.stdout.splitlines() if sbatch_result.stdout else []:
+        match = _JOB_ECHO_RE.match(line.strip())
+        if match:
+            script_key = match.group("var")
+            jid = match.group("jid")
+            job_ids[script_key] = jid
+            if script_key.startswith("jid_af3s2"):
                 stage2_ids.append(jid)
 
     job_store.update(

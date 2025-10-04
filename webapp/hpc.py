@@ -299,7 +299,7 @@ class ClusterClient:
             include_kw,
             "--skip_pml",
         ]
-        binder_root = self.target_root or self.remote_root
+        binder_root = self.remote_root
         env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))} " if binder_root else ""
         python_cmd = env_prefix + shlex.join(python_args)
 

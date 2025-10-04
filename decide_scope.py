@@ -26,6 +26,34 @@ print(f"[info] Using HF cache dir: {HF_ROOT}")
 # =============================================================================
 # Helpers for entry.json (RCSB) and chain mapping
 # =============================================================================
+# --- 追加: エピトープ名のサニタイズ適用ヘルパ ---
+import re
+def sanitize_label(s: str, maxlen: int = 120) -> str:
+    if s is None:
+        return "NA"
+    # normalize curly quotes to straight, then strip all quotes/backticks
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"').replace("'", "")
+    s = re.sub(r"[\"'`]+", "", s)
+    # keep only [A-Za-z0-9_.-], collapse others to _
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s).strip("_")
+    return s[:maxlen] or "NA"
+
+def _apply_epitope_name_sanitization(doc: dict) -> None:
+    """
+    doc['epitopes'][i]['name'] を sanitize_label で安全化する。
+    変更があった場合は元の名前を display_name に残す。
+    """
+    eps = (doc or {}).get("epitopes") or []
+    for ep in eps:
+        raw = ep.get("name")
+        if not isinstance(raw, str):
+            continue
+        safe = sanitize_label(raw)
+        if not safe:
+            safe = "Epitope"
+        if raw != safe:
+            ep["display_name"] = raw
+            ep["name"] = safe
 
 def _load_entry_json(tdir: Path):
     for p in (tdir / "raw" / "entry.json", tdir / "entry.json"):
@@ -601,39 +629,18 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         debug_section["uniprot_context"] = uniprot_context_str
 
     _remove_parentheses_from_yaml(base)
+    _apply_epitope_name_sanitization(base)
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 
     (tdir/"reports"/"scope_rationale.md").write_text(draft)
     print(f"[ok] Scope updated in {yml_path} based on LLM rationale.")
 
-# =============================================================================
-# SLURM dispatch (A100:1, CPU:1)
-# =============================================================================
 
-def submit_llm_scope_job(pdb_id: str, *, time_h: int = 2, mem_gb: int = 16,
-                         partition: str = None, account: str = None, gpu_type: str = None,
-                         target: Optional[str] = None, max_accessions: int = 20,
-                         prefer_human: bool = True, prefer_reviewed: bool = True,
-                         enforce_epitope_constraints: bool = True,
-                         expected_epitopes: int = 3,
-                         max_llm_retries: int = 1,
-                         force: bool = False):
-    # SLURM submission logic...
-    pass
-
-# =============================================================================
-# CLI
-# =============================================================================
-
-def _add_cli(subparsers):
-    # CLI definitions...
-    pass
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Scope decision & LLM assisted target scoping")
     sub = parser.add_subparsers(dest="cmd")
-    _add_cli(sub)
     args = parser.parse_args()
     if hasattr(args, "func"):
         args.func(args)

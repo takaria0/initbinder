@@ -415,7 +415,7 @@ from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
 # from Projects.initbinder.utils.make_rfa_rf2 import make_rfa_rf2_command
 from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
 from assess_rfa_design import assess_rfa_all
-from decide_scope import llm_scope, submit_llm_scope_job
+from decide_scope import llm_scope
 from target_generation import run_target_generation
 from utils import (
     DEFAULT_NANOBODY_FRAMEWORK,
@@ -868,10 +868,10 @@ def main():
     elif args.cmd == "decide-scope":
         if getattr(args, "submit", False):
             print("[info] dispatching LLM scope to GPU via sbatch …")
-            submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb,
-                                 expected_epitopes=args.expected_epitopes,
-                                 max_llm_retries=args.max_llm_retries,
-                                 force=args.force)
+            # submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb,
+            #                      expected_epitopes=args.expected_epitopes,
+            #                      max_llm_retries=args.max_llm_retries,
+            #                      force=args.force)
         else:
             llm_scope(args.pdb, expected_epitopes=args.expected_epitopes,
                       max_llm_retries=args.max_llm_retries,
