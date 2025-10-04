@@ -27,13 +27,10 @@ const el = {
   designSubmit: document.querySelector('#design-submit'),
   designStatus: document.querySelector('#design-status'),
   designTotal: document.querySelector('#design-total'),
-  designPerTask: document.querySelector('#design-per-task'),
   designNumSeq: document.querySelector('#design-num-seq'),
   designTemp: document.querySelector('#design-temp'),
   designRunLabel: document.querySelector('#design-run-label'),
   designBinderChain: document.querySelector('#design-binder-chain'),
-  designHotspotVariants: document.querySelector('#design-hotspot-variants'),
-  designArms: document.querySelector('#design-arms'),
   refreshResultsBtn: document.querySelector('#refresh-results'),
   resultsMeta: document.querySelector('#results-meta'),
   binderDetail: document.querySelector('#binder-detail'),
@@ -65,6 +62,19 @@ function setBadge(badge, text, color = null) {
   badge.textContent = text;
   badge.style.background = color || 'rgba(37, 99, 235, 0.12)';
   badge.style.color = color ? '#0f172a' : 'var(--color-accent)';
+}
+
+function timestampString() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function refreshRunLabel(force = false) {
+  if (!el.designRunLabel) return;
+  if (force || !el.designRunLabel.value) {
+    el.designRunLabel.value = timestampString();
+  }
 }
 
 function showAlert(message, isError = true) {
@@ -130,24 +140,12 @@ async function queueDesignRun() {
     showAlert('Initialize a target first.');
     return;
   }
-  const arms = el.designArms.value
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (arms.length === 0) {
-    showAlert('Enter at least one arm (e.g., RBM Core@A).');
-    return;
-  }
-
   const payload = {
     pdb_id: state.currentPdb,
-    arms,
-    hotspot_variants: el.designHotspotVariants.value.split(',').map((v) => v.trim()).filter(Boolean),
-    binder_chain_id: el.designBinderChain.value.trim() || 'H',
     total_designs: Number(el.designTotal.value) || 90,
-    designs_per_task: Number(el.designPerTask.value) || 10,
     num_sequences: Number(el.designNumSeq.value) || 1,
     temperature: Number(el.designTemp.value) || 0.1,
+    binder_chain_id: el.designBinderChain.value.trim() || 'H',
     run_label: el.designRunLabel.value.trim() || null,
   };
 
@@ -457,6 +455,7 @@ function updateJobUI(job) {
       el.designSubmit.disabled = false;
       setBadge(el.designStatus, 'Ready for submission');
       el.refreshResultsBtn.disabled = false;
+      refreshRunLabel(true);
     } else {
       setBadge(el.targetBadge, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Target workflow failed.');
@@ -471,6 +470,7 @@ function updateJobUI(job) {
       el.designSubmit.disabled = false;
       el.refreshResultsBtn.disabled = false;
       stopJobPolling();
+      refreshRunLabel(true);
     } else {
       setBadge(el.designStatus, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Design pipeline failed.');
@@ -664,6 +664,7 @@ function initEventHandlers() {
 
 function init() {
   initEventHandlers();
+  refreshRunLabel(true);
 }
 
 document.addEventListener('DOMContentLoaded', init);

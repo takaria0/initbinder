@@ -64,7 +64,13 @@ def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
 
     return mapping
 
-def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | None = None, antigen_url: str = ""):
+def init_target(
+    pdb_id: str,
+    chain_id: str | None = None,
+    target_name: str | None = None,
+    antigen_url: str = "",
+    force: bool = False,
+):
     """Downloads PDB data and creates the initial directory structure.
 
     Required:
@@ -77,6 +83,8 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
 
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
+    if force:
+        print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
     tdir = ROOT/"targets"/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
 

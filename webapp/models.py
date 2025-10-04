@@ -40,13 +40,10 @@ class AlignmentResponse(BaseModel):
 
 class DesignRunRequest(BaseModel):
     pdb_id: str
-    arms: List[str] = Field(default_factory=list)
-    hotspot_variants: List[str] = Field(default_factory=lambda: ["A", "B", "C"])
-    binder_chain_id: str = Field("H", min_length=1, max_length=1)
     total_designs: int = Field(90, ge=1, le=50000)
-    designs_per_task: int = Field(10, ge=1, le=500)
     num_sequences: int = Field(1, ge=1, le=32)
     temperature: float = Field(0.1, ge=0.0, le=1.0)
+    binder_chain_id: str = Field("H", min_length=1, max_length=1)
     run_label: Optional[str] = Field(None)
     submit: bool = Field(False, description="Submit jobs to scheduler immediately")
 

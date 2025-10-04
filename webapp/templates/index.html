@@ -54,14 +54,11 @@
 
       <section id="design-config">
         <h2>Design Run Configuration</h2>
-        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Cluster submission hooks will be wired after backend integration.</p>
+        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Arms and hotspot variants are detected automatically from the prepared target.</p>
         <form id="design-form">
           <div class="form-row">
             <label>Total designs
               <input type="number" id="design-total" value="90" min="1">
-            </label>
-            <label>Designs per task
-              <input type="number" id="design-per-task" value="10" min="1">
             </label>
             <label>Sequences per backbone
               <input type="number" id="design-num-seq" value="1" min="1">
@@ -76,15 +73,6 @@
             </label>
             <label>Binder chain ID
               <input type="text" id="design-binder-chain" value="H" maxlength="1">
-            </label>
-            <label>Hotspot variants (comma separated)
-              <input type="text" id="design-hotspot-variants" value="A,B,C">
-            </label>
-          </div>
-          <div class="form-row">
-            <label>Arms (one per line)
-              <textarea id="design-arms" rows="4" placeholder="RBM Core@A
-RBM Core@B"></textarea>
             </label>
           </div>
           <div class="flex-row" style="margin-top: 8px;">
