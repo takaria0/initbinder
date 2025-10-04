@@ -344,7 +344,9 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     cfg_from_yaml = yaml.safe_load(yml_path.read_text()) if yml_path.exists() else {}
 
     # === Generate Constraint Prompts ===
-    target_chains = _normalize_chain_ids(cfg_from_yaml.get("chains"))
+    target_chains = _normalize_chain_ids(cfg_from_yaml.get("target_chains"))
+    if not target_chains:
+        target_chains = _normalize_chain_ids(cfg_from_yaml.get("chains"))
     target_name_from_yaml = cfg_from_yaml.get("target_name", "")
     allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
     pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("pdb_residue_numbers") or {})
@@ -484,10 +486,12 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         if cfg.get("chains"):
             chains_from_llm = _normalize_chain_ids(cfg.get("chains"))
             if set(chains_from_llm) != validated_target_chains:
-                raise ValueError(
-                    f"LLM returned chains {chains_from_llm}, but validated antigen chains are {expected_chains}."
+                print(
+                    f"[warn] LLM proposed chains {chains_from_llm}, but validated antigen chains are {expected_chains}. "
+                    "Overriding with validated set."
                 )
         cfg["chains"] = expected_chains
+        cfg["target_chains"] = expected_chains
 
     if not cfg.get("chains") and target_acc:
         auto_chains = select_chains_by_uniprot(tdir, target_acc)
@@ -507,7 +511,9 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     base.update(cfg)
     if base.get("chains"):
         base["chains"] = _normalize_chain_ids(base.get("chains"))
-    if base.get("target_chains"):
+    if validated_target_chains:
+        base["target_chains"] = sorted(validated_target_chains)
+    elif base.get("target_chains"):
         base["target_chains"] = _normalize_chain_ids(base.get("target_chains"))
 
     sequences_section = base.setdefault("sequences", {})
