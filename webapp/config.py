@@ -52,7 +52,7 @@ class AppPaths:
 
     def __post_init__(self) -> None:
         if self.workspace_root is None:
-            self.workspace_root = self.project_root
+            self.workspace_root = Path(self.project_root)
         if self.targets_dir is None:
             self.targets_dir = self.workspace_root / "targets"
         if self.cache_dir is None:

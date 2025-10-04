@@ -9,7 +9,7 @@ from Bio.PDB.Polypeptide import three_to_index, index_to_one
 from playwright.sync_api import sync_playwright
 from typing import Iterable, Optional
 
-from sequence_alignment import AlignmentResult, align_vendor_to_chains
+from sequence_alignment import AlignmentResult, biotite_local_alignments, extract_subsequence
 
 
 def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
@@ -158,7 +158,8 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
 
     # Vendor-specific verification (Sino Biological)
     chosen_chains: list[str] = []
-    accession_id, accession_seq = "", ""
+    accession_id, accession_seq, expressed_seq = "", "", ""
+    vendor_range: Optional[tuple[int, int]] = None
     alignment_summary: Optional[AlignmentResult] = None
 
     if "sinobiological.com" in antigen_url:
@@ -168,6 +169,7 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
             accession_id = verification_result.get("accession", "") or ""
             accession_seq = verification_result.get("full_sequence", "") or ""
             vendor_range = verification_result.get("vendor_range")
+            expressed_seq = verification_result.get("expressed_sequence", "") or ""
             if alignment_summary:
                 chosen_chains = list(alignment_summary.chain_ids)
                 overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
@@ -183,6 +185,15 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         config["sequences"]["accession"]["id"] = accession_id
     if accession_seq:
         config["sequences"]["accession"]["aa"] = accession_seq
+    accession_block = config["sequences"]["accession"]
+    if vendor_range:
+        accession_block["expressed_range"] = f"{vendor_range[0]}-{vendor_range[1]}"
+    else:
+        accession_block.pop("expressed_range", None)
+    if expressed_seq:
+        accession_block["expressed_aa"] = expressed_seq
+    else:
+        accession_block.pop("expressed_aa", None)
     if alignment_summary:
         config["sequences"]["alignment"] = _alignment_result_to_yaml(alignment_summary)
 
@@ -203,7 +214,7 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     # Save updated YAML
     with yml_path.open('w') as f:
         yaml.safe_dump(config, f, sort_keys=False)
-    print(f"[ok] Updated {yml_path.name} with antigen_catalog_url, sequences.*, and target_chains.")
+    print(f"[ok] Updated {yml_path} with antigen_catalog_url, sequences.*, and target_chains.")
 
 
 def _get_ncbi_sequence(accession: str) -> str:
@@ -214,7 +225,8 @@ def _get_ncbi_sequence(accession: str) -> str:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         lines = r.text.strip().split('\n')
-        return "".join(line.strip() for line in lines if not line.startswith('>'))
+        seq = "".join(line.strip() for line in lines if not line.startswith('>'))
+        return seq.upper()
     except requests.RequestException as e:
         print(f"Error fetching sequence for {accession} from NCBI: {e}")
         return ""
@@ -295,6 +307,7 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> tuple[dict[str, str], dict[str, 
         break
     return sequences, residue_numbers
 
+
 def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
     """Return verification details with multi-chain alignment against the vendor construct."""
     print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
@@ -360,31 +373,44 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
             print(f"[info] User-specified chains in target.yaml: {user_chains}")
     print(f"[debug] Available PDB chains: {list(pdb_sequences.keys())}")
 
-    # 4. Run mismatch-tolerant, multi-chain alignments
-    print("[4/5] Running global alignments across chain combinations (allowing mismatches)...")
-    alignments = align_vendor_to_chains(
-        full_ncbi_seq,
-        pdb_sequences,
-        vendor_range=vendor_range,
-        max_chain_combo=3,
-        min_alignment_length=10,
-        chain_residue_numbers=pdb_residue_numbers,
-    )
+    expressed_seq = extract_subsequence(full_ncbi_seq, vendor_range) if vendor_range else full_ncbi_seq
+    expressed_len = len(expressed_seq)
+    if not expressed_seq:
+        if vendor_range:
+            print(f"[fail] Expressed sequence slice {vendor_range[0]}-{vendor_range[1]} is empty; cannot continue.")
+        else:
+            print("[fail] Vendor sequence is empty; cannot continue.")
+        return None
+    if vendor_range:
+        print(f"[info] Vendor expressed sequence length {expressed_len} (positions {vendor_range[0]}-{vendor_range[1]}).")
+    else:
+        print(f"[info] Vendor expressed sequence length {expressed_len} (full accession range).")
+
+    # 4. Locate alignments for the expressed sequence
+    print("[4/5] Searching for alignments between expressed sequence and PDB chains...")
+    try:
+        alignments = biotite_local_alignments(
+            expressed_seq,
+            pdb_sequences,
+            vendor_range=vendor_range,
+            chain_residue_numbers=pdb_residue_numbers,
+        )
+    except ImportError as exc:
+        print(f"[fail] {exc}")
+        return None
+    except ValueError as exc:
+        print(f"[fail] {exc}")
+        return None
     if not alignments:
-        print("[fail] No chain combination aligned to the vendor construct with sufficient coverage.")
+        print("[fail] No suitable alignment found between expressed sequence and any PDB chain.")
         return None
 
-    best_alignment = alignments[0]
+    preferred = [aln for aln in alignments if any(cid in user_chains for cid in aln.chain_ids)] if user_chains else []
+    best_alignment = preferred[0] if preferred else alignments[0]
     chain_label = ",".join(best_alignment.chain_ids)
-    print(f"[ok] Best alignment uses chain(s) {chain_label} with identity {best_alignment.identity:.2%} and coverage {best_alignment.coverage:.2%}.")
-    top_preview = min(3, len(alignments))
-    if top_preview > 1:
-        print("    Top alignment candidates:")
-        for idx, cand in enumerate(alignments[:top_preview], start=1):
-            print(
-                f"      {idx}) chains={','.join(cand.chain_ids)} identity={cand.identity:.2%} "
-                f"coverage={cand.coverage:.2%} aligned={cand.aligned_length} mismatches={cand.mismatches}"
-            )
+    print(f"[ok] Found alignment on chain(s) {chain_label}.")
+    if len(alignments) > 1:
+        print(f"    Additional alignments: {len(alignments) - 1}")
 
     # 5. Summarize overlap against vendor construct
     print("[5/5] Summarizing vendor/PDB overlap...")
@@ -421,5 +447,6 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         "alignment": best_alignment,
         "accession": accession,
         "full_sequence": full_ncbi_seq,
+        "expressed_sequence": expressed_seq,
         "vendor_range": vendor_range,
     }

@@ -1,0 +1,8 @@
+paths:
+  project_root: /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder
+cluster:
+  ssh_config_alias: rfacluster            # matches ~/.ssh/config host entry
+  remote_root: /data/homezvol1/inagakit/Projects/initbinder
+  pymol_path: pymol
+  mock: false
+background_concurrency: 4

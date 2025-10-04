@@ -198,6 +198,7 @@ async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> dic
 @app.get("/")
 async def home() -> FileResponse:
     index_path = Path(cfg.paths.project_root) / "webapp" / "templates" / "index.html"
+    print(index_path)
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="index.html not found")
     return FileResponse(index_path)

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class TargetInitRequest(BaseModel):
-    pdb_id: str = Field(..., regex=r"^[0-9A-Za-z]{4}$", description="4-character PDB accession")
+    pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$", description="4-character PDB accession")
     antigen_url: Optional[str] = Field(None, description="Vendor product URL")
     force_refresh: bool = Field(False, description="Redo init even if target folder exists")
     run_decide_scope: bool = Field(True, description="Also run decide-scope after initialization")

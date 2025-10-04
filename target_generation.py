@@ -77,7 +77,7 @@ from pprint import pformat
 from bs4 import BeautifulSoup
 import requests
 import yaml
-from sequence_alignment import AlignmentMutation, align_vendor_to_chains
+from sequence_alignment import AlignmentMutation, biotite_local_alignments, extract_subsequence
 
 # --- LLM Configuration (Google Gemini) ---
 USE_LLM = True
@@ -759,12 +759,14 @@ def _compute_matches_for_antigen(pdb_ids: List[str], antigen: AntigenOption) -> 
         if not chain_sequences:
             continue
 
-        alignments = align_vendor_to_chains(
-            ncbi_seq,
+        partial_seq = extract_subsequence(ncbi_seq, vendor_range) if vendor_range else ncbi_seq
+
+        alignments = biotite_local_alignments(
+            partial_seq,
             chain_sequences,
             vendor_range=vendor_range,
-            max_chain_combo=3,
-            min_alignment_length=10,
+            min_identity=MIN_IDENTITY_SOFT,
+            min_aligned_length=10,
         )
 
         for alignment in alignments:

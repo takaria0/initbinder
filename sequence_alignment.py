@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from itertools import combinations
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence
 
 
 @dataclass
@@ -34,349 +33,286 @@ class AlignmentResult:
     score: float = 0.0
 
 
-def align_vendor_to_chains(
-    vendor_seq: str,
-    chain_sequences: Mapping[str, str],
-    *,
-    vendor_range: Optional[tuple[int, int]] = None,
-    max_chain_combo: int = 3,
-    length_ratio: tuple[float, float] = (0.4, 1.6),
-    min_alignment_length: int = 20,
-    match_score: int = 2,
-    mismatch_score: int = -1,
-    gap_penalty: int = -2,
-    chain_residue_numbers: Optional[Mapping[str, Sequence[str]]] = None,
-) -> List[AlignmentResult]:
-    vendor_seq_clean = _clean_sequence(vendor_seq)
-    if not vendor_seq_clean:
-        return []
-
-    chains_ordered = _prepare_chains(chain_sequences)
-    if not chains_ordered:
-        return []
-
-    residue_number_lookup: Dict[str, Sequence[str]] = {}
-    if chain_residue_numbers:
-        residue_number_lookup = {
-            str(k).strip().upper(): v
-            for k, v in chain_residue_numbers.items()
-            if v
-        }
-
-    v_range = _normalize_range(vendor_range)
-    vendor_len = len(vendor_seq_clean)
-    vendor_range_len = _range_length(v_range) or vendor_len
-    min_req = min_alignment_length
-    if vendor_range_len and vendor_range_len < min_alignment_length:
-        min_req = max(5, vendor_range_len)
-
-    max_combo = min(max_chain_combo, len(chains_ordered))
-    results: List[AlignmentResult] = []
-
-    for r in range(1, max_combo + 1):
-        for combo in combinations(range(len(chains_ordered)), r):
-            combo_ids = tuple(chains_ordered[i][0] for i in combo)
-            combo_seq = "".join(chains_ordered[i][1] for i in combo)
-            if not combo_seq:
-                continue
-
-            ref_len = vendor_range_len or vendor_len
-            if ref_len:
-                ratio = len(combo_seq) / ref_len
-                if ratio < length_ratio[0] or ratio > length_ratio[1]:
-                    continue
-
-            aligned_vendor, aligned_combo, _ = _needleman_wunsch(
-                vendor_seq_clean, combo_seq,
-                match_score=match_score,
-                mismatch_score=mismatch_score,
-                gap_penalty=gap_penalty,
-            )
-
-            summary = _summarize_alignment(
-                aligned_vendor,
-                aligned_combo,
-                vendor_len=vendor_len,
-                vendor_range=v_range,
-                chain_combo=combo_ids,
-                chain_sequences=chains_ordered,
-                combo_indices=combo,
-                chain_residue_numbers=residue_number_lookup,
-            )
-            if summary.aligned_length < min_req:
-                continue
-            results.append(summary)
-
-    results.sort(key=lambda res: (res.score, res.coverage, res.identity, res.aligned_length), reverse=True)
-    return results
-
-
-def best_alignment(
-    vendor_seq: str,
-    chain_sequences: Mapping[str, str],
-    *,
-    vendor_range: Optional[tuple[int, int]] = None,
-    max_chain_combo: int = 3,
-    length_ratio: tuple[float, float] = (0.4, 1.6),
-    min_alignment_length: int = 20,
-    match_score: int = 2,
-    mismatch_score: int = -1,
-    gap_penalty: int = -2,
-) -> Optional[AlignmentResult]:
-    results = align_vendor_to_chains(
-        vendor_seq,
-        chain_sequences,
-        vendor_range=vendor_range,
-        max_chain_combo=max_chain_combo,
-        length_ratio=length_ratio,
-        min_alignment_length=min_alignment_length,
-        match_score=match_score,
-        mismatch_score=mismatch_score,
-        gap_penalty=gap_penalty,
-    )
-    return results[0] if results else None
-
-
-def _clean_sequence(seq: Optional[str]) -> str:
+def clean_sequence(seq: Optional[str]) -> str:
     if not seq:
         return ""
     return "".join(ch for ch in seq if ch.isalpha()).upper()
 
 
-def _prepare_chains(chain_sequences: Mapping[str, str]) -> List[tuple[str, str]]:
-    ordered: List[tuple[str, str]] = []
-    for chain_id, seq in chain_sequences.items():
-        seq_clean = _clean_sequence(seq)
-        if not seq_clean:
+def normalize_range(rng: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
+    if not rng:
+        return None
+    start, end = int(rng[0]), int(rng[1])
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def extract_subsequence(full_seq: str, vendor_range: tuple[int, int]) -> str:
+    if not full_seq:
+        return ""
+    start, end = vendor_range
+    start_idx = max(0, int(start) - 1)
+    end_idx = max(start_idx, int(end))
+    if start_idx >= len(full_seq):
+        return ""
+    return full_seq[start_idx:min(end_idx, len(full_seq))]
+
+
+def _resolve_residue_label(
+    chain_id: str,
+    residue_index: int,
+    chain_residue_numbers: Mapping[str, Sequence[str]] | None,
+) -> str:
+    if chain_residue_numbers:
+        residues = (
+            chain_residue_numbers.get(chain_id)
+            or chain_residue_numbers.get(chain_id.upper())
+            or chain_residue_numbers.get(chain_id.lower())
+        )
+        if residues and 0 <= residue_index < len(residues):
+            return str(residues[residue_index])
+    return str(residue_index + 1)
+
+
+def _infer_min_alignment_length(vendor_len: int) -> int:
+    if vendor_len <= 0:
+        return 0
+    if vendor_len < 5:
+        return vendor_len
+    return min(10, vendor_len)
+
+
+def biotite_local_alignments(
+    partial_seq: str,
+    chain_sequences: Mapping[str, str],
+    *,
+    vendor_range: Optional[tuple[int, int]] = None,
+    chain_residue_numbers: Mapping[str, Sequence[str]] | None = None,
+    min_identity: float = 0.5,
+    min_aligned_length: Optional[int] = None,
+) -> List[AlignmentResult]:
+    try:
+        from biotite.sequence import ProteinSequence
+        from biotite.sequence.align import Alignment, SubstitutionMatrix, align_optimal
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "biotite is required for antigen alignment. Install with 'pip install biotite'."
+        ) from exc
+
+    vendor_clean = clean_sequence(partial_seq)
+    if not vendor_clean:
+        return []
+
+    normalized_range = normalize_range(vendor_range)
+    base_vendor_start = normalized_range[0] if normalized_range else 1
+    vendor_len = len(vendor_clean)
+    min_required = (
+        max(1, min_aligned_length)
+        if min_aligned_length is not None
+        else _infer_min_alignment_length(vendor_len)
+    )
+
+    try:
+        vendor_seq = ProteinSequence(vendor_clean)
+    except ValueError as exc:
+        raise ValueError(
+            f"Vendor sequence contains residues unsupported by Biotite: {vendor_clean}"
+        ) from exc
+
+    results: Dict[str, AlignmentResult] = {}
+    matrix = SubstitutionMatrix.std_protein_matrix()
+
+    for raw_chain_id, raw_chain_seq in chain_sequences.items():
+        chain_id = str(raw_chain_id).strip().upper()
+        chain_clean = clean_sequence(raw_chain_seq)
+        if not chain_id or not chain_clean:
             continue
-        ordered.append((str(chain_id).strip().upper(), seq_clean))
+
+        try:
+            chain_seq = ProteinSequence(chain_clean)
+        except ValueError:
+            print(f"[warn] Chain {chain_id} contains residues unsupported by Biotite; skipping.")
+            continue
+
+        raw_alignments = align_optimal(
+            vendor_seq,
+            chain_seq,
+            matrix,
+            local=True,
+        )
+        if not raw_alignments:
+            continue
+
+        if isinstance(raw_alignments, Alignment):
+            candidates = [raw_alignments]
+        elif isinstance(raw_alignments, list):
+            candidates = [aln for aln in raw_alignments if aln is not None]
+        else:
+            candidates = [raw_alignments]  # type: ignore[list-item]
+
+        for alignment in candidates:
+            trace = getattr(alignment, "trace", None)
+            if trace is None or getattr(trace, "size", 0) == 0:
+                continue
+
+            matches = mismatches = gaps = 0
+            vendor_positions: List[int] = []
+            vendor_positions_set = set()
+            chain_labels: List[str] = []
+            mutations: List[AlignmentMutation] = []
+            start_vendor_idx = end_vendor_idx = None
+            start_chain_label = end_chain_label = None
+
+            for row in trace:
+                vendor_idx = int(row[0])
+                chain_idx = int(row[1])
+                vendor_gap = vendor_idx < 0
+                chain_gap = chain_idx < 0
+                if vendor_gap or chain_gap:
+                    if vendor_gap != chain_gap:
+                        gaps += 1
+                    continue
+
+                if start_vendor_idx is None:
+                    start_vendor_idx = vendor_idx
+                end_vendor_idx = vendor_idx
+
+                label = _resolve_residue_label(chain_id, chain_idx, chain_residue_numbers)
+                if start_chain_label is None:
+                    start_chain_label = label
+                end_chain_label = label
+
+                vendor_positions.append(vendor_idx)
+                vendor_positions_set.add(vendor_idx)
+                chain_labels.append(label)
+
+                vendor_aa = vendor_clean[vendor_idx]
+                chain_aa = chain_clean[chain_idx]
+                if vendor_aa == chain_aa:
+                    matches += 1
+                else:
+                    mismatches += 1
+                    mutations.append(AlignmentMutation(
+                        vendor_position=base_vendor_start + vendor_idx,
+                        vendor_aa=vendor_aa,
+                        chain=chain_id,
+                        chain_position=label,
+                        pdb_aa=chain_aa,
+                    ))
+
+            aligned_length = matches + mismatches
+            if aligned_length < min_required:
+                continue
+            if not vendor_positions:
+                continue
+
+            identity = matches / aligned_length if aligned_length else 0.0
+            if identity < min_identity:
+                continue
+
+            coverage = (
+                min(1.0, len(vendor_positions_set) / vendor_len)
+                if vendor_len
+                else 0.0
+            )
+
+            vendor_aligned_range = None
+            if start_vendor_idx is not None and end_vendor_idx is not None:
+                vendor_aligned_range = (
+                    base_vendor_start + start_vendor_idx,
+                    base_vendor_start + end_vendor_idx,
+                )
+
+            chain_ranges: Dict[str, tuple[str, str]] = {}
+            if start_chain_label is not None and end_chain_label is not None:
+                chain_ranges[chain_id] = (start_chain_label, end_chain_label)
+
+            score = float(getattr(alignment, "score", 0.0))
+
+            result = AlignmentResult(
+                chain_ids=(chain_id,),
+                identity=identity,
+                coverage=coverage,
+                matches=matches,
+                mismatches=mismatches,
+                gaps=gaps,
+                aligned_length=aligned_length,
+                combined_length=len(chain_clean),
+                vendor_length=vendor_len,
+                vendor_range=normalized_range,
+                vendor_aligned_range=vendor_aligned_range,
+                vendor_overlap_range=vendor_aligned_range,
+                chain_ranges=chain_ranges,
+                mutations=mutations,
+                score=score,
+            )
+
+            existing = results.get(chain_id)
+            current_rank = (
+                result.identity,
+                result.coverage,
+                result.aligned_length,
+                result.score,
+            )
+            if not existing:
+                results[chain_id] = result
+            else:
+                existing_rank = (
+                    existing.identity,
+                    existing.coverage,
+                    existing.aligned_length,
+                    existing.score,
+                )
+                if current_rank > existing_rank:
+                    results[chain_id] = result
+
+    ordered = list(results.values())
+    ordered.sort(
+        key=lambda res: (res.identity, res.coverage, res.aligned_length, res.score),
+        reverse=True,
+    )
     return ordered
 
 
-def _range_length(rng: Optional[tuple[int, int]]) -> int:
-    if not rng:
-        return 0
-    start, end = rng
-    if start is None or end is None:
-        return 0
-    if end < start:
-        start, end = end, start
-    return end - start + 1 if end >= start else 0
-
-
-def _normalize_range(rng: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
-    if not rng:
-        return None
-    start, end = rng
-    if start is None or end is None:
-        return None
-    start_i = int(start)
-    end_i = int(end)
-    if end_i < start_i:
-        start_i, end_i = end_i, start_i
-    return (start_i, end_i)
-
-
-def _needleman_wunsch(
+def biotite_gapped_alignment(
     seq_a: str,
     seq_b: str,
     *,
-    match_score: int,
-    mismatch_score: int,
-    gap_penalty: int,
-) -> tuple[str, str, int]:
-    len_a, len_b = len(seq_a), len(seq_b)
-    scores = [[0] * (len_b + 1) for _ in range(len_a + 1)]
-    pointers: List[List[Optional[str]]] = [[None] * (len_b + 1) for _ in range(len_a + 1)]
+    local: bool = True,
+) -> tuple[str, str]:
+    try:
+        from biotite.sequence import ProteinSequence
+        from biotite.sequence.align import Alignment, SubstitutionMatrix, align_optimal
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "biotite is required for antigen alignment. Install with 'pip install biotite'."
+        ) from exc
 
-    for i in range(1, len_a + 1):
-        scores[i][0] = scores[i - 1][0] + gap_penalty
-        pointers[i][0] = "up"
-    for j in range(1, len_b + 1):
-        scores[0][j] = scores[0][j - 1] + gap_penalty
-        pointers[0][j] = "left"
+    clean_a = clean_sequence(seq_a)
+    clean_b = clean_sequence(seq_b)
+    if not clean_a or not clean_b:
+        return clean_a, clean_b
 
-    for i in range(1, len_a + 1):
-        ca = seq_a[i - 1]
-        for j in range(1, len_b + 1):
-            cb = seq_b[j - 1]
-            diag = scores[i - 1][j - 1] + (match_score if ca == cb else mismatch_score)
-            up = scores[i - 1][j] + gap_penalty
-            left = scores[i][j - 1] + gap_penalty
-            best = diag
-            pointer = "diag"
-            if up > best:
-                best = up
-                pointer = "up"
-            if left > best:
-                best = left
-                pointer = "left"
-            scores[i][j] = best
-            pointers[i][j] = pointer
+    try:
+        seq_a_obj = ProteinSequence(clean_a)
+        seq_b_obj = ProteinSequence(clean_b)
+    except ValueError as exc:
+        raise ValueError(
+            "Sequences contain residues unsupported by Biotite."
+        ) from exc
 
-    aligned_a: List[str] = []
-    aligned_b: List[str] = []
-    i, j = len_a, len_b
-    while i > 0 or j > 0:
-        pointer = pointers[i][j]
-        if pointer == "diag":
-            aligned_a.append(seq_a[i - 1])
-            aligned_b.append(seq_b[j - 1])
-            i -= 1
-            j -= 1
-        elif pointer == "up":
-            aligned_a.append(seq_a[i - 1])
-            aligned_b.append("-")
-            i -= 1
-        elif pointer == "left":
-            aligned_a.append("-")
-            aligned_b.append(seq_b[j - 1])
-            j -= 1
-        else:
-            if i > 0:
-                aligned_a.append(seq_a[i - 1])
-                aligned_b.append("-")
-                i -= 1
-            elif j > 0:
-                aligned_a.append("-")
-                aligned_b.append(seq_b[j - 1])
-                j -= 1
-    aligned_a.reverse()
-    aligned_b.reverse()
-    return "".join(aligned_a), "".join(aligned_b), scores[len_a][len_b]
+    matrix = SubstitutionMatrix.std_protein_matrix()
+    raw_alignment = align_optimal(seq_a_obj, seq_b_obj, matrix, local=local)
+    if isinstance(raw_alignment, list):
+        alignment = raw_alignment[0] if raw_alignment else None
+    else:
+        alignment = raw_alignment
 
+    if alignment is None:
+        return clean_a, clean_b
 
-def _summarize_alignment(
-    aligned_vendor: str,
-    aligned_combo: str,
-    *,
-    vendor_len: int,
-    vendor_range: Optional[tuple[int, int]],
-    chain_combo: tuple[str, ...],
-    chain_sequences: Sequence[tuple[str, str]],
-    combo_indices: Sequence[int],
-    chain_residue_numbers: Optional[Mapping[str, Sequence[str]]] = None,
-) -> AlignmentResult:
-    matches = mismatches = gaps = 0
-    vendor_index = 0
-    combo_index = 0
-    aligned_vendor_positions: List[int] = []
-    vendor_positions_in_range: List[int] = []
-    mutations: List[AlignmentMutation] = []
-    chain_ranges_raw: Dict[str, List[Optional[str]]] = {cid: [None, None] for cid in chain_combo}
-
-    chain_offsets = _build_chain_offsets(chain_sequences, combo_indices)
-
-    aligned_len = 0
-    for aa_vendor, aa_combo in zip(aligned_vendor, aligned_combo):
-        vendor_gap = aa_vendor == "-"
-        combo_gap = aa_combo == "-"
-        chain_id = None
-        chain_pos = None
-        residue_label = None
-
-        if not vendor_gap:
-            vendor_index += 1
-        if not combo_gap:
-            combo_index += 1
-            chain_id, chain_pos = _locate_chain(chain_offsets, combo_index - 1)
-            if chain_id and chain_pos is not None:
-                mapping = (chain_residue_numbers or {}).get(chain_id)
-                if mapping and 0 <= chain_pos - 1 < len(mapping):
-                    residue_label = str(mapping[chain_pos - 1])
-                else:
-                    residue_label = str(chain_pos)
-
-        if vendor_gap or combo_gap:
-            if vendor_gap != combo_gap:
-                gaps += 1
-            continue
-
-        aligned_len += 1
-        aligned_vendor_positions.append(vendor_index)
-        if vendor_range and vendor_range[0] <= vendor_index <= vendor_range[1]:
-            vendor_positions_in_range.append(vendor_index)
-
-        if chain_id and residue_label is not None:
-            start, end = chain_ranges_raw.get(chain_id, [None, None])
-            if start is None:
-                start = residue_label
-            end = residue_label
-            chain_ranges_raw[chain_id] = [start, end]
-
-        if aa_vendor == aa_combo:
-            matches += 1
-        else:
-            mismatches += 1
-            if chain_id and residue_label is not None:
-                mutations.append(AlignmentMutation(
-                    vendor_position=vendor_index,
-                    vendor_aa=aa_vendor,
-                    chain=chain_id,
-                    chain_position=residue_label,
-                    pdb_aa=aa_combo,
-                ))
-
-    chain_ranges: Dict[str, tuple[str, str]] = {}
-    for cid, span in chain_ranges_raw.items():
-        start, end = span
-        if start is None or end is None:
-            continue
-        chain_ranges[cid] = (start, end)
-
-    vendor_aligned_range = None
-    if aligned_vendor_positions:
-        vendor_aligned_range = (aligned_vendor_positions[0], aligned_vendor_positions[-1])
-
-    vendor_overlap_range = None
-    if vendor_positions_in_range:
-        vendor_overlap_range = (vendor_positions_in_range[0], vendor_positions_in_range[-1])
-
-    overlap_count = len(vendor_positions_in_range) if vendor_range else aligned_len
-    vendor_len_used = _range_length(vendor_range) or vendor_len
-    coverage = (overlap_count / vendor_len_used) if vendor_len_used else 0.0
-    identity = (matches / aligned_len) if aligned_len else 0.0
-    score = coverage * 100.0 + identity
-
-    return AlignmentResult(
-        chain_ids=chain_combo,
-        identity=identity,
-        coverage=coverage,
-        matches=matches,
-        mismatches=mismatches,
-        gaps=gaps,
-        aligned_length=aligned_len,
-        combined_length=sum(len(chain_sequences[i][1]) for i in combo_indices),
-        vendor_length=vendor_len,
-        vendor_range=vendor_range,
-        vendor_aligned_range=vendor_aligned_range,
-        vendor_overlap_range=vendor_overlap_range,
-        chain_ranges=chain_ranges,
-        mutations=mutations,
-        score=score,
-    )
-
-
-def _build_chain_offsets(
-    chain_sequences: Sequence[tuple[str, str]],
-    combo_indices: Sequence[int],
-) -> List[tuple[str, int, int]]:
-    offsets: List[tuple[str, int, int]] = []
-    cursor = 0
-    for idx in combo_indices:
-        chain_id, seq = chain_sequences[idx]
-        start = cursor
-        end = cursor + len(seq)
-        offsets.append((chain_id, start, end))
-        cursor = end
-    return offsets
-
-
-def _locate_chain(
-    offsets: Sequence[tuple[str, int, int]],
-    combo_position: int,
-) -> tuple[Optional[str], Optional[int]]:
-    for chain_id, start, end in offsets:
-        if start <= combo_position < end:
-            return chain_id, combo_position - start + 1
-    return None, None
+    gapped = alignment.get_gapped_sequences()
+    if len(gapped) < 2:
+        return clean_a, clean_b
+    return str(gapped[0]), str(gapped[1])
