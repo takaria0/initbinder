@@ -83,8 +83,12 @@ AF3_DATABASES_DIR = "/pub/inagakit/af3/databases"
 
 # --- Global Constants ---
 # ROOT = Path(__file__).resolve().parent
-ROOT = Path("/pub/inagakit/Projects/initbinder")  # hardcoded for simplicity
-# ROOT = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder")  # hardcoded for simplicity
+_ROOT_DEFAULT = Path("/pub/inagakit/Projects/initbinder")
+_ROOT_ENV = os.getenv("INITBINDER_ROOT")
+if _ROOT_ENV:
+    ROOT = Path(_ROOT_ENV).expanduser()
+else:
+    ROOT = _ROOT_DEFAULT if _ROOT_DEFAULT.exists() else Path(__file__).resolve().parent
 print(f'[info] Running manage_rfa_eco.py from {ROOT}')
 SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 

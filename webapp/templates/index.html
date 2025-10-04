@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>InitBinder Pipeline UI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>InitBinder Pipeline Control Center</h1>
+        <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
+      </header>
+
+      <section id="target-setup">
+        <h2>Target Setup</h2>
+        <form id="target-form">
+          <div class="form-row">
+            <label for="pdb-id">PDB ID
+              <input id="pdb-id" name="pdb_id" type="text" maxlength="4" required placeholder="e.g. 6M17" autocomplete="off">
+            </label>
+            <label for="antigen-url">Antigen URL
+              <input id="antigen-url" name="antigen_url" type="text" placeholder="https://vendor/product">
+            </label>
+          </div>
+          <div class="flex-row">
+            <label><input type="checkbox" id="force-refresh"> Force refresh</label>
+            <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>
+            <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
+          </div>
+          <div class="flex-row" style="margin-top: 16px;">
+            <button type="submit" id="target-submit">Queue Pipeline</button>
+            <span class="badge" id="target-status-badge" hidden>Idle</span>
+            <button type="button" id="pymol-hotspots" disabled>Launch hotspots in PyMOL</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="job-status">
+        <h2>Job Status</h2>
+        <div id="job-alert" class="alert" hidden></div>
+        <div class="status-log" id="job-log">Waiting for commands...</div>
+      </section>
+
+      <section id="alignment-section">
+        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
+          <h2>Sequence Alignment</h2>
+          <button type="button" id="refresh-alignment">Refresh alignment</button>
+        </div>
+        <div id="alignment-meta" class="badge" hidden></div>
+        <div id="alignment-view" class="alignments" hidden></div>
+      </section>
+
+      <section id="design-config">
+        <h2>Design Run Configuration</h2>
+        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Cluster submission hooks will be wired after backend integration.</p>
+        <form id="design-form">
+          <div class="form-row">
+            <label>Total designs
+              <input type="number" id="design-total" value="90" min="1">
+            </label>
+            <label>Designs per task
+              <input type="number" id="design-per-task" value="10" min="1">
+            </label>
+            <label>Sequences per backbone
+              <input type="number" id="design-num-seq" value="1" min="1">
+            </label>
+            <label>Temperature
+              <input type="number" id="design-temp" value="0.1" min="0" max="1" step="0.05">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Run label
+              <input type="text" id="design-run-label" placeholder="optional tag">
+            </label>
+            <label>Binder chain ID
+              <input type="text" id="design-binder-chain" value="H" maxlength="1">
+            </label>
+            <label>Hotspot variants (comma separated)
+              <input type="text" id="design-hotspot-variants" value="A,B,C">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Arms (one per line)
+              <textarea id="design-arms" rows="4" placeholder="RBM Core@A
+RBM Core@B"></textarea>
+            </label>
+          </div>
+          <div class="flex-row" style="margin-top: 8px;">
+            <button type="button" id="design-submit" disabled>Submit to cluster</button>
+            <span class="badge" id="design-status" hidden>Coming soon</span>
+          </div>
+        </form>
+      </section>
+
+      <section id="results-section">
+        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
+          <h2>Assessment Results</h2>
+          <div class="flex-row">
+            <label style="margin-bottom: 0;">
+              Run label
+              <input type="text" id="results-run-label" placeholder="latest" style="width: 150px;">
+            </label>
+            <label style="margin-bottom: 0;">
+              Limit
+              <input type="number" id="results-limit" value="200" min="1" style="width: 100px;">
+            </label>
+            <button type="button" id="refresh-results">Refresh</button>
+            <button type="button" id="sync-results">Sync from cluster</button>
+            <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
+          </div>
+        </div>
+        <div id="results-meta" class="badge" hidden></div>
+        <div id="binder-detail" class="alert success" hidden></div>
+        <div id="plot-container" style="margin-top: 16px;" hidden>
+          <canvas id="scatter-plot" width="720" height="360"></canvas>
+        </div>
+        <div class="table-scroll" style="margin-top: 16px;" hidden id="results-table-wrapper">
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th data-key="design_name">Design</th>
+                <th data-key="iptm" data-type="number">ipTM</th>
+                <th data-key="rmsd_diego" data-type="number">RMSD</th>
+                <th data-key="tm_score" data-type="number">TM-score</th>
+                <th data-key="metadata">Metadata</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="exports-section">
+        <h2>Export Helpers</h2>
+        <form id="export-form">
+          <div class="form-row">
+            <label>Top N designs
+              <input type="number" id="export-topn" value="48" min="1">
+            </label>
+            <label>Codon host
+              <select id="export-codon-host">
+                <option value="yeast" selected>Yeast</option>
+                <option value="ecoli">E. coli</option>
+                <option value="human">Human</option>
+              </select>
+            </label>
+            <label>GC target
+              <input type="number" id="export-gc" value="0.45" min="0" max="1" step="0.05">
+            </label>
+            <label>GC window
+              <input type="number" id="export-gc-window" value="100" min="1">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Prefix overhang
+              <input type="text" id="export-prefix" placeholder="optional">
+            </label>
+            <label>Suffix overhang
+              <input type="text" id="export-suffix" placeholder="optional">
+            </label>
+          </div>
+          <div class="flex-row">
+            <label><input type="checkbox" id="export-dnachisel" checked> Codon optimize with DNA Chisel</label>
+            <button type="button" id="export-run" disabled>Generate exports</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>
