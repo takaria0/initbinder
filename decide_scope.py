@@ -344,6 +344,10 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     yml_path = tdir / "target.yaml"
     cfg_from_yaml = yaml.safe_load(yml_path.read_text()) if yml_path.exists() else {}
 
+    if not force and (cfg_from_yaml.get("epitopes") or []):
+        print("[warn] Existing epitopes found in target.yaml; use --force to regenerate. Skipping decide-scope.")
+        return
+
     # === Generate Constraint Prompts ===
     target_chains = _normalize_chain_ids(cfg_from_yaml.get("target_chains"))
     if not target_chains:
