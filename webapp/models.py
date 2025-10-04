@@ -31,6 +31,16 @@ class JobStatusResponse(BaseModel):
     details: Dict[str, object] = Field(default_factory=dict)
 
 
+class JobSummary(BaseModel):
+    job_id: str
+    kind: str
+    label: str
+    status: Literal["pending", "running", "success", "failed", "canceled"]
+    created_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+
+
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]

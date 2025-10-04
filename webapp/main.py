@@ -20,6 +20,7 @@ from .models import (
     ExportRequest,
     ExportResponse,
     JobStatusResponse,
+    JobSummary,
     PyMolHotspotRequest,
     PyMolHotspotResponse,
     PyMolTopBindersRequest,
@@ -90,6 +91,26 @@ async def api_job_status(job_id: str) -> JobStatusResponse:
         logs=record.logs,
         details=record.details,
     )
+
+
+@app.get("/api/jobs", response_model=list[JobSummary])
+async def api_job_list(limit: int = 20) -> list[JobSummary]:
+    records = store.list_jobs()
+    records.sort(key=lambda rec: rec.created_at, reverse=True)
+    summaries: list[JobSummary] = []
+    for rec in records[:limit]:
+        summaries.append(
+            JobSummary(
+                job_id=rec.job_id,
+                kind=rec.kind,
+                label=rec.label,
+                status=rec.status.value,
+                created_at=rec.created_at,
+                started_at=rec.started_at,
+                finished_at=rec.finished_at,
+            )
+        )
+    return summaries
 
 
 @app.get("/api/targets/{pdb_id}/alignment", response_model=AlignmentResponse)

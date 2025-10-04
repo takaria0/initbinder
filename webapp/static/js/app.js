@@ -7,6 +7,8 @@ const state = {
   tableSort: { key: 'iptm', dir: 'desc' },
   scatterLayout: [],
   selectedDesign: null,
+  jobs: [],
+  selectedJobId: null,
 };
 
 const el = {
@@ -51,6 +53,8 @@ const el = {
   resultsLimit: document.querySelector('#results-limit'),
   pymolTop: document.querySelector('#pymol-top'),
   syncResultsBtn: document.querySelector('#sync-results'),
+  jobList: document.querySelector('#job-list'),
+  refreshJobsBtn: document.querySelector('#refresh-jobs'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -115,6 +119,47 @@ async function updateClusterStatus() {
   }
 }
 
+async function fetchJobList() {
+  if (!el.jobList) return;
+  try {
+    const res = await fetch('/api/jobs');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    state.jobs = await res.json();
+    renderJobList();
+  } catch (err) {
+    console.error('Failed to fetch jobs', err);
+  }
+}
+
+function renderJobList() {
+  if (!el.jobList) return;
+  el.jobList.innerHTML = '';
+  state.jobs.forEach((job) => {
+    const li = document.createElement('li');
+    li.dataset.jobId = job.job_id;
+    if (state.selectedJobId === job.job_id) {
+      li.classList.add('selected');
+    }
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = job.label || job.job_id;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const created = new Date(job.created_at * 1000).toLocaleString();
+    meta.textContent = `${job.kind} · ${job.status} · ${created}`;
+    li.appendChild(label);
+    li.appendChild(meta);
+    li.addEventListener('click', () => {
+      state.selectedJobId = job.job_id;
+      renderJobList();
+      startJobPolling(job.job_id, null, { manual: true });
+    });
+    el.jobList.appendChild(li);
+  });
+}
+
 function showAlert(message, isError = true) {
   if (!el.jobAlert) return;
   el.jobAlert.textContent = message;
@@ -165,7 +210,9 @@ async function queueTargetInit(event) {
       throw new Error(detail.detail || `Request failed with ${res.status}`);
     }
     const body = await res.json();
+    state.selectedJobId = body.job_id;
     startJobPolling(body.job_id, 'target');
+    fetchJobList();
   } catch (err) {
     setBadge(el.targetBadge, 'Error', 'rgba(248, 113, 113, 0.2)');
     showAlert(err.message || String(err));
@@ -203,7 +250,9 @@ async function queueDesignRun() {
       throw new Error(detail.detail || `Request failed with ${res.status}`);
     }
     const body = await res.json();
+    state.selectedJobId = body.job_id;
     startJobPolling(body.job_id, 'design');
+    fetchJobList();
   } catch (err) {
     el.designSubmit.disabled = false;
     setBadge(el.designStatus, 'Error', 'rgba(248, 113, 113, 0.2)');
@@ -243,7 +292,9 @@ async function runExport() {
       throw new Error(detail.detail || `Request failed with ${res.status}`);
     }
     const body = await res.json();
+    state.selectedJobId = body.job_id;
     startJobPolling(body.job_id, 'export');
+    fetchJobList();
   } catch (err) {
     showAlert(err.message || String(err));
     el.exportButton.disabled = false;
@@ -456,9 +507,11 @@ async function fetchJob(jobId) {
   return res.json();
 }
 
-function startJobPolling(jobId, context) {
+function startJobPolling(jobId, context, opts = {}) {
   state.currentJobId = jobId;
   state.jobContext = context;
+  state.selectedJobId = jobId;
+  renderJobList();
   stopJobPolling();
   const poll = async () => {
     try {
@@ -529,6 +582,7 @@ function updateJobUI(job) {
       stopJobPolling();
     }
   }
+  fetchJobList();
 }
 
 async function loadAlignment(pdbId) {
@@ -695,6 +749,11 @@ function initEventHandlers() {
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
   el.syncResultsBtn.addEventListener('click', syncResultsFromCluster);
+  if (el.refreshJobsBtn) {
+    el.refreshJobsBtn.addEventListener('click', () => {
+      fetchJobList();
+    });
+  }
   registerScatterClick();
   handleTableHeaderClicks();
   disableFutureSections();
@@ -705,6 +764,7 @@ function init() {
   refreshRunLabel(true);
   updateClusterStatus();
   setInterval(updateClusterStatus, 15000);
+  fetchJobList();
 }
 
 document.addEventListener('DOMContentLoaded', init);

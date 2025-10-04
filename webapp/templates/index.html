@@ -40,8 +40,19 @@
 
       <section id="job-status">
         <h2>Job Status</h2>
-        <div id="job-alert" class="alert" hidden></div>
-        <div class="status-log" id="job-log">Waiting for commands...</div>
+        <div class="job-status-grid">
+          <div>
+            <div id="job-alert" class="alert" hidden></div>
+            <div class="status-log" id="job-log">Waiting for commands...</div>
+          </div>
+          <div class="job-list">
+            <div class="job-list-header">
+              <span>Recent Jobs</span>
+              <button type="button" id="refresh-jobs">Refresh</button>
+            </div>
+            <ul id="job-list"></ul>
+          </div>
+        </div>
       </section>
 
       <section id="alignment-section">

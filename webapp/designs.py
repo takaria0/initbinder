@@ -108,6 +108,7 @@ def _build_pipeline_args(
         args.extend(["--binder_chain_id", request.binder_chain_id])
     if run_label:
         args.extend(["--run_tag", run_label])
+    args.append("--submit")
     return args
 
 
@@ -179,55 +180,22 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, line)
             log_buffer.append(line)
 
-    launcher_path = None
-    if log_buffer:
-        launcher = _parse_launcher_path(log_buffer)
-        if launcher:
-            launcher_path = str(launcher)
-    if not launcher_path:
-        raise FileNotFoundError("Could not locate generated launcher script on the cluster; check manage_rfa output")
-
-    instrument_script = textwrap.dedent(
-        f"""
-        python - <<'PY'
-from pathlib import Path
-import re
-
-path = Path({launcher_path!r})
-lines = path.read_text().splitlines()
-assign_pattern = re.compile(r'^([A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
-patched = []
-for line in lines:
-    patched.append(line)
-    m = assign_pattern.match(line.strip())
-    if m:
-        var_name = m.group(1)
-        patched.append(f'echo "[JOB] {{var_name}}=${{{{var_name}}}}"')
-path.write_text("\n".join(patched) + "\n")
-PY
-        """
-    ).strip()
-    job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
-    cluster.run(instrument_script, check=True, use_conda=True)
-    job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
-
-    job_store.update(job_id, message="Submitting SLURM pipeline")
-    submit_cmd = f"bash {shlex.quote(launcher_path)}"
-    job_store.append_log(job_id, f"[cmd] {submit_cmd}")
-    sbatch_result = cluster.run(submit_cmd)
     job_ids: Dict[str, str] = {}
-    if sbatch_result.stdout:
-        for line in sbatch_result.stdout.splitlines():
-            job_store.append_log(job_id, line)
-            match = _JOB_ECHO_RE.match(line.strip())
-            if match:
-                job_ids[match.group("var")] = match.group("jid")
-    if sbatch_result.stderr:
-        err = sbatch_result.stderr.strip()
-        if err:
-            job_store.append_log(job_id, err)
+    stage2_ids: List[str] = []
+    launcher_path = None
+    for line in log_buffer:
+        if launcher_path is None:
+            launch_match = _parse_launcher_path([line])
+            if launch_match:
+                launcher_path = str(launch_match)
+        submit_match = re.search(r"\[submit\]\s+(\S+)\s+→ job\s+(\d+)", line)
+        if submit_match:
+            script_name = submit_match.group(1)
+            jid = submit_match.group(2)
+            job_ids[script_name] = jid
+            if "af3batch" in script_name:
+                stage2_ids.append(jid)
 
-    stage2_ids = [jid for key, jid in job_ids.items() if key.startswith("jid_af3s2") and jid]
     job_store.update(
         job_id,
         details={
