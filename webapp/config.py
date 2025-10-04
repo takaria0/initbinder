@@ -27,6 +27,11 @@ class ClusterConfig:
     sacct_path: str = "sacct"
     pymol_path: str = "pymol"
     mock: bool = False
+    assess_partition: Optional[str] = None
+    assess_account: Optional[str] = None
+    assess_time_minutes: int = 240
+    assess_mem_gb: int = 16
+    assess_cpus: int = 4
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:
@@ -40,6 +45,10 @@ class ClusterConfig:
     def __post_init__(self) -> None:
         if isinstance(self.remote_root, str):
             self.remote_root = Path(self.remote_root).expanduser()
+        for attr in ("assess_time_minutes", "assess_mem_gb", "assess_cpus"):
+            value = getattr(self, attr)
+            if isinstance(value, str) and value.strip():
+                setattr(self, attr, int(value))
 
 
 @dataclass(slots=True)
@@ -136,6 +145,16 @@ def load_config() -> WebAppConfig:
         env_overrides.setdefault("cluster", {})["ssh_config_alias"] = alias
     if mock := os.getenv("INITBINDER_CLUSTER_MOCK"):
         env_overrides.setdefault("cluster", {})["mock"] = mock.lower() in {"1", "true", "yes"}
+    if assess_partition := os.getenv("INITBINDER_ASSESS_PARTITION"):
+        env_overrides.setdefault("cluster", {})["assess_partition"] = assess_partition
+    if assess_account := os.getenv("INITBINDER_ASSESS_ACCOUNT"):
+        env_overrides.setdefault("cluster", {})["assess_account"] = assess_account
+    if assess_time := os.getenv("INITBINDER_ASSESS_TIME_MINUTES"):
+        env_overrides.setdefault("cluster", {})["assess_time_minutes"] = assess_time
+    if assess_mem := os.getenv("INITBINDER_ASSESS_MEM_GB"):
+        env_overrides.setdefault("cluster", {})["assess_mem_gb"] = assess_mem
+    if assess_cpus := os.getenv("INITBINDER_ASSESS_CPUS"):
+        env_overrides.setdefault("cluster", {})["assess_cpus"] = assess_cpus
 
     merged = _deep_update(merged, env_overrides)
     return _config_from_dict(merged)

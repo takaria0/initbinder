@@ -71,6 +71,11 @@ cluster:
   ssh_config_alias: rfacluster            # matches ~/.ssh/config host entry
   remote_root: /pub/you/Projects/initbinder
   pymol_path: pymol
+  assess_partition: standard             # optional CPU partition for post-processing
+  assess_account: bio_lab                # optional SLURM account
+  assess_time_minutes: 240               # walltime for assessment sbatch
+  assess_mem_gb: 16
+  assess_cpus: 4
   mock: false
 background_concurrency: 4
 ```
@@ -81,6 +86,22 @@ Environment overrides:
 - `INITBINDER_CLUSTER_ALIAS` / `INITBINDER_CLUSTER_HOST` / `INITBINDER_CLUSTER_USER`
 - `INITBINDER_REMOTE_ROOT`
 - `INITBINDER_CLUSTER_MOCK` (set to `true` for local dry-run)
+- `INITBINDER_ASSESS_PARTITION`, `INITBINDER_ASSESS_ACCOUNT`, `INITBINDER_ASSESS_TIME_MINUTES`, `INITBINDER_ASSESS_MEM_GB`, `INITBINDER_ASSESS_CPUS`
+
+### Cluster setup
+
+- **Matching codebases** – the cluster path configured via `cluster.remote_root` must contain the *same git checkout* as the UI host (same branch/commit). The UI copies target inputs but assumes `manage_rfa.py` and generated tools already exist remotely.
+- **SSH configuration** – create an entry in `~/.ssh/config` (e.g. `Host rfacluster`) that points to the SLURM login node. The web app shells out to `ssh`/`rsync`/`sbatch` using this alias. Example:
+
+  ```sshconfig
+  Host rfacluster
+      HostName login.mycluster.edu
+      User your_username
+      Port 22
+  ```
+- **Password-based logins** – non-key authentication will trigger interactive prompts the first time `ssh` is used. Before starting the UI server, open a persistent control master or login once (e.g. `ssh -fN rfacluster`) so subsequent commands reuse the authenticated connection. Tools like `sshpass` are discouraged; prefer SSH keys or control sockets.
+- **Environment modules** – ensure the remote environment can execute `python manage_rfa.py ...` and `sbatch`. The assessment helper creates jobs under `slurm_logs/` within the remote repository.
+- **Automatic assessment** – after the RFdiffusion/MPNN/AF3 stage scripts are submitted, the UI schedules an additional `assess-rfa-all` sbatch job with dependencies on the final AF3 tasks. Configure the CPU partition/memory knobs above to match your cluster policies.
 
 ## Running the Server
 
@@ -143,11 +164,10 @@ Set `INITBINDER_CLUSTER_MOCK=true` (or `mock: true` in the config) to test witho
 2. Navigate to the UI → `PDB ID = 6M17`, enter antigen URL, queue pipeline.
 3. After prep completes, click *Launch hotspots in PyMOL* to view hotspots locally.
 4. Paste arm list (e.g. `RBM Core@A`, `RBM Core@B`), set `Run label = demo`, submit design pipeline.
-5. Once SLURM jobs finish, click *Sync from cluster* then *Refresh* to load AF3 rankings.
+5. The UI schedules an `assess-rfa-all` job automatically (runs once the AF3 jobs succeed). After SLURM finishes, click *Sync from cluster* then *Refresh* to load the synthesized AF3 rankings.
 6. Highlight top candidates via the scatter plot; inspect PyMOL script paths.
 7. Set `Top N designs = 48`, codon host `yeast`, click *Generate exports* to produce ordering files.
 
 ---
 
 For future enhancements and open issues, refer to `TODO.md`.
-

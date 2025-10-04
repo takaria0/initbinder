@@ -1,8 +1,15 @@
 paths:
   project_root: /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder
 cluster:
-  ssh_config_alias: rfacluster            # matches ~/.ssh/config host entry
-  remote_root: /data/homezvol1/inagakit/Projects/initbinder
+  ssh_config_alias: hpc3.rcic.uci.edu
+  remote_root: /pub/inagakit/Projects/initbinder    # adjust to your repo path on HPC
+  rsync_path: rsync
+  sbatch_path: sbatch
+  squeue_path: squeue
+  sacct_path: sacct
   pymol_path: pymol
-  mock: false
-background_concurrency: 4
+  assess_partition: ccl_lab          # optional, match your CPU queue
+  assess_account: inagakit         # optional
+  assess_time_minutes: 600
+  assess_mem_gb: 4
+  assess_cpus: 1

@@ -179,8 +179,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
 
     remote_path = cluster.remote_path(rel_path)
     job_store.update(job_id, message=f"Submitting SLURM pipeline via {remote_path}")
-    remote_cmd = f"bash {shlex.quote(str(remote_path))}"
-    result = cluster.ssh(remote_cmd)
+    result = cluster.run(f"bash {shlex.quote(str(remote_path))}")
     if result.stderr:
         job_store.append_log(job_id, result.stderr)
     if result.stdout:
@@ -191,14 +190,32 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
         match = _JOB_ECHO_RE.match(line.strip())
         if match:
             job_ids[match.group("var")] = match.group("jid")
+    stage2_ids = [jid for key, jid in job_ids.items() if key.startswith("jid_af3s2") and jid]
+    job_store.update(
+        job_id,
+        details={
+            "job_ids": job_ids,
+            "remote_launch": str(remote_path),
+            "assessment_dependencies": stage2_ids,
+        },
+    )
+
+    if stage2_ids:
+        assessment_job_id = cluster.submit_assessment(
+            pdb_id=request.pdb_id,
+            binder_chain=request.binder_chain_id or "H",
+            run_label=run_label,
+            dependencies=stage2_ids,
+            include_keyword=run_label,
+        )
+        if assessment_job_id:
+            job_store.append_log(job_id, f"[assessment] Scheduled sbatch job {assessment_job_id}")
+            job_store.update(job_id, details={"assessment_job_id": assessment_job_id})
+
     job_store.update(
         job_id,
         status=JobStatus.SUCCESS,
         message="Pipeline submitted to cluster",
-        details={
-            "job_ids": job_ids,
-            "remote_launch": str(remote_path),
-        },
     )
 
 

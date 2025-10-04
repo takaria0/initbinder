@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import shlex
+import textwrap
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -96,11 +99,22 @@ class ClusterClient:
         args = [self.cfg.rsync_path, "-az", src, str(local) + "/"]
         return self._run(args)
 
-    def ssh(self, command: str, *, check: bool = True) -> CommandResult:
+    def ssh(self, command: str, *, check: bool = True, use_login_shell: bool = False) -> CommandResult:
         if self.cfg.mock:
             return CommandResult(0, f"[mock ssh] {command}", "")
+        if use_login_shell:
+            command = f"bash -lc {shlex.quote(command)}"
         args = ["ssh", self._ssh_target(), command]
         return self._run(args, check=check)
+
+    def run(self, command: str, *, check: bool = True) -> CommandResult:
+        if self.cfg.mock:
+            return CommandResult(0, f"[mock run] {command}", "")
+        if self.cfg.remote_root is None:
+            raise RuntimeError("remote_root not configured; set cluster.remote_root in cfg/webapp.yaml")
+        remote_root = shlex.quote(str(self.cfg.remote_root))
+        full_cmd = f"cd {remote_root} && {command}"
+        return self.ssh(full_cmd, check=check, use_login_shell=True)
 
     # -- high-level helpers ----------------------------------------------
     def sync_target(self, pdb_id: str, *, delete: bool = False) -> CommandResult:
@@ -121,6 +135,79 @@ class ClusterClient:
             rel = base_rel
         local_dest = (self.local_root / rel).resolve()
         return self.rsync_pull(rel, local_dest)
+
+    def submit_assessment(
+        self,
+        *,
+        pdb_id: str,
+        binder_chain: str,
+        run_label: str,
+        dependencies: Iterable[str],
+        include_keyword: Optional[str] = None,
+    ) -> Optional[str]:
+        deps = [str(d).strip() for d in dependencies if str(d).strip()]
+        if not deps:
+            return None
+        dep_str = ":".join(deps)
+
+        if self.cfg.mock:
+            return "mock-assess"
+
+        if self.cfg.remote_root is None:
+            raise RuntimeError("remote_root not configured; cannot schedule assessment job")
+
+        sbatch_opts = [f"--dependency=afterok:{dep_str}"]
+        job_name = f"assess_{pdb_id.upper()}_{run_label}"
+        sbatch_opts.append(f"--job-name={job_name[:40]}")
+        if self.cfg.assess_partition:
+            sbatch_opts.append(f"--partition={self.cfg.assess_partition}")
+        if self.cfg.assess_account:
+            sbatch_opts.append(f"-A {self.cfg.assess_account}")
+        if self.cfg.assess_time_minutes:
+            hours = max(1, int((self.cfg.assess_time_minutes + 59) // 60))
+            sbatch_opts.append(f"--time={hours}:00:00")
+        if self.cfg.assess_mem_gb:
+            sbatch_opts.append(f"--mem={self.cfg.assess_mem_gb}G")
+        if self.cfg.assess_cpus:
+            sbatch_opts.append(f"--cpus-per-task={self.cfg.assess_cpus}")
+
+        log_dir = "slurm_logs"
+        log_pattern = f"{log_dir}/assess_{pdb_id.upper()}_{run_label}_%j.log"
+        sbatch_opts.append(f"--output={log_pattern}")
+        sbatch_opts.append(f"--error={log_pattern}")
+
+        include_kw = include_keyword or run_label
+        remote_root = shlex.quote(str(self.cfg.remote_root))
+        python_args = [
+            "python",
+            "manage_rfa.py",
+            "assess-rfa-all",
+            pdb_id,
+            "--binder_chain_id",
+            binder_chain,
+            "--run_label",
+            run_label,
+            "--include_keyword",
+            include_kw,
+            "--skip_pml",
+        ]
+        python_cmd = shlex.join(python_args)
+
+        script = textwrap.dedent(
+            f"""
+            {self.cfg.sbatch_path} {' '.join(sbatch_opts)} <<'EOF'
+            #!/bin/bash
+            set -euo pipefail
+            cd {remote_root}
+            mkdir -p {log_dir}
+            {python_cmd}
+            EOF
+            """
+        ).strip()
+
+        result = self.run(script, check=True)
+        match = re.search(r"Submitted batch job (\d+)", result.stdout)
+        return match.group(1) if match else None
 
 
 __all__ = ["ClusterClient", "CommandResult"]
