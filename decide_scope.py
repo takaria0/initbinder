@@ -347,6 +347,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     target_chains = _normalize_chain_ids(cfg_from_yaml.get("chains"))
     target_name_from_yaml = cfg_from_yaml.get("target_name", "")
     allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
+    pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("pdb_residue_numbers") or {})
 
     # 1. Target Chain and Name Constraint
     target_focus_prompt = ""
@@ -372,6 +373,51 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
             Any residue or range outside these boundaries is invalid and will be rejected. This is a hard constraint.
             --- END CRITICAL INSTRUCTION ---
         """)
+
+    numbering_prompt = ""
+    numbering_debug: List[dict] = []
+    if pdb_number_map:
+        numbering_lines = []
+        for chain_id in sorted(pdb_number_map.keys()):
+            entries = pdb_number_map.get(chain_id) or []
+            if not entries:
+                continue
+            first_label = str(entries[0])
+            last_label = str(entries[-1])
+            has_insertions = any(not str(x).isdigit() for x in entries)
+            try:
+                numeric_vals = []
+                for tok in entries:
+                    m = re.match(r"^-?\d+", str(tok).strip())
+                    if m:
+                        numeric_vals.append(int(m.group(0)))
+                min_val = min(numeric_vals) if numeric_vals else first_label
+                max_val = max(numeric_vals) if numeric_vals else last_label
+            except ValueError:
+                min_val, max_val = first_label, last_label
+            insertion_note = ""
+            ins_examples: List[str] = []
+            if has_insertions:
+                ins_examples = [str(tok) for tok in entries if not str(tok).isdigit()][:3]
+                insertion_note = f" (includes insertion codes such as {', '.join(ins_examples)})"
+            numbering_lines.append(
+                f"  - Chain {chain_id}: PDB residues {first_label} → {last_label} (numeric span {min_val}-{max_val}){insertion_note}."
+            )
+            numbering_debug.append({
+                "chain": chain_id,
+                "first_label": first_label,
+                "last_label": last_label,
+                "min_numeric": min_val,
+                "max_numeric": max_val,
+                "has_insertions": has_insertions,
+                "insertion_examples": ins_examples if has_insertions else [],
+            })
+        if numbering_lines:
+            numbering_prompt = "\n" + "\n".join(["--- CRITICAL INSTRUCTION: PDB NUMBERING ---",
+                                                   "Use the exact PDB residue numbering shown below. Do NOT renumber to UniProt or vendor coordinates.",
+                                                   *numbering_lines,
+                                                   "When specifying residue ranges, you must use these PDB indices (e.g., chain B begins at 501, not 1).",
+                                                   "--- END CRITICAL INSTRUCTION ---"]) + "\n"
     
     # === Build Final Prompt ===
     meta = json.loads((tdir/"raw"/"entry.json").read_text())
@@ -383,7 +429,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     
     # Prepend all constraints to the main template
     final_prompt = (
-        f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n"
+        f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n{numbering_prompt}"
         + prompt_template.format(
             meta=json.dumps(meta, indent=2),
             uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else ""),
@@ -463,6 +509,17 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         base["chains"] = _normalize_chain_ids(base.get("chains"))
     if base.get("target_chains"):
         base["target_chains"] = _normalize_chain_ids(base.get("target_chains"))
+
+    sequences_section = base.setdefault("sequences", {})
+    if numbering_debug:
+        sequences_section["pdb_numbering_summary"] = numbering_debug
+        if numbering_prompt:
+            sequences_section["pdb_numbering_instructions"] = numbering_prompt.strip()
+
+    debug_section = base.setdefault("debug", {})
+    if uniprot_context_str:
+        debug_section["uniprot_context"] = uniprot_context_str
+
     _remove_parentheses_from_yaml(base)
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 
