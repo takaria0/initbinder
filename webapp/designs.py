@@ -187,30 +187,29 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     if not launcher_path:
         raise FileNotFoundError("Could not locate generated launcher script on the cluster; check manage_rfa output")
 
-    env_prefix = f"LAUNCHER_PATH={shlex.quote(launcher_path)}"
+    launcher_repr = repr(launcher_path)
     instrument_script = textwrap.dedent(
         f"""
-        {env_prefix} python - <<'PY'
-import os
+        python - <<'PY'
 import re
 from pathlib import Path
 
-path = Path(os.environ['LAUNCHER_PATH'])
+path = Path({launcher_repr})
 lines = path.read_text().splitlines()
-assign_pattern = re.compile(r'^([A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
+assign_pattern = re.compile(r'^\s*(jid_[A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
 patched = []
 for line in lines:
     patched.append(line)
-    m = assign_pattern.match(line.strip())
+    m = assign_pattern.match(line)
     if m:
         var_name = m.group(1)
-        patched.append(f"echo '[JOB] {var_name}=${{{var_name}}}'")
+        patched.append(f'echo "[JOB] {{var_name}}=${{{{var_name}}}}"')
 path.write_text("\n".join(patched) + "\n")
 PY
         """
     ).strip()
     job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
-    cluster.run(instrument_script, check=True, use_conda=True)
+    cluster.run(instrument_script, check=True)
     job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
 
     job_store.update(job_id, message="Submitting SLURM pipeline")

@@ -106,13 +106,13 @@ async function updateClusterStatus() {
     if (payload.control_master) {
       const remoteRoot = payload.remote_root || 'remote';
       if (payload.remote_root_exists) {
-        setClusterStatus('ok', `Cluster: connected · ${remoteRoot}`);
+        setClusterStatus('ok', `Cluster: connected - ${remoteRoot}`);
       } else {
-        setClusterStatus('warn', `Cluster: connected · missing ${remoteRoot}`);
+        setClusterStatus('warn', `Cluster: connected - missing ${remoteRoot}`);
       }
     } else {
       const msg = payload.message || 'control master not active';
-      setClusterStatus('error', `Cluster: not connected · ${msg}`);
+      setClusterStatus('error', `Cluster: not connected - ${msg}. Run ssh hpc3.rcic.uci.edu -MNf`);
     }
   } catch (err) {
     setClusterStatus('error', `Cluster: status unavailable (${err.message || err})`);
@@ -148,7 +148,7 @@ function renderJobList() {
     const meta = document.createElement('div');
     meta.className = 'meta';
     const created = new Date(job.created_at * 1000).toLocaleString();
-    meta.textContent = `${job.kind} · ${job.status} · ${created}`;
+    meta.textContent = `${job.kind} - ${job.status} - ${created}`;
     li.appendChild(label);
     li.appendChild(meta);
     li.addEventListener('click', () => {
