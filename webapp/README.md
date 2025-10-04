@@ -72,6 +72,7 @@ cluster:
   remote_root: /data/homezvol1/you/Projects/initbinder   # code/launcher location
   target_root: /pub/you/Projects/initbinder               # large design outputs
   pymol_path: pymol
+  conda_activate: "source ~/.bashrc && conda activate takashi"
   assess_partition: standard             # optional CPU partition for post-processing
   assess_account: bio_lab                # optional SLURM account
   assess_time_minutes: 240               # walltime for assessment sbatch
@@ -93,6 +94,7 @@ Environment overrides:
 - `INITBINDER_CLUSTER_MOCK` (set to `true` for local dry-run)
 - `INITBINDER_ASSESS_PARTITION`, `INITBINDER_ASSESS_ACCOUNT`, `INITBINDER_ASSESS_TIME_MINUTES`, `INITBINDER_ASSESS_MEM_GB`, `INITBINDER_ASSESS_CPUS`
 - `INITBINDER_SSH_CONTROL_PATH`, `INITBINDER_SSH_CONTROL_PERSIST`, `INITBINDER_SSH_ENSURE_MASTER`
+- `INITBINDER_CONDA_ACTIVATE`
 
 ### Cluster setup
 
@@ -116,6 +118,7 @@ ssh hpc3.rcic.uci.edu -MNf
 
   All subsequent `ssh`/`rsync` calls from the UI reuse this connection automatically.
 - **Password-based logins** – if you cannot use keys, rely on the control master above so you only enter your password once per session. Tools like `sshpass` are discouraged; prefer SSH keys or control sockets.
+- **Conda environment** – set `cluster.conda_activate` (e.g. `"source ~/.bashrc && conda activate takashi"`). Every remote Python command and assessment job prepends this snippet so the correct environment is active.
 - **Environment modules** – ensure the remote environment can execute `python manage_rfa.py ...` and `sbatch`. The assessment helper creates jobs under `slurm_logs/` within the remote repository.
 - **Automatic assessment** – after the RFdiffusion/MPNN/AF3 stage scripts are submitted, the UI schedules an additional `assess-rfa-all` sbatch job with dependencies on the final AF3 tasks. Configure the CPU partition/memory knobs above to match your cluster policies.
 

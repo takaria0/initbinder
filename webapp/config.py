@@ -36,6 +36,7 @@ class ClusterConfig:
     control_path: Optional[str] = None
     control_persist: int | str = 600
     ensure_master: bool = True
+    conda_activate: Optional[str] = None
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:
@@ -174,6 +175,8 @@ def load_config() -> WebAppConfig:
         env_overrides.setdefault("cluster", {})["control_persist"] = control_persist
     if ensure_master := os.getenv("INITBINDER_SSH_ENSURE_MASTER"):
         env_overrides.setdefault("cluster", {})["ensure_master"] = ensure_master.lower() in {"1", "true", "yes"}
+    if conda_activate := os.getenv("INITBINDER_CONDA_ACTIVATE"):
+        env_overrides.setdefault("cluster", {})["conda_activate"] = conda_activate
 
     merged = _deep_update(merged, env_overrides)
     return _config_from_dict(merged)

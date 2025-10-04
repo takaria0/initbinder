@@ -41,6 +41,7 @@ class ClusterClient:
         self._master_checked = False
         self.remote_root = self.cfg.remote_root
         self.target_root = self.cfg.target_root or self.remote_root
+        self.conda_activate = (self.cfg.conda_activate or "").strip() or None
         print(
             f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}",
             flush=True,
@@ -175,13 +176,17 @@ class ClusterClient:
         print(f"[cluster] ssh -> {' '.join(args)}", flush=True)
         return self._run(args, check=check)
 
-    def run(self, command: str, *, check: bool = True) -> CommandResult:
+    def run(self, command: str, *, check: bool = True, use_conda: bool = False) -> CommandResult:
         if self.cfg.mock:
             return CommandResult(0, f"[mock run] {command}", "")
         if self.cfg.remote_root is None:
             raise RuntimeError("remote_root not configured; set cluster.remote_root in cfg/webapp.yaml")
         remote_root = shlex.quote(str(self.cfg.remote_root))
-        full_cmd = f"cd {remote_root} && {command}"
+        segments = [f"cd {remote_root}"]
+        if use_conda and self.conda_activate:
+            segments.append(self.conda_activate)
+        segments.append(command)
+        full_cmd = " && ".join(segments)
         self._ensure_master()
         print(f"[cluster] run -> {full_cmd}", flush=True)
         return self.ssh(full_cmd, check=check, use_login_shell=True)
@@ -298,17 +303,18 @@ class ClusterClient:
         env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))} " if binder_root else ""
         python_cmd = env_prefix + shlex.join(python_args)
 
-        script = textwrap.dedent(
-            f"""
-            {self.cfg.sbatch_path} {' '.join(sbatch_opts)} <<'EOF'
-            #!/bin/bash
-            set -euo pipefail
-            cd {remote_root}
-            mkdir -p {log_dir}
-            {python_cmd}
-            EOF
-            """
-        ).strip()
+        lines = [
+            f"{self.cfg.sbatch_path} {' '.join(sbatch_opts)} <<'EOF'",
+            "#!/bin/bash",
+            "set -euo pipefail",
+            f"cd {remote_root}",
+        ]
+        if self.conda_activate:
+            lines.append(self.conda_activate)
+        lines.append(f"mkdir -p {log_dir}")
+        lines.append(python_cmd)
+        lines.append("EOF")
+        script = "\n".join(lines)
 
         print(f"[cluster] submit_assessment -> sbatch opts: {' '.join(sbatch_opts)}", flush=True)
         print(f"[cluster] submit_assessment -> command: {python_cmd}", flush=True)

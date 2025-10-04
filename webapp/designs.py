@@ -167,7 +167,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     remote_cmd = f"{env_prefix} " + shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
     job_store.update(job_id, message="Generating pipeline scripts on cluster")
     job_store.append_log(job_id, f"[cmd] {remote_cmd}")
-    pipeline_result = cluster.run(remote_cmd)
+    pipeline_result = cluster.run(remote_cmd, use_conda=True)
 
     log_buffer: List[str] = []
     if pipeline_result.stdout:
@@ -208,7 +208,7 @@ PY
         """
     ).strip()
     job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
-    cluster.run(instrument_script, check=True)
+    cluster.run(instrument_script, check=True, use_conda=True)
     job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
 
     job_store.update(job_id, message="Submitting SLURM pipeline")
