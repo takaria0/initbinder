@@ -3,13 +3,13 @@ import requests
 import yaml
 from Bio.PDB import PDBIO, PDBParser
 from pathlib import Path
-import requests
 import re
 from bs4 import BeautifulSoup
-import difflib
 from Bio.PDB.Polypeptide import three_to_index, index_to_one
 from playwright.sync_api import sync_playwright
-from typing import Iterable
+from typing import Iterable, Optional
+
+from sequence_alignment import AlignmentResult, align_vendor_to_chains
 
 
 def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
@@ -155,23 +155,22 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         print(f"[warn] PDB file missing at {raw_pdb}")
 
     # Vendor-specific verification (Sino Biological)
-    chosen_chain = None
+    chosen_chains: list[str] = []
     accession_id, accession_seq = "", ""
-    allowed_range = None
+    alignment_summary: Optional[AlignmentResult] = None
 
     if "sinobiological.com" in antigen_url:
         verification_result = _verify_antigen_compatibility(pdb_id, antigen_url, tdir)
-        # Backward compatibility: handle 3-tuple (old) or 5-tuple (new)
         if verification_result:
-            if len(verification_result) == 3:
-                start, end, chosen_chain = verification_result
-            else:
-                start, end, chosen_chain, accession_id, accession_seq = verification_result
-            if chosen_chain:
-                chosen_chain = str(chosen_chain).strip().upper()
-            allowed_range = (start, end)
-            config["allowed_epitope_range"] = f"{start}-{end}"
-            print(f"[ok] Verified vendor overlap {start}-{end} on chain '{chosen_chain}'")
+            alignment_summary = verification_result.get("alignment")
+            accession_id = verification_result.get("accession", "") or ""
+            accession_seq = verification_result.get("full_sequence", "") or ""
+            vendor_range = verification_result.get("vendor_range")
+            if alignment_summary:
+                chosen_chains = list(alignment_summary.chain_ids)
+                overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
+                if overlap:
+                    config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
     else:
         print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
 
@@ -182,17 +181,18 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         config["sequences"]["accession"]["id"] = accession_id
     if accession_seq:
         config["sequences"]["accession"]["aa"] = accession_seq
+    if alignment_summary:
+        config["sequences"]["alignment"] = _alignment_result_to_yaml(alignment_summary)
 
-    # Chains / target_chains logic
-    # - keep existing 'chains' if user provided; otherwise, adopt verified chain if available
-    if not config.get("chains"):
-        if chosen_chain:
-            config["chains"] = _normalize_chain_ids([chosen_chain])
-    # - ensure 'target_chains' exists and mirrors best knowledge
-    if config.get("chains"):
+    normalized_chosen = _normalize_chain_ids(chosen_chains)
+
+    if normalized_chosen:
+        existing = config.get("chains", []) or []
+        merged = list(dict.fromkeys(existing + normalized_chosen))
+        config["chains"] = _normalize_chain_ids(merged)
+        config["target_chains"] = normalized_chosen
+    elif config.get("chains"):
         config["target_chains"] = _normalize_chain_ids(config["chains"])
-    elif chosen_chain:
-        config["target_chains"] = _normalize_chain_ids([chosen_chain])
     elif pdb_sequences:
         config["target_chains"] = _normalize_chain_ids(pdb_sequences.keys())
     else:
@@ -217,6 +217,48 @@ def _get_ncbi_sequence(accession: str) -> str:
         print(f"Error fetching sequence for {accession} from NCBI: {e}")
         return ""
 
+
+def _alignment_result_to_yaml(aln: AlignmentResult) -> dict:
+    def _fmt_range(rng: Optional[tuple[int, int]]) -> Optional[str]:
+        if not rng:
+            return None
+        return f"{rng[0]}-{rng[1]}"
+
+    chain_ranges = {cid: _fmt_range(span) for cid, span in (aln.chain_ranges or {}).items()}
+    mutations = [
+        {
+            "vendor_position": mut.vendor_position,
+            "vendor_aa": mut.vendor_aa,
+            "chain": mut.chain,
+            "chain_position": mut.chain_position,
+            "pdb_aa": mut.pdb_aa,
+        }
+        for mut in aln.mutations
+    ]
+    mutation_summary = [
+        f"{m['vendor_position']}:{m['vendor_aa']}->{m['pdb_aa']} ({m['chain']}:{m['chain_position']})"
+        for m in mutations
+    ] if mutations else []
+
+    return {
+        "chains": list(aln.chain_ids),
+        "identity": round(aln.identity, 4),
+        "coverage": round(aln.coverage, 4),
+        "matches": aln.matches,
+        "mismatches": aln.mismatches,
+        "gaps": aln.gaps,
+        "aligned_length": aln.aligned_length,
+        "combined_length": aln.combined_length,
+        "vendor_length": aln.vendor_length,
+        "vendor_range": _fmt_range(aln.vendor_range),
+        "vendor_aligned_range": _fmt_range(aln.vendor_aligned_range),
+        "vendor_overlap_range": _fmt_range(aln.vendor_overlap_range),
+        "chain_ranges": chain_ranges,
+        "score": round(aln.score, 3),
+        "mutations": mutations,
+        "mutation_summary": mutation_summary,
+    }
+
 def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
     """Parses a PDB file and returns sequences for each polymer chain."""
     parser = PDBParser(QUIET=True)
@@ -240,13 +282,10 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
         break
     return sequences
 
-def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
-    """
-    Returns (intersection_start, intersection_end, target_chain_id, accession, accession_full_seq)
-    (Older callers expecting a 3-tuple are handled in init_target.)
-    """
+def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
+    """Return verification details with multi-chain alignment against the vendor construct."""
     print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
-    
+
     # 1. Parse Sino page (get accession + vendor residue range)
     print(f"[1/5] Parsing vendor page with headless browser: {antigen_url}")
     try:
@@ -258,15 +297,19 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
             browser.close()
         soup = BeautifulSoup(html_content, "lxml")
         pc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Protein Construction\s*'))
-        if not pc_header: raise ValueError("Could not find 'Protein Construction' section.")
+        if not pc_header:
+            raise ValueError("Could not find 'Protein Construction' section.")
         pc_text = pc_header.find_next_sibling('div').text.strip()
         acc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Accession#\s*'))
-        if not acc_header: raise ValueError("Could not find 'Accession#' section.")
+        if not acc_header:
+            raise ValueError("Could not find 'Accession#' section.")
         accession = acc_header.find_next_sibling('div').text.strip()
         match = re.search(r'\((?:[A-Za-z]{3})?(\d+)-([A-Za-z]{3})?(\d+)\)', pc_text)
-        if not match: raise ValueError("Could not parse residue boundaries from 'Protein Construction' text.")
+        if not match:
+            raise ValueError("Could not parse residue boundaries from 'Protein Construction' text.")
         groups = [g for g in match.groups() if g and g.isdigit()]
         v_start, v_end = int(groups[0]), int(groups[1])
+        vendor_range = (v_start, v_end)
         print(f"[ok] Found Accession: {accession}, Vendor Range: {v_start}-{v_end}")
     except Exception as e:
         print(f"[fail] Could not process vendor page: {e}")
@@ -276,14 +319,15 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
     print(f"[2/5] Fetching sequence for {accession} from NCBI...")
     try:
         full_ncbi_seq = _get_ncbi_sequence(accession)
-        if not full_ncbi_seq: raise ValueError("Got empty sequence from NCBI.")
+        if not full_ncbi_seq:
+            raise ValueError("Got empty sequence from NCBI.")
         print(f"[ok] Fetched NCBI sequence (length {len(full_ncbi_seq)}).")
     except Exception as e:
         print(f"[fail] Could not fetch NCBI sequence: {e}")
         return None
 
-    # 3. PDB chain sequences & choose best chain
-    print("[3/5] Extracting sequences and selecting best matching chain...")
+    # 3. Load PDB chain sequences
+    print("[3/5] Extracting PDB chain sequences...")
     raw_pdb = tdir / "raw" / f"{pdb_id.upper()}.pdb"
     if not raw_pdb.exists():
         print(f"[fail] PDB file not found at {raw_pdb}. Cannot perform verification.")
@@ -294,65 +338,74 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path):
         return None
 
     yml_path = tdir / "target.yaml"
-    user_chain_id = None
+    user_chains: list[str] = []
     if yml_path.exists():
         with yml_path.open() as f:
-            config = yaml.safe_load(f)
-            chains = (config or {}).get("chains", [])
-            print(f"[info] User-specified chains in target.yaml: {chains}")
-            print(f"[debug] target.yaml path: {yml_path.resolve()}")
-            print(f"[debug] available PDB chains: {list(pdb_sequences.keys())}")
-            if chains:
-                user_chain_id = chains[0]
+            config = yaml.safe_load(f) or {}
+        user_chains = [str(ch).strip() for ch in (config.get("chains") or []) if ch]
+        if user_chains:
+            print(f"[info] User-specified chains in target.yaml: {user_chains}")
+    print(f"[debug] Available PDB chains: {list(pdb_sequences.keys())}")
 
-    import difflib
-    best_match = None
-    if user_chain_id and user_chain_id in pdb_sequences:
-        print(f"[info] Analyzing user-specified target chain: '{user_chain_id}'")
-        chain_seq = pdb_sequences[user_chain_id]
-        s = difflib.SequenceMatcher(a=full_ncbi_seq, b=chain_seq, autojunk=False)
-        match_obj = s.find_longest_match(0, len(full_ncbi_seq), 0, len(chain_seq))
-        identity = match_obj.size / len(chain_seq) if len(chain_seq) > 0 else 0
-        best_match = {'chain_id': user_chain_id, 'identity': identity, 'match_obj': match_obj}
-    else:
-        print("[info] No target chain specified or found. Auto-selecting best match...")
-        all_matches = []
-        for cid, cseq in pdb_sequences.items():
-            if not cseq: continue
-            s = difflib.SequenceMatcher(a=full_ncbi_seq, b=cseq, autojunk=False)
-            m = s.find_longest_match(0, len(full_ncbi_seq), 0, len(cseq))
-            ident = m.size / len(cseq) if len(cseq) > 0 else 0
-            all_matches.append({'chain_id': cid, 'identity': ident, 'match_obj': m})
-        if not all_matches:
-            print("[fail] Could not find any suitable chain to analyze.")
-            return None
-        best_match = max(all_matches, key=lambda x: x['identity'])
-        print(f"[ok] Auto-selected chain '{best_match['chain_id']}' with highest identity ({best_match['identity']:.2%}).")
+    # 4. Run mismatch-tolerant, multi-chain alignments
+    print("[4/5] Running global alignments across chain combinations (allowing mismatches)...")
+    alignments = align_vendor_to_chains(
+        full_ncbi_seq,
+        pdb_sequences,
+        vendor_range=vendor_range,
+        max_chain_combo=3,
+        min_alignment_length=10,
+    )
+    if not alignments:
+        print("[fail] No chain combination aligned to the vendor construct with sufficient coverage.")
+        return None
 
-    target_chain_id = best_match['chain_id']
-    match = best_match['match_obj']
+    best_alignment = alignments[0]
+    chain_label = ",".join(best_alignment.chain_ids)
+    print(f"[ok] Best alignment uses chain(s) {chain_label} with identity {best_alignment.identity:.2%} and coverage {best_alignment.coverage:.2%}.")
+    top_preview = min(3, len(alignments))
+    if top_preview > 1:
+        print("    Top alignment candidates:")
+        for idx, cand in enumerate(alignments[:top_preview], start=1):
+            print(
+                f"      {idx}) chains={','.join(cand.chain_ids)} identity={cand.identity:.2%} "
+                f"coverage={cand.coverage:.2%} aligned={cand.aligned_length} mismatches={cand.mismatches}"
+            )
 
-    # 4. Alignment window on the NCBI seq (1-based)
-    print("[4/5] Analyzing alignment of the selected chain...")
-    identity = best_match['identity']
-    u_start, u_end = match.a + 1, match.a + match.size
-    print(f"[info] PDB chain '{target_chain_id}' aligns to NCBI reference at residues {u_start}-{u_end} with {identity:.2%} identity.")
-
-    # 5. Overlap with vendor construct
-    print("[5/5] Checking overlap between vendor product and PDB structure...")
-    intersection_start = max(u_start, v_start)
-    intersection_end = min(u_end, v_end)
-    intersection_len = max(0, intersection_end - intersection_start + 1)
-    vendor_len = v_end - v_start + 1
-    pdb_coverage_of_vendor = intersection_len / vendor_len if vendor_len > 0 else 0
+    # 5. Summarize overlap against vendor construct
+    print("[5/5] Summarizing vendor/PDB overlap...")
+    overlap_range = best_alignment.vendor_overlap_range or best_alignment.vendor_aligned_range
+    overlap_len = 0
+    if overlap_range:
+        overlap_len = max(0, overlap_range[1] - overlap_range[0] + 1)
+    chain_ranges_desc = "; ".join(
+        f"{cid}:{span[0]}-{span[1]}" for cid, span in best_alignment.chain_ranges.items()
+    ) or "(n/a)"
+    mismatch_desc = ", ".join(
+        f"{mut.vendor_position}:{mut.vendor_aa}->{mut.pdb_aa} ({mut.chain}:{mut.chain_position})"
+        for mut in best_alignment.mutations[:6]
+    )
+    if best_alignment.mutations and len(best_alignment.mutations) > 6:
+        mismatch_desc += ", ..."
+    if not mismatch_desc:
+        mismatch_desc = "(none)"
 
     print("\n--- Verification Summary ---")
-    print(f"  - Selected PDB Chain:               '{target_chain_id}'")
-    print(f"  - PDB Chain Mapped Range:           {u_start}-{u_end} (Identity: {identity:.2%})")
-    print(f"  - Vendor Product Canonical Range:   {v_start}-{v_end}")
+    print(f"  - Selected Chains:                  {chain_label}")
+    print(f"  - Identity / Coverage:              {best_alignment.identity:.2%} / {best_alignment.coverage:.2%}")
+    print(f"  - Vendor Product Range:             {v_start}-{v_end}")
+    if overlap_range:
+        print(f"  - Vendor Overlap Range:             {overlap_range[0]}-{overlap_range[1]} (len {overlap_len})")
+    elif best_alignment.vendor_aligned_range:
+        ar = best_alignment.vendor_aligned_range
+        print(f"  - Vendor Aligned Range:             {ar[0]}-{ar[1]}")
     print(f"  - Vendor Product Accession:         {accession}")
-    print(f"  - Overlap (Intersection):           {intersection_len} residues from {intersection_start} to {intersection_end}")
-    print(f"  - PDB Coverage of Vendor Product:   {pdb_coverage_of_vendor:.2%}")
+    print(f"  - Chain Coverage:                   {chain_ranges_desc}")
+    print(f"  - Mismatches:                       {mismatch_desc}")
 
-    # NEW: return accession + its full AA sequence for YAML debug
-    return intersection_start, intersection_end, target_chain_id, accession, full_ncbi_seq
+    return {
+        "alignment": best_alignment,
+        "accession": accession,
+        "full_sequence": full_ncbi_seq,
+        "vendor_range": vendor_range,
+    }

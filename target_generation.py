@@ -68,16 +68,16 @@ import sys
 import textwrap
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional, Tuple, Any, Dict
+from typing import List, Optional, Tuple, Any, Dict, Sequence
 from datetime import datetime
 import time
 import logging
 from pprint import pformat
 
-import difflib
 from bs4 import BeautifulSoup
 import requests
 import yaml
+from sequence_alignment import AlignmentMutation, align_vendor_to_chains
 
 # --- LLM Configuration (Google Gemini) ---
 USE_LLM = True
@@ -625,6 +625,24 @@ def rcsb_quality(pdb_id: str) -> Tuple[Optional[float], dict]:
         res = None
     return res, entry
 
+
+def _fmt_range(rng: Optional[tuple[int, int]]) -> Optional[str]:
+    if not rng:
+        return None
+    return f"{rng[0]}-{rng[1]}"
+
+
+def _summarize_mutations(muts: Sequence[AlignmentMutation], limit: int = 6) -> str:
+    if not muts:
+        return ""
+    parts = [
+        f"{m.vendor_position}:{m.vendor_aa}->{m.pdb_aa} ({m.chain}:{m.chain_position})"
+        for m in list(muts)[:limit]
+    ]
+    if len(muts) > limit:
+        parts.append("...")
+    return "; ".join(parts)
+
 # -------------------- Vendor search --------------------
 def fetch_uniprot_entry(accession: str) -> dict:
     return http_json(UNIPROT_GET.format(acc=accession), headers={"Accept": "application/json"})
@@ -710,7 +728,8 @@ def _compute_matches_for_antigen(pdb_ids: List[str], antigen: AntigenOption) -> 
     if not ncbi_seq:
         return out
     v_start, v_end = analysis.aa_start, analysis.aa_end
-    vendor_len = (v_end - v_start + 1) if (v_start and v_end) else 0
+    vendor_range = (v_start, v_end) if isinstance(v_start, int) and isinstance(v_end, int) else None
+    vendor_range_str = f"{v_start}-{v_end}" if vendor_range else None
 
     for pdb_id in pdb_ids:
         res, entry_json = rcsb_quality(pdb_id)
@@ -719,40 +738,69 @@ def _compute_matches_for_antigen(pdb_ids: List[str], antigen: AntigenOption) -> 
         method = ((entry_json.get("exptl") or [{}])[0].get("method", "")).upper()
         release_date_str = (entry_json.get("rcsb_accession_info", {})).get("initial_release_date")
         release_dt = datetime.fromisoformat(release_date_str.replace("Z", "+00:00")) if release_date_str else None
-
+        chain_sequences: Dict[str, str] = {}
+        chain_meta: Dict[str, Dict[str, Any]] = {}
         for entity_id in _entity_ids(entry_json):
             entity_json = _polymer_entity_json(pdb_id, entity_id)
             pdb_seq = _entity_seq_can(entity_json)
             if not pdb_seq:
                 continue
+            identifiers = (entity_json.get("rcsb_polymer_entity_container_identifiers", {}) or {})
+            auth_ids = identifiers.get("auth_asym_ids") or []
+            subunit_name = (entity_json.get("rcsb_polymer_entity", {}) or {}).get("pdbx_description", "N/A")
+            for auth_id in auth_ids:
+                chain_id = str(auth_id).strip()
+                if not chain_id:
+                    continue
+                if chain_id not in chain_sequences:
+                    chain_sequences[chain_id] = pdb_seq
+                    chain_meta[chain_id] = {"entity_id": entity_id, "subunit_name": subunit_name}
 
-            s = difflib.SequenceMatcher(a=ncbi_seq, b=pdb_seq, autojunk=False)
-            match = s.find_longest_match(0, len(ncbi_seq), 0, len(pdb_seq))
-            identity = match.size / len(pdb_seq) if len(pdb_seq) > 0 else 0.0
-            if identity < MIN_IDENTITY_SOFT:
+        if not chain_sequences:
+            continue
+
+        alignments = align_vendor_to_chains(
+            ncbi_seq,
+            chain_sequences,
+            vendor_range=vendor_range,
+            max_chain_combo=3,
+            min_alignment_length=10,
+        )
+
+        for alignment in alignments:
+            if alignment.identity < MIN_IDENTITY_SOFT:
+                continue
+            if alignment.coverage <= 0:
                 continue
 
-            u_start, u_end = match.a + 1, match.a + match.size  # 1-based
-            intersection_start = max(u_start, v_start) if v_start else None
-            intersection_end = min(u_end, v_end) if v_end else None
-            intersection_len = 0
-            if intersection_start is not None and intersection_end is not None:
-                intersection_len = max(0, intersection_end - intersection_start + 1)
-            coverage = (intersection_len / vendor_len) if vendor_len > 0 else 0.0
-            auth_asym_ids = (entity_json.get("rcsb_polymer_entity_container_identifiers", {}).get("auth_asym_ids") or ["?"])
+            chain_ids = alignment.chain_ids
+            auth_chain = ",".join(chain_ids)
+            entity_ids = sorted({str(chain_meta.get(cid, {}).get("entity_id", "")) for cid in chain_ids if chain_meta.get(cid)}) or ["?"]
+            subunit_names = sorted({chain_meta.get(cid, {}).get("subunit_name", "N/A") for cid in chain_ids if chain_meta.get(cid)})
+
+            chain_ranges_desc = "; ".join(
+                f"{cid}:{span[0]}-{span[1]}" for cid, span in alignment.chain_ranges.items()
+            ) if alignment.chain_ranges else ""
+            vendor_aligned = _fmt_range(alignment.vendor_aligned_range) or ""
+            vendor_overlap = _fmt_range(alignment.vendor_overlap_range) or "None"
+            mutation_summary = _summarize_mutations(alignment.mutations)
+
             out.append({
                 "pdb_id": pdb_id,
-                "entity_id": entity_id,
-                "auth_chain": auth_asym_ids[0],
+                "entity_id": "+".join(entity_ids),
+                "auth_chain": auth_chain,
                 "resolution_A": res,
                 "method": method,
                 "release_date": release_dt.date().isoformat() if release_dt else None,
-                "identity": identity,
-                "coverage": coverage,
-                "u_range": f"{u_start}-{u_end}",
-                "vendor_range": f"{v_start}-{v_end}" if (v_start and v_end) else None,
-                "intersection": f"{intersection_start}-{intersection_end}" if intersection_len > 0 else "None",
-                "subunit_name": (entity_json.get("rcsb_polymer_entity", {}) or {}).get("pdbx_description", "N/A"),
+                "identity": alignment.identity,
+                "coverage": alignment.coverage,
+                "u_range": vendor_aligned,
+                "vendor_range": vendor_range_str,
+                "intersection": vendor_overlap,
+                "subunit_name": "; ".join(subunit_names) if subunit_names else "N/A",
+                "chain_ranges": chain_ranges_desc,
+                "mutations": mutation_summary,
+                "aligned_length": alignment.aligned_length,
             })
     return out
 
@@ -812,6 +860,8 @@ def _select_best_match(pdb_ids: List[str], antigen_options: List[AntigenOption],
                     "coverage": r.get("coverage"),
                     "intersection": r.get("intersection"),
                     "subunit_name": r.get("subunit_name"),
+                    "chain_ranges": r.get("chain_ranges"),
+                    "mutations": r.get("mutations"),
                     "is_biotinylated": bool(antigen.llm_analysis and antigen.llm_analysis.is_biotinylated),
                     # pass-through product facts:
                     "molecular_weight_kda": antigen.llm_analysis.molecular_weight_kda if antigen.llm_analysis else None,
@@ -1028,7 +1078,8 @@ DEBUG_COLUMNS = [
     "gene","uniprot","antigen_catalog","antigen_url","antigen_is_biotinylated",
     "molecular_weight_kda","accession","vendor_range",
     "pdb_id","entity_id","auth_chain","identity","coverage","intersection",
-    "u_range","resolution_A","method","release_date","subunit_name"
+    "u_range","resolution_A","method","release_date","subunit_name",
+    "chain_ranges","mutations"
 ]
 
 def _selection_to_row(sel_name: str, i_rank: int, cand: Candidate) -> Optional[List[Any]]:
@@ -1111,6 +1162,7 @@ def write_debug(cands: List[Candidate], prefix: str) -> None:
                     r.get("u_range",""),
                     f"{(r.get('resolution_A') or 0):.2f}" if r.get("resolution_A") is not None else "",
                     r.get("method",""), r.get("release_date",""), r.get("subunit_name",""),
+                    r.get("chain_ranges",""), r.get("mutations",""),
                 ])
     log_info(f"[ok] Wrote debug table: {out_dbg}")
 
