@@ -32,6 +32,9 @@ class ClusterConfig:
     assess_time_minutes: int = 240
     assess_mem_gb: int = 16
     assess_cpus: int = 4
+    control_path: Optional[str] = None
+    control_persist: int | str = 600
+    ensure_master: bool = True
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:
@@ -49,6 +52,11 @@ class ClusterConfig:
             value = getattr(self, attr)
             if isinstance(value, str) and value.strip():
                 setattr(self, attr, int(value))
+        if isinstance(self.control_persist, str) and self.control_persist.strip():
+            try:
+                self.control_persist = int(self.control_persist)
+            except ValueError:
+                pass
 
 
 @dataclass(slots=True)
@@ -155,6 +163,12 @@ def load_config() -> WebAppConfig:
         env_overrides.setdefault("cluster", {})["assess_mem_gb"] = assess_mem
     if assess_cpus := os.getenv("INITBINDER_ASSESS_CPUS"):
         env_overrides.setdefault("cluster", {})["assess_cpus"] = assess_cpus
+    if control_path := os.getenv("INITBINDER_SSH_CONTROL_PATH"):
+        env_overrides.setdefault("cluster", {})["control_path"] = control_path
+    if control_persist := os.getenv("INITBINDER_SSH_CONTROL_PERSIST"):
+        env_overrides.setdefault("cluster", {})["control_persist"] = control_persist
+    if ensure_master := os.getenv("INITBINDER_SSH_ENSURE_MASTER"):
+        env_overrides.setdefault("cluster", {})["ensure_master"] = ensure_master.lower() in {"1", "true", "yes"}
 
     merged = _deep_update(merged, env_overrides)
     return _config_from_dict(merged)

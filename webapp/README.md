@@ -76,6 +76,9 @@ cluster:
   assess_time_minutes: 240               # walltime for assessment sbatch
   assess_mem_gb: 16
   assess_cpus: 4
+  control_path: ~/.ssh/cm-initbinder     # optional explicit SSH control socket
+  control_persist: 600                  # seconds to keep control master alive
+  ensure_master: true
   mock: false
 background_concurrency: 4
 ```
@@ -87,6 +90,7 @@ Environment overrides:
 - `INITBINDER_REMOTE_ROOT`
 - `INITBINDER_CLUSTER_MOCK` (set to `true` for local dry-run)
 - `INITBINDER_ASSESS_PARTITION`, `INITBINDER_ASSESS_ACCOUNT`, `INITBINDER_ASSESS_TIME_MINUTES`, `INITBINDER_ASSESS_MEM_GB`, `INITBINDER_ASSESS_CPUS`
+- `INITBINDER_SSH_CONTROL_PATH`, `INITBINDER_SSH_CONTROL_PERSIST`, `INITBINDER_SSH_ENSURE_MASTER`
 
 ### Cluster setup
 
@@ -98,8 +102,18 @@ Environment overrides:
       HostName login.mycluster.edu
       User your_username
       Port 22
+      ControlMaster auto
+      ControlPath ~/.ssh/cm-initbinder-%r@%h:%p
+      ControlPersist 10m
   ```
-- **Password-based logins** – non-key authentication will trigger interactive prompts the first time `ssh` is used. Before starting the UI server, open a persistent control master or login once (e.g. `ssh -fN rfacluster`) so subsequent commands reuse the authenticated connection. Tools like `sshpass` are discouraged; prefer SSH keys or control sockets.
+  Establish the control socket once per session (you will be prompted for your password or key the first time):
+
+  ```bash
+  ssh rfacluster -MNf
+  ```
+
+  All subsequent `ssh`/`rsync` calls from the UI reuse this connection automatically.
+- **Password-based logins** – if you cannot use keys, rely on the control master above so you only enter your password once per session. Tools like `sshpass` are discouraged; prefer SSH keys or control sockets.
 - **Environment modules** – ensure the remote environment can execute `python manage_rfa.py ...` and `sbatch`. The assessment helper creates jobs under `slurm_logs/` within the remote repository.
 - **Automatic assessment** – after the RFdiffusion/MPNN/AF3 stage scripts are submitted, the UI schedules an additional `assess-rfa-all` sbatch job with dependencies on the final AF3 tasks. Configure the CPU partition/memory knobs above to match your cluster policies.
 

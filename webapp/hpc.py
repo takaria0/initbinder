@@ -30,7 +30,16 @@ class ClusterClient:
         self._mock_root = app_cfg.paths.workspace_root / ".cluster-mock" if app_cfg.paths.workspace_root else Path(".cluster-mock")
         if self.cfg.mock:
             self._mock_root.mkdir(parents=True, exist_ok=True)
-        print(f"[cluster] init -> local_root={self.local_root} remote_root={self.cfg.remote_root} mock={self.cfg.mock}", flush=True)
+        target_alias = self.cfg.as_ssh_target() or "cluster"
+        sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", target_alias)
+        if self.cfg.control_path:
+            self.control_path = Path(self.cfg.control_path).expanduser()
+        else:
+            self.control_path = (Path.home() / ".ssh" / f"cm-initbinder-{sanitized}").expanduser()
+        self.control_persist = str(self.cfg.control_persist or "600")
+        self.ensure_master = getattr(self.cfg, "ensure_master", True)
+        self._master_checked = False
+        print(f"[cluster] init -> local_root={self.local_root} remote_root={self.cfg.remote_root} mock={self.cfg.mock} control_path={self.control_path}", flush=True)
 
     def _run(self, cmd: Iterable[str], *, check: bool = True) -> CommandResult:
         cmd_list = list(cmd)
@@ -43,6 +52,35 @@ class ClusterClient:
         if process.stderr:
             print(f"[cluster] stderr: {process.stderr.strip()}", flush=True)
         return CommandResult(process.returncode, process.stdout, process.stderr)
+
+    def _control_args(self, *, include_persist: bool = False) -> list[str]:
+        if not self.control_path:
+            return []
+        args = ["-o", f"ControlPath={self.control_path}", "-o", "ControlMaster=auto"]
+        if include_persist and self.control_persist:
+            args.extend(["-o", f"ControlPersist={self.control_persist}"])
+        return args
+
+    def _ensure_master(self) -> None:
+        if self.cfg.mock or not self.ensure_master:
+            return
+        if self._master_checked:
+            return
+        self.control_path.parent.mkdir(parents=True, exist_ok=True)
+        check_cmd = ["ssh", *self._control_args(include_persist=True), "-O", "check", self._ssh_target()]
+        result = subprocess.run(check_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            hint = "ssh " + " ".join(self._control_args(include_persist=True) + ["-MNf", self._ssh_target()])
+            raise RuntimeError(
+                "SSH control master not active. Run `" + hint + "` once in another terminal to establish the connection"
+            )
+        self._master_checked = True
+        # Record the last probe time under a well-known file
+        try:
+            self.control_path.parent.mkdir(parents=True, exist_ok=True)
+            (self.control_path.parent / "cluster_ready").write_text(datetime.utcnow().isoformat())
+        except Exception:
+            pass
 
     # -- path helpers -----------------------------------------------------
     def _resolve_remote(self, relative: Path) -> Path:
@@ -79,8 +117,11 @@ class ClusterClient:
 
         remote_path = self._resolve_remote(remote_relative)
         target = f"{self._ssh_target()}:{remote_path}"
+        self._ensure_master()
+        ssh_cmd = ["ssh", *self._control_args()]
+        ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
         print(f"[cluster] rsync_push {local} -> {target} delete={delete}", flush=True)
-        args = [self.cfg.rsync_path, "-az", str(local) + "/", str(target) + "/"]
+        args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, str(local) + "/", str(target) + "/"]
         if delete:
             args.insert(1, "--delete")
         return self._run(args)
@@ -107,7 +148,10 @@ class ClusterClient:
         if local.exists():
             shutil.rmtree(local)
         local.mkdir(parents=True, exist_ok=True)
-        args = [self.cfg.rsync_path, "-az", src, str(local) + "/"]
+        self._ensure_master()
+        ssh_cmd = ["ssh", *self._control_args()]
+        ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
+        args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, str(local) + "/"]
         return self._run(args)
 
     def ssh(self, command: str, *, check: bool = True, use_login_shell: bool = False) -> CommandResult:
@@ -115,7 +159,8 @@ class ClusterClient:
             return CommandResult(0, f"[mock ssh] {command}", "")
         if use_login_shell:
             command = f"bash -lc {shlex.quote(command)}"
-        args = ["ssh", self._ssh_target(), command]
+        self._ensure_master()
+        args = ["ssh", *self._control_args(), self._ssh_target(), command]
         print(f"[cluster] ssh -> {' '.join(args)}", flush=True)
         return self._run(args, check=check)
 
@@ -126,6 +171,7 @@ class ClusterClient:
             raise RuntimeError("remote_root not configured; set cluster.remote_root in cfg/webapp.yaml")
         remote_root = shlex.quote(str(self.cfg.remote_root))
         full_cmd = f"cd {remote_root} && {command}"
+        self._ensure_master()
         print(f"[cluster] run -> {full_cmd}", flush=True)
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
@@ -250,6 +296,44 @@ class ClusterClient:
         result = self.run(script, check=True)
         match = re.search(r"Submitted batch job (\d+)", result.stdout)
         return match.group(1) if match else None
+
+    def connection_status(self) -> dict[str, object]:
+        status: dict[str, object] = {
+            "mock": self.cfg.mock,
+            "control_path": str(self.control_path) if self.control_path else None,
+            "control_master": False,
+            "remote_root": str(self.cfg.remote_root) if self.cfg.remote_root else None,
+            "remote_root_exists": False,
+        }
+        if self.cfg.mock:
+            status.update({"control_master": True, "remote_root_exists": True, "details": "mock mode"})
+            return status
+
+        if not self.control_path:
+            status["message"] = "No control path configured"
+            return status
+
+        check_cmd = ["ssh", *self._control_args(include_persist=True), "-O", "check", self._ssh_target()]
+        result = subprocess.run(check_cmd, capture_output=True, text=True)
+        status["control_master"] = result.returncode == 0
+        if not status["control_master"]:
+            msg = (result.stderr or result.stdout or "Control master not active").strip()
+            status["message"] = msg
+            return status
+
+        if self.cfg.remote_root:
+            remote_root = shlex.quote(str(self.cfg.remote_root))
+            probe_cmd = [
+                "ssh",
+                *self._control_args(),
+                self._ssh_target(),
+                f"test -d {remote_root} && echo OK",
+            ]
+            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            status["remote_root_exists"] = "OK" in (probe.stdout or "")
+            if probe.stderr:
+                status["message"] = probe.stderr.strip()
+        return status
 
 
 __all__ = ["ClusterClient", "CommandResult"]

@@ -11,6 +11,7 @@ const state = {
 
 const el = {
   targetForm: document.querySelector('#target-form'),
+  clusterStatus: document.querySelector('#cluster-status'),
   pdbInput: document.querySelector('#pdb-id'),
   antigenInput: document.querySelector('#antigen-url'),
   forceCheckbox: document.querySelector('#force-refresh'),
@@ -74,6 +75,43 @@ function refreshRunLabel(force = false) {
   if (!el.designRunLabel) return;
   if (force || !el.designRunLabel.value) {
     el.designRunLabel.value = timestampString();
+  }
+}
+
+function setClusterStatus(mode, text) {
+  if (!el.clusterStatus) return;
+  el.clusterStatus.classList.remove('ok', 'warn', 'error');
+  if (mode) {
+    el.clusterStatus.classList.add(mode);
+  }
+  el.clusterStatus.textContent = text;
+}
+
+async function updateClusterStatus() {
+  if (!el.clusterStatus) return;
+  try {
+    const res = await fetch('/api/cluster/status');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const payload = await res.json();
+    if (payload.mock) {
+      setClusterStatus('ok', 'Cluster: mock mode (no remote execution)');
+      return;
+    }
+    if (payload.control_master) {
+      const remoteRoot = payload.remote_root || 'remote';
+      if (payload.remote_root_exists) {
+        setClusterStatus('ok', `Cluster: connected · ${remoteRoot}`);
+      } else {
+        setClusterStatus('warn', `Cluster: connected · missing ${remoteRoot}`);
+      }
+    } else {
+      const msg = payload.message || 'control master not active';
+      setClusterStatus('error', `Cluster: not connected · ${msg}`);
+    }
+  } catch (err) {
+    setClusterStatus('error', `Cluster: status unavailable (${err.message || err})`);
   }
 }
 
@@ -665,6 +703,8 @@ function initEventHandlers() {
 function init() {
   initEventHandlers();
   refreshRunLabel(true);
+  updateClusterStatus();
+  setInterval(updateClusterStatus, 15000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

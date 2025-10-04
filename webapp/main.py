@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .config import load_config
 from .hpc import ClusterClient
+from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
 from .models import (
     AlignmentResponse,
@@ -106,6 +107,15 @@ async def api_alignment(pdb_id: str) -> AlignmentResponse:
         vendor_sequence_length=payload.get("vendor_sequence_length", 0),
         chain_results=payload.get("results", []),
     )
+
+
+@app.get("/api/cluster/status")
+async def api_cluster_status() -> dict[str, object]:
+    try:
+        client = ClusterClient()
+        return client.connection_status()
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/targets/{pdb_id}/rankings", response_model=RankingResponse)
