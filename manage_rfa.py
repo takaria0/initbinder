@@ -693,6 +693,10 @@ def main():
                         help="If set, dispatch LLM scope to a GPU node via sbatch (A100:1, CPU:1).")
     p_scope.add_argument("--time_h", type=int, default=2, help="Walltime hours for GPU job (default: 2).")
     p_scope.add_argument("--mem_gb", type=int, default=16, help="Memory (GB) for GPU job (default: 16).")
+    p_scope.add_argument("--expected_epitopes", type=int, default=3,
+                        help="Require the LLM to return exactly this many epitopes (default: 3). Use <=0 to disable.")
+    p_scope.add_argument("--max_llm_retries", type=int, default=1,
+                        help="Maximum times to re-prompt the LLM when validation fails (default: 1).")
 
     p_prep = sub.add_parser("prep-target", help="Clean target PDB and create epitope masks.")
     p_prep.add_argument("pdb", help="Target PDB ID.")
@@ -851,9 +855,12 @@ def main():
     elif args.cmd == "decide-scope":
         if getattr(args, "submit", False):
             print("[info] dispatching LLM scope to GPU via sbatch …")
-            submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb)
+            submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb,
+                                 expected_epitopes=args.expected_epitopes,
+                                 max_llm_retries=args.max_llm_retries)
         else:
-            llm_scope(args.pdb)
+            llm_scope(args.pdb, expected_epitopes=args.expected_epitopes,
+                      max_llm_retries=args.max_llm_retries)
 
     elif args.cmd == "prep-target":
         prep_target(args.pdb, args.sasa_cutoff)

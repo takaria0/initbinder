@@ -323,7 +323,8 @@ def _ensure_epitopes_within_target_chains(
 
 def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int = 20,
               prefer_human: bool = True, prefer_reviewed: bool = True,
-              enforce_epitope_constraints: bool = True):
+              enforce_epitope_constraints: bool = True, expected_epitopes: int = 3,
+              max_llm_retries: int = 1):
     if not USE_LLM:
         print("[skip] LLM disabled. Please edit target.yaml manually.")
         return
@@ -428,35 +429,99 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     target_acc = target or choose_target_accession(bundle, prefer_human=prefer_human, prefer_reviewed=prefer_reviewed)
 
     prompt_template = (ROOT/"templates"/"scope_prompt.md").read_text()
-    
-    # Prepend all constraints to the main template
-    final_prompt = (
-        f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n{numbering_prompt}"
-        + prompt_template.format(
+
+    base_prompt_prefix = f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n{numbering_prompt}".strip()
+
+    def _compose_prompt(extra_block: str) -> str:
+        prefix = base_prompt_prefix
+        if prefix:
+            prefix = prefix + "\n\n"
+        if extra_block:
+            prefix = prefix + extra_block.strip() + "\n\n"
+        return prefix + prompt_template.format(
             meta=json.dumps(meta, indent=2),
             uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else ""),
-            chain_constraints="" # This placeholder is now handled by the prepended prompts
+            chain_constraints=""
         )
-    )
-    (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
 
-    # === Call LLM ===
-    if _llm_provider != "gemini":
-        # Local model logic... (Assumed to be configured)
-        pass
+    retry_extra = ""
+    last_error: Optional[Exception] = None
+    draft = ""
+    cfg = None
+
+    for attempt in range(max(0, max_llm_retries) + 1):
+        final_prompt = _compose_prompt(retry_extra)
+        prompt_path = tdir/"reports"/f"scope_prompt_attempt_{attempt+1}.md"
+        prompt_path.write_text(final_prompt)
+
+        if _llm_provider != "gemini":
+            pass
+        else:
+            import google.generativeai as genai
+            genai.configure(api_key=GOOGLE_API_KEY)
+            model = genai.GenerativeModel(model_name=MODEL, system_instruction="You are a protein design assistant. Output exactly one YAML block.")
+            response = model.generate_content(final_prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
+            draft = (response.text or "").strip()
+
+        m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
+        if not m:
+            (tdir/"reports"/f"scope_draft_attempt_{attempt+1}.md").write_text(draft)
+            last_error = RuntimeError("No YAML block returned; see reports/scope_draft.md")
+            if attempt == max(0, max_llm_retries):
+                raise last_error
+            retry_extra = textwrap.dedent(
+                """
+                --- CRITICAL REMINDER: YAML OUTPUT REQUIRED ---
+                You must respond with exactly one YAML code block that conforms to the target schema.
+                Do not include free-form commentary outside the YAML block.
+                --- END CRITICAL REMINDER ---
+                """
+            )
+            continue
+
+        try:
+            cfg = yaml.safe_load(m.group(1)); validate(cfg, SCHEMA)
+        except Exception as exc:
+            last_error = exc
+            if attempt == max(0, max_llm_retries):
+                raise
+            retry_extra = textwrap.dedent(
+                """
+                --- CRITICAL REMINDER: YAML SCHEMA ---
+                The YAML must match the provided schema exactly. Ensure all required fields are present
+                and properly formatted before responding.
+                --- END CRITICAL REMINDER ---
+                """
+            )
+            continue
+
+        if expected_epitopes is not None and expected_epitopes > 0:
+            epi_list = cfg.get("epitopes") or []
+            if len(epi_list) != expected_epitopes:
+                last_error = ValueError(
+                    f"Expected {expected_epitopes} epitopes, but LLM returned {len(epi_list)}."
+                )
+                if attempt == max(0, max_llm_retries):
+                    raise last_error
+                retry_extra = textwrap.dedent(
+                    f"""
+                    --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
+                    You must propose exactly {expected_epitopes} epitopes. Update your selection so that the
+                    `epitopes` list contains exactly {expected_epitopes} entries.
+                    --- END CRITICAL REMINDER ---
+                    """
+                )
+                continue
+
+        # Success
+        (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
+        if draft:
+            (tdir/"reports"/"scope_draft.md").write_text(draft)
+        break
     else:
-        import google.generativeai as genai
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel(model_name=MODEL, system_instruction="You are a protein design assistant. Output exactly one YAML block.")
-        response = model.generate_content(final_prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
-        draft = (response.text or "").strip()
+        raise last_error or RuntimeError("LLM scope failed after retries.")
 
-    m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
-    if not m:
-        (tdir/"reports"/"scope_draft.md").write_text(draft)
-        raise RuntimeError("No YAML block returned; see reports/scope_draft.md")
-
-    cfg = yaml.safe_load(m.group(1)); validate(cfg, SCHEMA)
+    assert cfg is not None
 
     validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("target_chains")))
     if not validated_target_chains:
@@ -540,7 +605,9 @@ def submit_llm_scope_job(pdb_id: str, *, time_h: int = 2, mem_gb: int = 16,
                          partition: str = None, account: str = None, gpu_type: str = None,
                          target: Optional[str] = None, max_accessions: int = 20,
                          prefer_human: bool = True, prefer_reviewed: bool = True,
-                         enforce_epitope_constraints: bool = True):
+                         enforce_epitope_constraints: bool = True,
+                         expected_epitopes: int = 3,
+                         max_llm_retries: int = 1):
     # SLURM submission logic...
     pass
 
