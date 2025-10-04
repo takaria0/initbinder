@@ -10,7 +10,7 @@ class AlignmentMutation:
     vendor_position: int
     vendor_aa: str
     chain: str
-    chain_position: int
+    chain_position: str
     pdb_aa: str
     kind: str = "mismatch"
 
@@ -29,7 +29,7 @@ class AlignmentResult:
     vendor_range: Optional[tuple[int, int]]
     vendor_aligned_range: Optional[tuple[int, int]]
     vendor_overlap_range: Optional[tuple[int, int]]
-    chain_ranges: Dict[str, tuple[int, int]]
+    chain_ranges: Dict[str, tuple[str, str]]
     mutations: List[AlignmentMutation] = field(default_factory=list)
     score: float = 0.0
 
@@ -45,6 +45,7 @@ def align_vendor_to_chains(
     match_score: int = 2,
     mismatch_score: int = -1,
     gap_penalty: int = -2,
+    chain_residue_numbers: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[AlignmentResult]:
     vendor_seq_clean = _clean_sequence(vendor_seq)
     if not vendor_seq_clean:
@@ -53,6 +54,14 @@ def align_vendor_to_chains(
     chains_ordered = _prepare_chains(chain_sequences)
     if not chains_ordered:
         return []
+
+    residue_number_lookup: Dict[str, Sequence[str]] = {}
+    if chain_residue_numbers:
+        residue_number_lookup = {
+            str(k).strip().upper(): v
+            for k, v in chain_residue_numbers.items()
+            if v
+        }
 
     v_range = _normalize_range(vendor_range)
     vendor_len = len(vendor_seq_clean)
@@ -92,6 +101,7 @@ def align_vendor_to_chains(
                 chain_combo=combo_ids,
                 chain_sequences=chains_ordered,
                 combo_indices=combo,
+                chain_residue_numbers=residue_number_lookup,
             )
             if summary.aligned_length < min_req:
                 continue
@@ -245,6 +255,7 @@ def _summarize_alignment(
     chain_combo: tuple[str, ...],
     chain_sequences: Sequence[tuple[str, str]],
     combo_indices: Sequence[int],
+    chain_residue_numbers: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> AlignmentResult:
     matches = mismatches = gaps = 0
     vendor_index = 0
@@ -252,7 +263,7 @@ def _summarize_alignment(
     aligned_vendor_positions: List[int] = []
     vendor_positions_in_range: List[int] = []
     mutations: List[AlignmentMutation] = []
-    chain_ranges_raw: Dict[str, List[Optional[int]]] = {cid: [None, None] for cid in chain_combo}
+    chain_ranges_raw: Dict[str, List[Optional[str]]] = {cid: [None, None] for cid in chain_combo}
 
     chain_offsets = _build_chain_offsets(chain_sequences, combo_indices)
 
@@ -262,12 +273,19 @@ def _summarize_alignment(
         combo_gap = aa_combo == "-"
         chain_id = None
         chain_pos = None
+        residue_label = None
 
         if not vendor_gap:
             vendor_index += 1
         if not combo_gap:
             combo_index += 1
             chain_id, chain_pos = _locate_chain(chain_offsets, combo_index - 1)
+            if chain_id and chain_pos is not None:
+                mapping = (chain_residue_numbers or {}).get(chain_id)
+                if mapping and 0 <= chain_pos - 1 < len(mapping):
+                    residue_label = str(mapping[chain_pos - 1])
+                else:
+                    residue_label = str(chain_pos)
 
         if vendor_gap or combo_gap:
             if vendor_gap != combo_gap:
@@ -279,28 +297,27 @@ def _summarize_alignment(
         if vendor_range and vendor_range[0] <= vendor_index <= vendor_range[1]:
             vendor_positions_in_range.append(vendor_index)
 
-        if chain_id and chain_pos is not None:
+        if chain_id and residue_label is not None:
             start, end = chain_ranges_raw.get(chain_id, [None, None])
-            if start is None or chain_pos < start:
-                start = chain_pos
-            if end is None or chain_pos > end:
-                end = chain_pos
+            if start is None:
+                start = residue_label
+            end = residue_label
             chain_ranges_raw[chain_id] = [start, end]
 
         if aa_vendor == aa_combo:
             matches += 1
         else:
             mismatches += 1
-            if chain_id and chain_pos is not None:
+            if chain_id and residue_label is not None:
                 mutations.append(AlignmentMutation(
                     vendor_position=vendor_index,
                     vendor_aa=aa_vendor,
                     chain=chain_id,
-                    chain_position=chain_pos,
+                    chain_position=residue_label,
                     pdb_aa=aa_combo,
                 ))
 
-    chain_ranges: Dict[str, tuple[int, int]] = {}
+    chain_ranges: Dict[str, tuple[str, str]] = {}
     for cid, span in chain_ranges_raw.items():
         start, end = span
         if start is None or end is None:

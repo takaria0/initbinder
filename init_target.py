@@ -142,12 +142,14 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     config["antigen_catalog_url"] = antigen_url
 
     # Gather PDB chain sequences (debug)
-    pdb_sequences = {}
+    pdb_sequences: dict[str, str] = {}
+    pdb_residue_numbers: dict[str, list[str]] = {}
     if raw_pdb.exists():
-        pdb_sequences = _get_pdb_chain_sequences(raw_pdb)
+        pdb_sequences, pdb_residue_numbers = _get_pdb_chain_sequences(raw_pdb)
         if pdb_sequences:
             config.setdefault("sequences", {})
             config["sequences"]["pdb"] = pdb_sequences
+            config["sequences"]["pdb_residue_numbers"] = pdb_residue_numbers
             print(f"[ok] Extracted PDB AA sequences for {len(pdb_sequences)} chains.")
         else:
             print("[warn] No polymer sequences found in PDB file.")
@@ -259,11 +261,19 @@ def _alignment_result_to_yaml(aln: AlignmentResult) -> dict:
         "mutation_summary": mutation_summary,
     }
 
-def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
-    """Parses a PDB file and returns sequences for each polymer chain."""
+def _format_residue_id(residue) -> str:
+    resseq = residue.get_id()[1]
+    icode = residue.get_id()[2]
+    icode_str = icode.strip() if isinstance(icode, str) else ""
+    return f"{resseq}{icode_str}" if icode_str else str(resseq)
+
+
+def _get_pdb_chain_sequences(pdb_path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Parses a PDB file and returns sequences and residue numbering for each polymer chain."""
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("PDB_STRUCTURE", pdb_path)
     sequences: dict[str, str] = {}
+    residue_numbers: dict[str, list[str]] = {}
     for model in structure:
         for chain in model:
             chain_id = str(chain.id).strip()
@@ -271,16 +281,19 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> dict[str, str]:
                 continue
             norm_chain_id = chain_id.upper()
             seq = ""
+            resnums: list[str] = []
             for residue in chain:
                 if residue.get_id()[0] == ' ':
                     try:
                         seq += index_to_one(three_to_index(residue.get_resname()))
                     except (KeyError, ValueError):
                         seq += 'X'
+                    resnums.append(_format_residue_id(residue))
             if seq:
                 sequences[norm_chain_id] = seq
+                residue_numbers[norm_chain_id] = resnums
         break
-    return sequences
+    return sequences, residue_numbers
 
 def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
     """Return verification details with multi-chain alignment against the vendor construct."""
@@ -332,7 +345,7 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
     if not raw_pdb.exists():
         print(f"[fail] PDB file not found at {raw_pdb}. Cannot perform verification.")
         return None
-    pdb_sequences = _get_pdb_chain_sequences(raw_pdb)
+    pdb_sequences, pdb_residue_numbers = _get_pdb_chain_sequences(raw_pdb)
     if not pdb_sequences:
         print("[fail] No polymer sequences found in PDB file.")
         return None
@@ -355,6 +368,7 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         vendor_range=vendor_range,
         max_chain_combo=3,
         min_alignment_length=10,
+        chain_residue_numbers=pdb_residue_numbers,
     )
     if not alignments:
         print("[fail] No chain combination aligned to the vendor construct with sufficient coverage.")
