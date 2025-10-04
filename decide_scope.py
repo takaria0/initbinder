@@ -4,7 +4,7 @@
 import os, re, json, time, textwrap, shutil, subprocess, requests, yaml
 from pathlib import Path
 from jsonschema import validate
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 # ====== project utils/env ======
 from utils import _ensure_dir, ROOT, SCHEMA, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB, \
@@ -223,6 +223,64 @@ def _remove_parentheses_from_yaml(yaml_data):
     elif isinstance(yaml_data, list):
         for item in yaml_data: _remove_parentheses_from_yaml(item)
 
+
+_RESIDUE_CHAIN_RE = re.compile(r"([A-Za-z0-9])\s*:")
+
+
+def _extract_residue_chains(residue_entries: List[str]) -> Set[str]:
+    chains: Set[str] = set()
+    for entry in residue_entries:
+        if not isinstance(entry, str):
+            raise ValueError(f"Residue entry must be a string like 'A:123-130'; got {entry!r}")
+        matches = list(_RESIDUE_CHAIN_RE.finditer(entry))
+        if not matches:
+            raise ValueError(
+                f"Residue specification '{entry}' is missing a chain prefix like 'A:123-130'."
+            )
+        for match in matches:
+            chains.add(match.group(1).upper())
+    return chains
+
+
+def _ensure_epitopes_within_target_chains(cfg: dict, allowed_chains: Set[str]) -> None:
+    if not allowed_chains:
+        return
+
+    allowed_display = ", ".join(sorted(allowed_chains)) or "(none)"
+
+    for field in ("chains", "target_chains"):
+        field_chains = set(_normalize_chain_ids(cfg.get(field)))
+        invalid = field_chains - allowed_chains
+        if invalid:
+            invalid_display = ", ".join(sorted(invalid))
+            raise ValueError(
+                f"LLM output sets '{field}' to include chain(s) [{invalid_display}] which are not in the validated "
+                f"antigen-supported set [{allowed_display}]. Please adjust the prompt or edit the YAML manually."
+            )
+
+    violations = []
+    for epitope in cfg.get("epitopes") or []:
+        residues = epitope.get("residues") or []
+        if not residues:
+            continue
+        epitope_chains = _extract_residue_chains(residues)
+        disallowed = epitope_chains - allowed_chains
+        if disallowed:
+            violations.append((epitope.get("name") or "<unnamed>", residues, epitope_chains, disallowed))
+
+    if violations:
+        lines = []
+        for name, residues, chains, disallowed in violations:
+            lines.append(
+                f"Epitope '{name}' uses residues {residues} spanning chains {', '.join(sorted(chains))}; "
+                f"disallowed subset: {', '.join(sorted(disallowed))}."
+            )
+        detail = " ".join(lines)
+        raise ValueError(
+            "Proposed epitopes target chains outside the vendor-validated antigen sequence. "
+            f"Allowed chains: [{allowed_display}]. {detail}"
+        )
+
 # =============================================================================
 # Core: LLM scope (multi-UniProt + extracellular filter)
 # =============================================================================
@@ -315,10 +373,20 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         raise RuntimeError("No YAML block returned; see reports/scope_draft.md")
 
     cfg = yaml.safe_load(m.group(1)); validate(cfg, SCHEMA)
+
+    validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("target_chains")))
+    if not validated_target_chains:
+        validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("chains")))
+    _ensure_epitopes_within_target_chains(cfg, validated_target_chains)
     if not cfg.get("chains"):
         if target_acc:
             auto_chains = select_chains_by_uniprot(tdir, target_acc)
             if auto_chains:
+                if validated_target_chains and set(auto_chains) - validated_target_chains:
+                    raise ValueError(
+                        f"Auto-selected chains {auto_chains} (via UniProt {target_acc}) fall outside the validated "
+                        f"antigen-supported set {sorted(validated_target_chains)}. Please reconcile target chains before proceeding."
+                    )
                 cfg["chains"] = auto_chains
                 print(f"[info] Auto-selected chains by UniProt({target_acc}): {auto_chains}")
 
