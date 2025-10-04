@@ -427,6 +427,20 @@ def _sanitize_token(token: Optional[str], fallback: str) -> str:
     return cleaned[:180] or fallback
 
 
+def _make_epitope_prefix(epitope: Optional[str]) -> str:
+    if not epitope:
+        return "EPI"
+    tokens = [t for t in re.split(r"[^A-Za-z0-9]+", epitope) if t]
+    if not tokens:
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "", epitope)
+        return (cleaned[:4] or "EPI").upper()
+    initials = "".join(t[0] for t in tokens if t)
+    if initials:
+        return initials[:4].upper()
+    joined = "".join(tokens)
+    return (joined[:4] or "EPI").upper()
+
+
 def _ensure_copied(src: Path, dst: Path) -> None:
     if dst.exists():
         dst.unlink()
@@ -558,7 +572,8 @@ def export_pymol_gallery_bundle(
 
     for idx, row in enumerate(picks, start=1):
         design_name, _ = get_name_and_aa(row)
-        design_label = design_name or pick_first_nonempty(row, ["design","name","id"]) or f"design_{idx:03d}"
+        prefixed_override = row.get("_prefixed_name") if isinstance(row, dict) else None
+        design_label = prefixed_override or design_name or pick_first_nonempty(row, ["design","name","id"]) or f"design_{idx:03d}"
 
         af3_src = _resolve_path_from_row(row, AF3_MODEL_PATH_KEYS, rankings_dir)
         rfd_src = _resolve_path_from_row(row, RFDIFF_MODEL_PATH_KEYS, rankings_dir)
@@ -1091,7 +1106,7 @@ def main():
     rankings_dir = rankings_path.parent
     restriction_alerts: List[Tuple[str, str]] = []
 
-    for r in picks:
+    for idx, r in enumerate(picks, start=1):
         name, aa = get_name_and_aa(r)
         if not name or not aa:
             continue
@@ -1117,6 +1132,11 @@ def main():
         binder_rmsd = get_optional_float(r, ["binder_rmsd"])
         binder_rmsd_diego = get_optional_float(r, ["binder_rmsd_diego"])
         epitope = pick_first_nonempty(r, ["epitope","hotspot","target_site"]) or ""
+        epitope_prefix = _make_epitope_prefix(epitope)
+        display_name = _sanitize_token(f"{idx:03d}_{epitope_prefix}_{name}", f"{idx:03d}_{name}")
+        r["_prefixed_name"] = display_name
+        r["_epitope_prefix"] = epitope_prefix
+        r["_original_name"] = name
         despath = detect_design_path(r, rankings_dir)
 
         restriction_hits = detect_internal_restriction_sites(dna_full, len(pre), len(dna_core))
@@ -1124,29 +1144,31 @@ def main():
             f"{enzyme}@{pos+1}({motif})" for enzyme, motif, pos in restriction_hits
         )
         if restriction_info:
-            restriction_alerts.append((name, restriction_info))
+            restriction_alerts.append((display_name, restriction_info))
         restriction_flag = restriction_info if restriction_info else "OK"
 
         # FASTA
         aa_fasta_lines += [
-            f">{name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}|"
+            f">{display_name}|orig={name}|len={len(aa)}|epitope={epitope}|iptm={iptm if iptm is not None else 'NA'}|"
             f"ipSAE_min={ipsae_min if ipsae_min is not None else 'NA'}|"
             f"binder_rmsd={binder_rmsd if binder_rmsd is not None else 'NA'}|"
             f"binder_rmsd_diego={binder_rmsd_diego if binder_rmsd_diego is not None else 'NA'}",
             aa,
         ]
         dna_fasta_lines += [
-            f">{name}|len_nt={len(dna_full)}|gc={gc_full:.3f}|prefix={len(pre)}|suffix={len(suf)}|"
+            f">{display_name}|orig={name}|len_nt={len(dna_full)}|gc={gc_full:.3f}|prefix={len(pre)}|suffix={len(suf)}|"
             f"restriction={restriction_flag}",
             dna_full,
         ]
 
         # Plate
-        names_and_dna_for_plate.append((name, dna_full))
+        names_and_dna_for_plate.append((display_name, dna_full))
 
         # CSV row
         csv_rows.append({
-            "name": name,
+            "name": display_name,
+            "original_name": name,
+            "epitope_prefix": epitope_prefix,
             "aa_len": len(aa),
             "aa_seq": aa,
             "codon_host": args.codon_host,
@@ -1207,6 +1229,8 @@ def main():
             df_info = pd.DataFrame({
                 "Well Position": wells,
                 "Name": names,
+                "original_name": [info_map.get(n,{}).get("original_name","") for n in names],
+                "epitope_prefix": [info_map.get(n,{}).get("epitope_prefix","") for n in names],
                 "gc_full": [info_map.get(n,{}).get("gc_full","") for n in names],
                 "iptm":    [info_map.get(n,{}).get("iptm","") for n in names],
                 "binder_rmsd": [info_map.get(n,{}).get("binder_rmsd","") for n in names],
