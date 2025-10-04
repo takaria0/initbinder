@@ -8,8 +8,9 @@ import shlex
 import textwrap
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from .config import ClusterConfig, load_config
 
@@ -117,10 +118,35 @@ class ClusterClient:
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
     # -- high-level helpers ----------------------------------------------
-    def sync_target(self, pdb_id: str, *, delete: bool = False) -> CommandResult:
+    def sync_target(self, pdb_id: str, *, delete: bool = False) -> Tuple[CommandResult, Optional[str]]:
         local_dir = (self.local_root / "targets" / pdb_id.upper()).resolve()
         rel = Path("targets") / pdb_id.upper()
-        return self.rsync_push(local_dir, rel, delete=delete)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_rel: Optional[Path] = None
+
+        if self.cfg.mock:
+            dest = (self._mock_root / rel).resolve()
+            if dest.exists():
+                backup = dest.parent / f"{dest.name}_{timestamp}"
+                if backup.exists():
+                    shutil.rmtree(backup)
+                dest.rename(backup)
+                backup_rel = Path("mock") / backup.relative_to(self._mock_root)
+        else:
+            self.run(f"mkdir -p {shlex.quote(str(rel.parent))}", check=True)
+            exists_result = self.run(
+                f"if [ -d {shlex.quote(str(rel))} ]; then echo 1; fi",
+                check=False,
+            )
+            if exists_result.stdout.strip():
+                backup_rel = rel.parent / f"{rel.name}_{timestamp}"
+                self.run(
+                    f"mv {shlex.quote(str(rel))} {shlex.quote(str(backup_rel))}",
+                    check=True,
+                )
+
+        result = self.rsync_push(local_dir, rel, delete=delete)
+        return result, str(backup_rel) if backup_rel else None
 
     def sync_tools(self) -> CommandResult:
         local_dir = (self.local_root / "tools").resolve()

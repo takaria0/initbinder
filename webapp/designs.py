@@ -6,6 +6,7 @@ import json
 import math
 import re
 import shlex
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -16,24 +17,9 @@ from .config import load_config
 from .hpc import ClusterClient
 from .job_store import JobStatus, JobStore
 from .models import DesignRunRequest
-from .pipeline import run_manage_rfa
 
 _LAUNCH_PATH_RE = re.compile(r"\[ok] Wrote launcher: (?P<path>.*)")
 _JOB_ECHO_RE = re.compile(r"^\[JOB] (?P<var>[A-Za-z0-9_]+)=(?P<jid>\d+)")
-
-
-def _instrument_launcher(script_path: Path) -> None:
-    lines = script_path.read_text().splitlines()
-    patched: List[str] = []
-    assign_pattern = re.compile(r'^([A-Za-z0-9_]+)=\$\(\s*sbatch\b')
-    for line in lines:
-        patched.append(line)
-        stripped = line.strip()
-        m = assign_pattern.match(stripped)
-        if m:
-            var_name = m.group(1)
-            patched.append(f'echo "[JOB] {var_name}=${{{var_name}}}"')
-    script_path.write_text("\n".join(patched) + "\n")
 
 
 def _parse_launcher_path(log_lines: List[str]) -> Optional[Path]:
@@ -126,8 +112,7 @@ def _build_pipeline_args(
 
 
 def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_id: str) -> None:
-    job_store.update(job_id, status=JobStatus.RUNNING, message="Generating pipeline scripts")
-    log_buffer: List[str] = []
+    job_store.update(job_id, status=JobStatus.RUNNING, message="Preparing pipeline configuration")
 
     cfg = load_config()
     workspace = cfg.paths.workspace_root or cfg.paths.project_root
@@ -140,7 +125,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
 
     job_store.update(
         job_id,
-        message=f"Generating pipeline scripts ({len(arms)} arms)",
+        message=f"Syncing target to cluster ({len(arms)} arms)",
         details={
             "arms": arms,
             "designs_per_task": designs_per_task,
@@ -150,52 +135,94 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
     job_store.append_log(job_id, f"[designs_per_task] {designs_per_task}")
 
-    def _log(line: str) -> None:
-        log_buffer.append(line)
-        job_store.append_log(job_id, line)
-
-    args = _build_pipeline_args(request, arms, designs_per_task, run_label)
-    run_manage_rfa("pipeline", args, log=_log)
-
-    launcher = _parse_launcher_path(log_buffer)
-    if not launcher or not launcher.exists():
-        raise FileNotFoundError("Could not locate generated launcher script; check manage_rfa output")
-
-    _instrument_launcher(launcher)
-    job_store.update(job_id, message=f"Launcher instrumented: {launcher}")
-
-    try:
-        rel_path = launcher.relative_to(workspace)
-    except ValueError as exc:
-        raise RuntimeError(f"Launcher {launcher} is outside workspace root {workspace}") from exc
-
     cluster = ClusterClient()
-    job_store.update(job_id, message="Syncing target folder to cluster")
-    cluster.sync_target(request.pdb_id)
-    job_store.append_log(job_id, "[sync] target directory copied")
-    job_store.update(job_id, message="Syncing tools to cluster")
-    cluster.sync_tools()
-    job_store.append_log(job_id, "[sync] tools directory copied")
-
-    remote_path = cluster.remote_path(rel_path)
-    job_store.update(job_id, message=f"Submitting SLURM pipeline via {remote_path}")
-    result = cluster.run(f"bash {shlex.quote(str(remote_path))}")
-    if result.stderr:
-        job_store.append_log(job_id, result.stderr)
-    if result.stdout:
-        for line in result.stdout.splitlines():
+    sync_result, backup_rel = cluster.sync_target(request.pdb_id)
+    if backup_rel:
+        job_store.append_log(job_id, f"[sync] Remote target backup → {backup_rel}")
+    if sync_result.stdout:
+        for line in sync_result.stdout.splitlines():
             job_store.append_log(job_id, line)
+    if sync_result.stderr:
+        err = sync_result.stderr.strip()
+        if err:
+            job_store.append_log(job_id, err)
+
+    job_store.update(job_id, message="Syncing tools to cluster")
+    tools_result = cluster.sync_tools()
+    if tools_result.stdout:
+        for line in tools_result.stdout.splitlines():
+            job_store.append_log(job_id, line)
+    if tools_result.stderr:
+        err = tools_result.stderr.strip()
+        if err:
+            job_store.append_log(job_id, err)
+
+    pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label)
+    remote_cmd = shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
+    job_store.update(job_id, message="Generating pipeline scripts on cluster")
+    pipeline_result = cluster.run(remote_cmd)
+
+    log_buffer: List[str] = []
+    if pipeline_result.stdout:
+        for line in pipeline_result.stdout.splitlines():
+            job_store.append_log(job_id, line)
+            log_buffer.append(line)
+    if pipeline_result.stderr:
+        for line in pipeline_result.stderr.splitlines():
+            job_store.append_log(job_id, line)
+            log_buffer.append(line)
+
+    launcher_path = None
+    if log_buffer:
+        launcher = _parse_launcher_path(log_buffer)
+        if launcher:
+            launcher_path = str(launcher)
+    if not launcher_path:
+        raise FileNotFoundError("Could not locate generated launcher script on the cluster; check manage_rfa output")
+
+    instrument_script = textwrap.dedent(
+        f"""
+        python - <<'PY'
+from pathlib import Path
+import re
+
+path = Path({launcher_path!r})
+lines = path.read_text().splitlines()
+assign_pattern = re.compile(r'^([A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
+patched = []
+for line in lines:
+    patched.append(line)
+    m = assign_pattern.match(line.strip())
+    if m:
+        var_name = m.group(1)
+        patched.append(f'echo "[JOB] {{var_name}}=${{{{var_name}}}}"')
+path.write_text("\n".join(patched) + "\n")
+PY
+        """
+    ).strip()
+    cluster.run(instrument_script, check=True)
+    job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
+
+    job_store.update(job_id, message="Submitting SLURM pipeline")
+    sbatch_result = cluster.run(f"bash {shlex.quote(launcher_path)}")
     job_ids: Dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        match = _JOB_ECHO_RE.match(line.strip())
-        if match:
-            job_ids[match.group("var")] = match.group("jid")
+    if sbatch_result.stdout:
+        for line in sbatch_result.stdout.splitlines():
+            job_store.append_log(job_id, line)
+            match = _JOB_ECHO_RE.match(line.strip())
+            if match:
+                job_ids[match.group("var")] = match.group("jid")
+    if sbatch_result.stderr:
+        err = sbatch_result.stderr.strip()
+        if err:
+            job_store.append_log(job_id, err)
+
     stage2_ids = [jid for key, jid in job_ids.items() if key.startswith("jid_af3s2") and jid]
     job_store.update(
         job_id,
         details={
             "job_ids": job_ids,
-            "remote_launch": str(remote_path),
+            "remote_launch": launcher_path,
             "assessment_dependencies": stage2_ids,
         },
     )

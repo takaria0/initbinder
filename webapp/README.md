@@ -5,7 +5,7 @@ End-to-end FastAPI + Vanilla JS interface for orchestrating the InitBinder antib
 ## Features
 
 - **Target bootstrap** – queue `init-target`, `decide-scope`, and `prep-target` in a single click; live log streaming with job status.
-- **Design orchestration** – submit multi-arm RFdiffusion → ProteinMPNN → AlphaFold3 batches to the cluster using the same heuristics as the CLI launcher.
+- **Design orchestration** – push local inputs to the cluster, run `manage_rfa.py pipeline` remotely, submit RFdiffusion → ProteinMPNN → AlphaFold3 SLURM jobs, and auto-schedule `assess-rfa-all` once AF3 completes.
 - **Results dashboard** – fetch latest AF3 rankings, explore sortable tables, and inspect ipTM vs RMSD scatter plots with interactive highlighting.
 - **PyMOL automation** – generate hotspot bundles and top-binder galleries (local or remote `pymol-remote` modes supported).
 - **Export utilities** – drive `export_files.py` directly from the UI to create FASTA/CSV/Excel order packets.
