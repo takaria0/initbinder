@@ -242,7 +242,12 @@ def _extract_residue_chains(residue_entries: List[str]) -> Set[str]:
     return chains
 
 
-def _ensure_epitopes_within_target_chains(cfg: dict, allowed_chains: Set[str]) -> None:
+def _ensure_epitopes_within_target_chains(
+    cfg: dict,
+    allowed_chains: Set[str],
+    *,
+    valid_residue_numbers: Optional[Dict[str, Set[int]]] = None,
+) -> None:
     if not allowed_chains:
         return
 
@@ -259,6 +264,9 @@ def _ensure_epitopes_within_target_chains(cfg: dict, allowed_chains: Set[str]) -
             )
 
     violations = []
+    residue_gaps = []
+    residue_lookup = valid_residue_numbers or {}
+
     for epitope in cfg.get("epitopes") or []:
         residues = epitope.get("residues") or []
         if not residues:
@@ -267,6 +275,26 @@ def _ensure_epitopes_within_target_chains(cfg: dict, allowed_chains: Set[str]) -
         disallowed = epitope_chains - allowed_chains
         if disallowed:
             violations.append((epitope.get("name") or "<unnamed>", residues, epitope_chains, disallowed))
+
+        for span in residues:
+            if not isinstance(span, str) or ':' not in span or '-' not in span:
+                continue
+            ch_raw, rng = span.split(":", 1)
+            ch = (ch_raw or "").strip().upper()
+            if ch not in residue_lookup:
+                continue
+            try:
+                start_str, end_str = rng.split("-", 1)
+                start_i, end_i = int(start_str), int(end_str)
+            except ValueError:
+                continue
+            if start_i > end_i:
+                start_i, end_i = end_i, start_i
+            valid_nums = residue_lookup.get(ch, set())
+            missing_positions = [pos for pos in range(start_i, end_i + 1) if pos not in valid_nums]
+            if missing_positions:
+                gap_preview = ",".join(str(pos) for pos in missing_positions[:5])
+                residue_gaps.append((epitope.get("name") or "<unnamed>", span, ch, gap_preview))
 
     if violations:
         lines = []
@@ -280,6 +308,14 @@ def _ensure_epitopes_within_target_chains(cfg: dict, allowed_chains: Set[str]) -
             "Proposed epitopes target chains outside the vendor-validated antigen sequence. "
             f"Allowed chains: [{allowed_display}]. {detail}"
         )
+
+    if residue_gaps:
+        msgs = []
+        for name, span, ch, preview in residue_gaps:
+            msgs.append(
+                f"Epitope '{name}' references {span} on chain {ch}, but residues {preview} are not present in the prepared PDB numbering."
+            )
+        raise ValueError("One or more epitope residue ranges do not exist in the validated PDB chains. " + " ".join(msgs))
 
 # =============================================================================
 # Core: LLM scope (multi-UniProt + extracellular filter)
@@ -377,18 +413,46 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
     validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("target_chains")))
     if not validated_target_chains:
         validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("chains")))
-    _ensure_epitopes_within_target_chains(cfg, validated_target_chains)
-    if not cfg.get("chains"):
-        if target_acc:
-            auto_chains = select_chains_by_uniprot(tdir, target_acc)
-            if auto_chains:
-                if validated_target_chains and set(auto_chains) - validated_target_chains:
-                    raise ValueError(
-                        f"Auto-selected chains {auto_chains} (via UniProt {target_acc}) fall outside the validated "
-                        f"antigen-supported set {sorted(validated_target_chains)}. Please reconcile target chains before proceeding."
-                    )
-                cfg["chains"] = auto_chains
-                print(f"[info] Auto-selected chains by UniProt({target_acc}): {auto_chains}")
+
+    pdb_residue_numbers_cfg = ((cfg_from_yaml.get("sequences") or {}).get("pdb_residue_numbers") or {})
+    valid_residue_numbers: Dict[str, Set[int]] = {}
+    for chain_id, entries in pdb_residue_numbers_cfg.items():
+        norm_chain = str(chain_id).strip().upper()
+        numbers: Set[int] = set()
+        for token in entries or []:
+            token_str = str(token).strip()
+            match = re.match(r"^-?\d+", token_str)
+            if match:
+                numbers.add(int(match.group(0)))
+        if numbers:
+            valid_residue_numbers[norm_chain] = numbers
+
+    _ensure_epitopes_within_target_chains(
+        cfg,
+        validated_target_chains,
+        valid_residue_numbers=valid_residue_numbers,
+    )
+
+    if validated_target_chains:
+        expected_chains = sorted(validated_target_chains)
+        if cfg.get("chains"):
+            chains_from_llm = _normalize_chain_ids(cfg.get("chains"))
+            if set(chains_from_llm) != validated_target_chains:
+                raise ValueError(
+                    f"LLM returned chains {chains_from_llm}, but validated antigen chains are {expected_chains}."
+                )
+        cfg["chains"] = expected_chains
+
+    if not cfg.get("chains") and target_acc:
+        auto_chains = select_chains_by_uniprot(tdir, target_acc)
+        if auto_chains:
+            if validated_target_chains and set(auto_chains) - validated_target_chains:
+                raise ValueError(
+                    f"Auto-selected chains {auto_chains} (via UniProt {target_acc}) fall outside the validated "
+                    f"antigen-supported set {sorted(validated_target_chains)}. Please reconcile target chains before proceeding."
+                )
+            cfg["chains"] = auto_chains
+            print(f"[info] Auto-selected chains by UniProt({target_acc}): {auto_chains}")
 
     if cfg.get("chains"):
         cfg["chains"] = _normalize_chain_ids(cfg.get("chains"))
