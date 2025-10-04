@@ -24,6 +24,9 @@ python manage_rfa.py target-generation \
 
 1) Initialize a target directory (also writes a skeleton target.yaml if missing)
 python manage_rfa.py init-target 8SK7
+python manage_rfa.py init-target 5VLI --antigen_url https://www.sinobiological.com/recombinant-proteins/h1n1-hemagglutinin-ha-11055-v08b-b
+python manage_rfa.py decide-scope 5VLI
+
 
 # Example with verification:
 python manage_rfa.py init-target 6M17 \

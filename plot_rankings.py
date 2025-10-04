@@ -447,8 +447,8 @@ def main():
 
                 if metric_name == "Diego RMSD":
                     diego_vals = to_numeric(corr_df[col]).to_numpy(dtype=float)
-                    x_thr = args.rmsd_thresholds[0] if args.rmsd_thresholds else None
-                    y_thr = args.iptm_thresholds[0] if args.iptm_thresholds else None
+                    x_thr = 3.7 #
+                    y_thr = 0.8
                     plot_scatter_with_marginals(
                         diego_vals,
                         iptm_corr,
