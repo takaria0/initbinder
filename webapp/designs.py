@@ -160,7 +160,11 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, err)
 
     pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label)
-    remote_cmd = shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
+    binder_root = cluster.target_root or cluster.remote_root
+    if binder_root is None:
+        raise RuntimeError("Neither target_root nor remote_root configured on cluster; cannot run pipeline")
+    env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))}"
+    remote_cmd = f"{env_prefix} " + shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
     job_store.update(job_id, message="Generating pipeline scripts on cluster")
     job_store.append_log(job_id, f"[cmd] {remote_cmd}")
     pipeline_result = cluster.run(remote_cmd)

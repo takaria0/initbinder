@@ -39,7 +39,12 @@ class ClusterClient:
         self.control_persist = str(self.cfg.control_persist or "600")
         self.ensure_master = getattr(self.cfg, "ensure_master", True)
         self._master_checked = False
-        print(f"[cluster] init -> local_root={self.local_root} remote_root={self.cfg.remote_root} mock={self.cfg.mock} control_path={self.control_path}", flush=True)
+        self.remote_root = self.cfg.remote_root
+        self.target_root = self.cfg.target_root or self.remote_root
+        print(
+            f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}",
+            flush=True,
+        )
 
     def _run(self, cmd: Iterable[str], *, check: bool = True) -> CommandResult:
         cmd_list = list(cmd)
@@ -99,7 +104,7 @@ class ClusterClient:
         return target
 
     # -- rsync helpers ----------------------------------------------------
-    def rsync_push(self, local: Path, remote_relative: Path, *, delete: bool = False) -> CommandResult:
+    def rsync_push(self, local: Path, remote_relative: Path, *, delete: bool = False, remote_base: Optional[Path] = None) -> CommandResult:
         local = local.expanduser().resolve()
         if not local.exists():
             raise FileNotFoundError(local)
@@ -115,7 +120,10 @@ class ClusterClient:
             print(f"[cluster] rsync_push (mock) {local} -> {dest}", flush=True)
             return CommandResult(0, f"[mock] copied {local} -> {dest}", "")
 
-        remote_path = self._resolve_remote(remote_relative)
+        base = remote_base or self.remote_root
+        if base is None:
+            raise RuntimeError("remote_root not configured")
+        remote_path = Path(base) / remote_relative
         target = f"{self._ssh_target()}:{remote_path}"
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
@@ -126,7 +134,7 @@ class ClusterClient:
             args.insert(1, "--delete")
         return self._run(args)
 
-    def rsync_pull(self, remote_relative: Path, local: Path, *, delete: bool = False) -> CommandResult:
+    def rsync_pull(self, remote_relative: Path, local: Path, *, delete: bool = False, remote_base: Optional[Path] = None) -> CommandResult:
         local = local.expanduser().resolve()
         if self.cfg.mock:
             src = (self._mock_root / remote_relative).resolve()
@@ -140,7 +148,10 @@ class ClusterClient:
             print(f"[cluster] rsync_pull (mock) {src} -> {local}", flush=True)
             return CommandResult(0, f"[mock] copied {src} -> {local}", "")
 
-        remote_path = self._resolve_remote(remote_relative)
+        base = remote_base or self.remote_root
+        if base is None:
+            raise RuntimeError("remote_root not configured")
+        remote_path = Path(base) / remote_relative
         src = f"{self._ssh_target()}:{remote_path}/"
         local.parent.mkdir(parents=True, exist_ok=True)
         if delete and local.exists():
@@ -178,12 +189,16 @@ class ClusterClient:
     # -- high-level helpers ----------------------------------------------
     def sync_target(self, pdb_id: str, *, delete: bool = False) -> Tuple[CommandResult, Optional[str]]:
         local_dir = (self.local_root / "targets" / pdb_id.upper()).resolve()
+        rel_root = self.target_root or self.remote_root
+        if rel_root is None:
+            raise RuntimeError("target_root not configured; set cluster.target_root or remote_root")
         rel = Path("targets") / pdb_id.upper()
+        remote_rel = Path(rel)
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         backup_rel: Optional[Path] = None
 
         if self.cfg.mock:
-            dest = (self._mock_root / rel).resolve()
+            dest = (self._mock_root / remote_rel).resolve()
             if dest.exists():
                 backup = dest.parent / f"{dest.name}_{timestamp}"
                 if backup.exists():
@@ -192,20 +207,21 @@ class ClusterClient:
                 backup_rel = Path("mock") / backup.relative_to(self._mock_root)
                 print(f"[cluster] backup (mock) {dest} -> {backup}", flush=True)
         else:
-            self.run(f"mkdir -p {shlex.quote(str(rel.parent))}", check=True)
+            target_base = Path(rel_root)
+            self.run(f"mkdir -p {shlex.quote(str(target_base / rel.parent))}", check=True)
             exists_result = self.run(
-                f"if [ -d {shlex.quote(str(rel))} ]; then echo 1; fi",
+                f"if [ -d {shlex.quote(str(target_base / remote_rel))} ]; then echo 1; fi",
                 check=False,
             )
             if exists_result.stdout.strip():
-                backup_rel = rel.parent / f"{rel.name}_{timestamp}"
+                backup_rel = remote_rel.parent / f"{remote_rel.name}_{timestamp}"
                 self.run(
-                    f"mv {shlex.quote(str(rel))} {shlex.quote(str(backup_rel))}",
+                    f"mv {shlex.quote(str(target_base / remote_rel))} {shlex.quote(str(target_base / backup_rel))}",
                     check=True,
                 )
                 print(f"[cluster] backup {rel} -> {backup_rel}", flush=True)
 
-        result = self.rsync_push(local_dir, rel, delete=delete)
+        result = self.rsync_push(local_dir, remote_rel, delete=delete, remote_base=Path(rel_root))
         return result, str(backup_rel) if backup_rel else None
 
     def sync_tools(self) -> CommandResult:
@@ -220,7 +236,8 @@ class ClusterClient:
         else:
             rel = base_rel
         local_dest = (self.local_root / rel).resolve()
-        return self.rsync_pull(rel, local_dest)
+        base = self.target_root or self.remote_root
+        return self.rsync_pull(rel, local_dest, remote_base=Path(base) if base else None)
 
     def submit_assessment(
         self,
@@ -277,7 +294,9 @@ class ClusterClient:
             include_kw,
             "--skip_pml",
         ]
-        python_cmd = shlex.join(python_args)
+        binder_root = self.target_root or self.remote_root
+        env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))} " if binder_root else ""
+        python_cmd = env_prefix + shlex.join(python_args)
 
         script = textwrap.dedent(
             f"""
@@ -304,6 +323,8 @@ class ClusterClient:
             "control_master": False,
             "remote_root": str(self.cfg.remote_root) if self.cfg.remote_root else None,
             "remote_root_exists": False,
+            "target_root": str(self.target_root) if self.target_root else None,
+            "target_root_exists": False,
         }
         if self.cfg.mock:
             status.update({"control_master": True, "remote_root_exists": True, "details": "mock mode"})
@@ -333,6 +354,18 @@ class ClusterClient:
             status["remote_root_exists"] = "OK" in (probe.stdout or "")
             if probe.stderr:
                 status["message"] = probe.stderr.strip()
+        if self.target_root and self.target_root != self.cfg.remote_root:
+            target_root = shlex.quote(str(self.target_root))
+            probe_cmd = [
+                "ssh",
+                *self._control_args(),
+                self._ssh_target(),
+                f"test -d {target_root} && echo OK",
+            ]
+            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            status["target_root_exists"] = "OK" in (probe.stdout or "")
+            if probe.stderr:
+                status.setdefault("message", probe.stderr.strip())
         return status
 
 

@@ -20,6 +20,7 @@ class ClusterConfig:
     host: str = "rfacluster"
     user: Optional[str] = None
     remote_root: Optional[Path] = None
+    target_root: Optional[Path] = None
     ssh_config_alias: Optional[str] = None
     rsync_path: str = "rsync"
     sbatch_path: str = "sbatch"
@@ -48,6 +49,8 @@ class ClusterConfig:
     def __post_init__(self) -> None:
         if isinstance(self.remote_root, str):
             self.remote_root = Path(self.remote_root).expanduser()
+        if isinstance(self.target_root, str):
+            self.target_root = Path(self.target_root).expanduser()
         for attr in ("assess_time_minutes", "assess_mem_gb", "assess_cpus"):
             value = getattr(self, attr)
             if isinstance(value, str) and value.strip():
@@ -153,6 +156,8 @@ def load_config() -> WebAppConfig:
         env_overrides.setdefault("cluster", {})["ssh_config_alias"] = alias
     if mock := os.getenv("INITBINDER_CLUSTER_MOCK"):
         env_overrides.setdefault("cluster", {})["mock"] = mock.lower() in {"1", "true", "yes"}
+    if target_root := os.getenv("INITBINDER_TARGET_ROOT"):
+        env_overrides.setdefault("cluster", {})["target_root"] = target_root
     if assess_partition := os.getenv("INITBINDER_ASSESS_PARTITION"):
         env_overrides.setdefault("cluster", {})["assess_partition"] = assess_partition
     if assess_account := os.getenv("INITBINDER_ASSESS_ACCOUNT"):

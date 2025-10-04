@@ -69,7 +69,8 @@ paths:
   project_root: /Users/you/Projects/initbinder
 cluster:
   ssh_config_alias: rfacluster            # matches ~/.ssh/config host entry
-  remote_root: /pub/you/Projects/initbinder
+  remote_root: /data/homezvol1/you/Projects/initbinder   # code/launcher location
+  target_root: /pub/you/Projects/initbinder               # large design outputs
   pymol_path: pymol
   assess_partition: standard             # optional CPU partition for post-processing
   assess_account: bio_lab                # optional SLURM account
@@ -88,6 +89,7 @@ Environment overrides:
 - `INITBINDER_PROJECT_ROOT` / `INITBINDER_ROOT`
 - `INITBINDER_CLUSTER_ALIAS` / `INITBINDER_CLUSTER_HOST` / `INITBINDER_CLUSTER_USER`
 - `INITBINDER_REMOTE_ROOT`
+- `INITBINDER_TARGET_ROOT`
 - `INITBINDER_CLUSTER_MOCK` (set to `true` for local dry-run)
 - `INITBINDER_ASSESS_PARTITION`, `INITBINDER_ASSESS_ACCOUNT`, `INITBINDER_ASSESS_TIME_MINUTES`, `INITBINDER_ASSESS_MEM_GB`, `INITBINDER_ASSESS_CPUS`
 - `INITBINDER_SSH_CONTROL_PATH`, `INITBINDER_SSH_CONTROL_PERSIST`, `INITBINDER_SSH_ENSURE_MASTER`
@@ -109,7 +111,7 @@ Environment overrides:
   Establish the control socket once per session (you will be prompted for your password or key the first time):
 
   ```bash
-  ssh rfacluster -MNf
+ssh hpc3.rcic.uci.edu -MNf
   ```
 
   All subsequent `ssh`/`rsync` calls from the UI reuse this connection automatically.
