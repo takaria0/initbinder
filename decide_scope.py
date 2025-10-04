@@ -324,7 +324,7 @@ def _ensure_epitopes_within_target_chains(
 def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int = 20,
               prefer_human: bool = True, prefer_reviewed: bool = True,
               enforce_epitope_constraints: bool = True, expected_epitopes: int = 3,
-              max_llm_retries: int = 1):
+              max_llm_retries: int = 1, force: bool = False):
     if not USE_LLM:
         print("[skip] LLM disabled. Please edit target.yaml manually.")
         return
@@ -573,6 +573,11 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         cfg["chains"] = _normalize_chain_ids(cfg.get("chains"))
 
     base = cfg_from_yaml or {}
+
+    if not force and (base.get("epitopes") or []):
+        print("[warn] Existing epitopes detected and --force not set; skipping scope update.")
+        return
+
     base.update(cfg)
     if base.get("chains"):
         base["chains"] = _normalize_chain_ids(base.get("chains"))
@@ -607,7 +612,8 @@ def submit_llm_scope_job(pdb_id: str, *, time_h: int = 2, mem_gb: int = 16,
                          prefer_human: bool = True, prefer_reviewed: bool = True,
                          enforce_epitope_constraints: bool = True,
                          expected_epitopes: int = 3,
-                         max_llm_retries: int = 1):
+                         max_llm_retries: int = 1,
+                         force: bool = False):
     # SLURM submission logic...
     pass
 
