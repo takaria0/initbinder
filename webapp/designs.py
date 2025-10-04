@@ -187,30 +187,13 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     if not launcher_path:
         raise FileNotFoundError("Could not locate generated launcher script on the cluster; check manage_rfa output")
 
-    launcher_repr = repr(launcher_path)
-    instrument_script = textwrap.dedent(
-        f"""
-        python - <<'PY'
-import re
-from pathlib import Path
-
-path = Path({launcher_repr})
-lines = path.read_text().splitlines()
-assign_pattern = re.compile(r'^\s*(jid_[A-Za-z0-9_]+)=\$\(\s*sbatch\\b')
-patched = []
-for line in lines:
-    patched.append(line)
-    m = assign_pattern.match(line)
-    if m:
-        var_name = m.group(1)
-        patched.append(f'echo "[JOB] {{var_name}}=${{{{var_name}}}}"')
-path.write_text("\n".join(patched) + "\n")
-PY
-        """
-    ).strip()
-    job_store.append_log(job_id, f"[cmd] instrument launcher {launcher_path}")
-    cluster.run(instrument_script, check=True)
-    job_store.append_log(job_id, f"[instrument] Patched launcher {launcher_path}")
+    cat_cmd = f"cat {shlex.quote(launcher_path)}"
+    launcher_contents = cluster.run(cat_cmd).stdout or ""
+    script_order: List[str] = []
+    for line in launcher_contents.splitlines():
+        match = re.search(r"sbatch\s+([^\s|]+)", line)
+        if match:
+            script_order.append(match.group(1))
 
     job_store.update(job_id, message="Submitting SLURM pipeline")
     submit_cmd = f"conda deactivate >/dev/null 2>&1 || true; conda deactivate >/dev/null 2>&1 || true; bash {shlex.quote(launcher_path)}"
@@ -221,26 +204,22 @@ PY
     if sbatch_result.stdout:
         for line in sbatch_result.stdout.splitlines():
             job_store.append_log(job_id, line)
+        idx = 0
+        for line in sbatch_result.stdout.splitlines():
             match = re.search(r"Submitted batch job\s+(\d+)", line)
-            if match:
-                job_id_value = match.group(1)
-                job_store.append_log(job_id, f"[JOB] submitted={job_id_value}")
-                job_ids[f"job_{len(job_ids)+1}"] = job_id_value
-        # captured via instrumentation echo lines as well
+            if match and idx < len(script_order):
+                script_path = script_order[idx]
+                script_name = Path(script_path).name
+                jid = match.group(1)
+                job_ids[script_name] = jid
+                if "af3batch" in script_name:
+                    stage2_ids.append(jid)
+                job_store.append_log(job_id, f"[JOB] {script_name}={jid}")
+                idx += 1
     if sbatch_result.stderr:
         err = sbatch_result.stderr.strip()
         if err:
             job_store.append_log(job_id, err)
-
-    # Parse instrumentation echoes to map job IDs to script names
-    for line in sbatch_result.stdout.splitlines() if sbatch_result.stdout else []:
-        match = _JOB_ECHO_RE.match(line.strip())
-        if match:
-            script_key = match.group("var")
-            jid = match.group("jid")
-            job_ids[script_key] = jid
-            if script_key.startswith("jid_af3s2"):
-                stage2_ids.append(jid)
 
     job_store.update(
         job_id,
