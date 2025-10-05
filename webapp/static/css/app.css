@@ -67,7 +67,7 @@ main.app-shell {
 }
 
 #jobs-sidebar {
-  flex: 0 0 320px;
+  flex: 0 0 640px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -299,6 +299,26 @@ button.ghost:hover:not(:disabled) {
   gap: 12px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.assessment-controls {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.assessment-controls label {
+  margin: 0;
+}
+
+.assessment-advanced {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
 }
 
 .alignment-gap {

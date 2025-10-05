@@ -60,7 +60,7 @@
               <input id="target-name" type="text" placeholder="e.g. RBD">
             </label>
             <label for="target-epitopes">Number of epitopes
-              <input id="target-epitopes" type="number" min="1" max="32" placeholder="auto" autocomplete="off">
+              <input id="target-epitopes" type="number" min="1" max="32" value="3" autocomplete="off">
             </label>
           </div>
           <div class="flex-row advanced-row debug-only">
@@ -69,7 +69,7 @@
             <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
           </div>
           <div class="flex-row" style="margin-top: 16px;">
-            <button type="submit" id="target-submit">Queue Pipeline</button>
+            <button type="submit" id="target-submit">Run</button>
             <span class="badge" id="target-status-badge" hidden>Idle</span>
             <button type="button" id="pymol-hotspots" disabled>Launch hotspots in PyMOL</button>
           </div>
@@ -118,29 +118,33 @@
         </form>
       </section>
 
+        <section id="assessment-section">
+        <h2>Assessment</h2>
+        <div class="assessment-controls">
+          <label>
+            Run label
+            <input type="text" id="results-run-label" placeholder="latest" list="run-label-options">
+          </label>
+          <button type="button" id="assess-submit">Submit assess-all</button>
+        </div>
+        <div class="assessment-advanced debug-only">
+          <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
+          <button type="button" id="sync-results" class="debug-only">Download from cluster</button>
+          <p class="help-text">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
+        </div>
+      </section>
+
         <section id="results-section">
         <div class="results-header">
-          <h2>Assessment Results</h2>
+          <h2>Results</h2>
           <div class="results-controls">
             <span class="run-pill">Run <strong id="active-run-name">—</strong></span>
             <label>
               Row Limit
               <input type="number" id="results-limit" value="200" min="1">
             </label>
-            <button type="button" id="assess-submit">Submit assess-all</button>
           </div>
         </div>
-        <div class="results-advanced debug-only">
-          <label>
-            Run label
-            <input type="text" id="results-run-label" placeholder="latest" list="run-label-options">
-          </label>
-          <div class="button-row">
-            <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
-            <button type="button" id="sync-results" class="debug-only">Download from cluster</button>
-          </div>
-        </div>
-        <p class="help-text debug-only">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
         <datalist id="run-label-options"></datalist>
         <div id="run-history" class="run-history"></div>
         <div id="results-meta" class="badge" hidden></div>

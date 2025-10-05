@@ -1215,7 +1215,11 @@ async function launchHotspots() {
       throw new Error(detail.detail || `Failed with ${res.status}`);
     }
     const payload = await res.json();
-    showAlert(`Hotspot bundle ready at ${payload.bundle_path || 'temp directory'}`, false);
+    if (payload.launched) {
+      showAlert('Launching PyMOL hotspots viewer…', false);
+    } else {
+      showAlert(`Hotspot bundle ready at ${payload.bundle_path || 'temp directory'}`, false);
+    }
   } catch (err) {
     showAlert(err.message || String(err));
   } finally {

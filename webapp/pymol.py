@@ -51,6 +51,7 @@ def _launch_pymol(script_path: Path) -> None:
                 ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
             return
         except FileNotFoundError as exc:  # pragma: no cover - depends on environment
@@ -61,7 +62,12 @@ def _launch_pymol(script_path: Path) -> None:
             # Fall back to the configured binary so we can surface any useful error message from it.
             pass
     try:
-        subprocess.Popen([pymol_bin, str(script_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            [pymol_bin, str(script_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
         if sys.platform == "darwin":
             try:
@@ -69,6 +75,7 @@ def _launch_pymol(script_path: Path) -> None:
                     ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
                 return
             except Exception as mac_exc:  # pragma: no cover - best effort
