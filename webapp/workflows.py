@@ -54,7 +54,7 @@ def _get_export_executor() -> ThreadPoolExecutor:
         cfg = load_config()
         # Ensure at least one worker even if background_concurrency == 0.
         # Limit to a small number so exports cannot overwhelm the system.
-        workers = max(1, min(4, cfg.background_concurrency or 1))
+        workers = max(1, min(2, cfg.background_concurrency or 1))
         _export_executor = ThreadPoolExecutor(max_workers=workers)
     return _export_executor
 

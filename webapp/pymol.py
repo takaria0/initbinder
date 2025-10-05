@@ -50,7 +50,7 @@ def _launch_pymol(script_path: Path) -> None:
     if configured_path:
         candidates.append(configured_path)
     if sys.platform == "darwin":
-        candidates.append("/Applications/PyMOL.app/Contents/MacOS/PyMOL")
+        candidates.append("/Applications/PyMOL.app")
     candidates.append("pymol")
 
     last_error: Exception | None = None
