@@ -23,6 +23,7 @@ from .exporter import ExportError, run_export
 
 
 _executor: ThreadPoolExecutor | None = None
+_export_executor: ThreadPoolExecutor | None = None
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -31,6 +32,18 @@ def _get_executor() -> ThreadPoolExecutor:
         cfg = load_config()
         _executor = ThreadPoolExecutor(max_workers=cfg.background_concurrency)
     return _executor
+
+
+def _get_export_executor() -> ThreadPoolExecutor:
+    """Return a lightweight executor for short-lived export jobs."""
+    global _export_executor
+    if _export_executor is None:
+        cfg = load_config()
+        # Ensure at least one worker even if background_concurrency == 0.
+        # Limit to a small number so exports cannot overwhelm the system.
+        workers = max(1, min(4, cfg.background_concurrency or 1))
+        _export_executor = ThreadPoolExecutor(max_workers=workers)
+    return _export_executor
 
 
 def submit_target_initialization(request: TargetInitRequest, *,
@@ -89,7 +102,7 @@ def submit_export(request: ExportRequest, *, job_store: JobStore | None = None) 
         except Exception as exc:  # pragma: no cover - defensive
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
 
-    executor = _get_executor()
+    executor = _get_export_executor()
     executor.submit(_run)
     return job.job_id
 
