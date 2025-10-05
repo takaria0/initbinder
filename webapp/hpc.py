@@ -423,12 +423,12 @@ if base.exists():
     for item in items:
         stat = item.stat()
         rankings = item / "af3_rankings.tsv"
-        entries.append({
+        entries.append({{
             "run_label": item.name,
             "updated_at": stat.st_mtime,
             "has_rankings": rankings.exists(),
             "remote_path": str(item),
-        })
+        }})
 print(json.dumps(entries))
 PY
             """
