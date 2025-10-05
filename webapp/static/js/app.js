@@ -864,7 +864,23 @@ async function syncResultsFromCluster() {
       throw new Error(detail.detail || `Failed with ${res.status}`);
     }
     const payload = await res.json();
-    showAlert(payload.message || 'Synced results.', false);
+    console.group('[sync-results]');
+    console.info('PDB:', state.currentPdb);
+    console.info('Run label:', payload.run_label || runLabel || '(all)');
+    console.info('Remote path:', payload.remote_path || '(unknown)');
+    console.info('Local path:', payload.local_path || '(unknown)');
+    console.info('Exit code:', payload.exit_code);
+    if (payload.stdout) {
+      console.info('stdout:', payload.stdout);
+    }
+    if (payload.stderr) {
+      console.warn('stderr:', payload.stderr);
+    }
+    console.groupEnd();
+    const desc = [payload.message || 'Synced results.'];
+    if (payload.run_label) desc.push(`run ${payload.run_label}`);
+    if (payload.local_path) desc.push(`→ ${payload.local_path}`);
+    showAlert(desc.join(' · '), false);
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
     }

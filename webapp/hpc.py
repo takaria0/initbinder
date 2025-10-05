@@ -180,6 +180,10 @@ class ClusterClient:
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
+        print(
+            f"[cluster] rsync_pull {self._ssh_target()}:{remote_path} -> {local} delete={delete}",
+            flush=True,
+        )
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, str(local) + "/"]
         return self._run(args)
 
@@ -302,7 +306,19 @@ class ClusterClient:
             rel = base_rel
         local_dest = (self.local_root / rel).resolve()
         base = self.target_root or self.remote_root
-        return self.rsync_pull(rel, local_dest, remote_base=Path(base) if base else None)
+        remote_base = Path(base) if base else None
+        if not remote_base:
+            raise RuntimeError("Neither target_root nor remote_root configured; cannot sync assessments")
+        print(
+            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
+            flush=True,
+        )
+        result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
+        print(
+            f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
+            flush=True,
+        )
+        return result
 
     def submit_assessment(
         self,

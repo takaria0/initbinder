@@ -232,6 +232,14 @@ async def api_pymol_top_binders(pdb_id: str, payload: PyMolTopBindersRequest) ->
 @app.post("/api/targets/{pdb_id}/sync")
 async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> dict[str, object]:
     client = ClusterClient()
+    base_rel = Path("targets") / pdb_id.upper() / "designs"
+    if run_label:
+        rel = base_rel / "_assessments" / run_label
+    else:
+        rel = base_rel
+    local_path = (client.local_root / rel).resolve()
+    remote_root = client.target_root or client.remote_root
+    remote_path = Path(remote_root) / rel if remote_root else None
     try:
         result = client.sync_assessments_back(pdb_id, run_label=run_label)
     except Exception as exc:  # pragma: no cover - depends on cluster
@@ -240,6 +248,10 @@ async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> dic
         "message": "Synced assessments from cluster",
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "run_label": run_label,
+        "local_path": str(local_path),
+        "remote_path": str(remote_path) if remote_path else None,
+        "exit_code": result.exit_code,
     }
 
 
