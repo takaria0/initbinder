@@ -196,7 +196,7 @@ function renderRunHistory(pdbId) {
   if (!runs.length) {
     el.runHistory.textContent = 'No assessments found locally or on the cluster.';
     if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = true;
-    if (el.syncResultsBtn) el.syncResultsBtn.disabled = true;
+    if (el.syncResultsBtn) el.syncResultsBtn.disabled = !state.currentPdb;
   } else {
     const frag = document.createDocumentFragment();
     const selected = el.resultsRunLabel ? el.resultsRunLabel.value.trim() : '';
