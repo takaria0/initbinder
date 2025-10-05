@@ -816,6 +816,8 @@ def main():
         help="If set, keep glycans when cropping.")
     p_pipe.add_argument("--run_tag", default=os.environ.get("RUN_TAG"),
                     help="Run label to isolate outputs, e.g. 20250828a")
+    p_pipe.add_argument("--run_assess", action="store_true",
+                        help="If set, schedule assess-rfa-all after AF3 jobs finish.")
 
     p_follow = sub.add_parser("followup", help="Pick top arms from latest AF3 TSV and rerun RFdiffusion→MPNN→AF3.")
     p_follow.add_argument("pdb"); p_follow.add_argument("--total", type=int, default=1000)
@@ -1187,6 +1189,36 @@ def main():
         model_seeds = args.model_seeds or list(range(1, 11))
         print("[plan] pipeline:", ", ".join(f"{e}@{v}={n}" for (e,v),n in zip(arms,allocs)))
 
+        assess_job_info = None
+        assess_job_script: Path | None = None
+        assess_job_id: str | None = None
+        assess_run_label: str | None = None
+        stage2_job_ids: list[str] = []
+        if args.run_assess:
+            assess_run_label = args.run_tag or time.strftime("pipeline_%Y%m%d_%H%M%S")
+            assess_include_kw = args.run_tag or assess_run_label
+            assess_job_info = _write_assess_rfa_all_sbatch(
+                args.pdb,
+                binder_chain_id=args.binder_chain_id,
+                run_label=assess_run_label,
+                include_keyword=assess_include_kw,
+                seed=None,
+                sample_idx=None,
+                rank_by="ranking_score",
+                skip_pml=True,
+                skip_seq=False,
+                time_h=24,
+                mem_gb=8,
+                cpus=2,
+                shard_mod=1,
+                shard_idx=None,
+                array_size=1,
+            )
+            assess_job_script = assess_job_info.get("primary") if assess_job_info else None
+            if assess_job_script is None:
+                raise RuntimeError("Failed to prepare assess-rfa-all sbatch script")
+            print(f"[plan] assess-rfa-all will run after AF3 (run_label={assess_run_label})")
+
         rfd_scripts, mpnn_scripts, af3_scripts = {}, {}, {}
         for (ep, var), n in zip(arms, allocs):
             rfd = make_rfa_rfdiffusion_command(
@@ -1222,6 +1254,7 @@ def main():
                 extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
                 dep=f"afterok:{jid_mpnn}:{seed_jid}"
             )
+            stage2_job_ids.append(jid_af3s2)
             job_table.append((first_arm, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
 
             for arm_key in [k for k in rfd_scripts.keys() if k != first_arm]:
@@ -1232,15 +1265,30 @@ def main():
                     extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
                     dep=f"afterok:{jid_mpnn}:{seed_jid}"
                 )
+                stage2_job_ids.append(jid_af3s2)
                 job_table.append((arm_key, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
+
+            if args.run_assess and assess_job_script:
+                if stage2_job_ids:
+                    dep_str = ":".join(stage2_job_ids)
+                    assess_job_id = _sbatch(assess_job_script, dep=f"afterok:{dep_str}")
+                    print(f"[submit] assess-rfa-all -> job {assess_job_id} (depends on {len(stage2_job_ids)} AF3 jobs)")
+                else:
+                    print("[warn] No AF3 Stage2 jobs recorded; skipping assess-rfa-all submission.")
 
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
             tsv = led/f"jobs_{args.pdb}_{ts}.tsv"
             with tsv.open("w") as f:
-                f.write("arm\trfd_jid\tmpnn_jid\taf3_stage1_jid\taf3_stage2_jid\n")
-                for row in job_table:
-                    f.write("\t".join(map(str, row)) + "\n")
+                headers = ["arm","rfd_jid","mpnn_jid","af3_stage1_jid","af3_stage2_jid"]
+                if args.run_assess:
+                    headers.append("assess_jid")
+                f.write("\t".join(headers) + "\n")
+                for idx, row in enumerate(job_table):
+                    values = list(map(str, row))
+                    if args.run_assess:
+                        values.append(assess_job_id if idx == 0 and assess_job_id else "")
+                    f.write("\t".join(values) + "\n")
             print(f"[ok] Submitted pipeline; job ledger at {tsv}")
         else:
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
@@ -1267,6 +1315,8 @@ def main():
                 f'echo "[launch] {first_af3_stage2_name} -> ${{jid_af3s2_0}}"',
                 'echo "Submitted batch job ${jid_af3s2_0}"'
             ])
+            if args.run_assess:
+                lines.append('deps_assess="${jid_af3s2_0}"')
             for idx, arm_key in enumerate([k for k in rfd_scripts.keys() if k != first_arm], start=1):
                 rfd_name = rfd_scripts[arm_key]["script"].name
                 mpnn_name = mpnn_scripts[arm_key]["script"].name
@@ -1282,6 +1332,18 @@ def main():
                     f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')',
                     f'echo "[launch] {af3_stage2_name} -> ${{jid_af3s2_{idx}}}"',
                     f'echo "Submitted batch job ${{jid_af3s2_{idx}}}"'
+                ])
+                if args.run_assess:
+                    lines.append(f'deps_assess="${{deps_assess}}:${{jid_af3s2_{idx}}}"')
+            if args.run_assess and assess_job_script:
+                assess_path = shlex.quote(str(assess_job_script))
+                lines.extend([
+                    'if [ -z "${deps_assess:-}" ]; then',
+                    '  echo "[launch] No AF3 Stage2 job IDs recorded; skipping assess-rfa-all submission."',
+                    'else',
+                    f'  jid_assess=$(sbatch --dependency=afterok:${{deps_assess}} {assess_path} | awk \'{{print $4}}\')',
+                    f'  echo "[launch] assess-rfa-all ({assess_run_label}) -> ${{jid_assess}}"',
+                    'fi'
                 ])
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")

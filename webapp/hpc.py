@@ -192,6 +192,21 @@ class ClusterClient:
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, str(local) + "/"]
         return self._run(args)
 
+    def squeue(self, user: Optional[str] = None) -> CommandResult:
+        """Fetch the current scheduler queue for the given user."""
+        if self.cfg.mock:
+            return CommandResult(0, "[mock squeue]", "", skipped=True)
+        queue_user = (
+            user
+            or self.cfg.user
+            or os.getenv("INITBINDER_CLUSTER_USER")
+            or os.getenv("USER")
+        )
+        if not queue_user:
+            raise RuntimeError("Cluster user not configured; set cluster.user or INITBINDER_CLUSTER_USER")
+        cmd = f"{self.cfg.squeue_path} -u {shlex.quote(queue_user)}"
+        return self.run(cmd)
+
     def ssh(self, command: str, *, check: bool = True, use_login_shell: bool = False) -> CommandResult:
         if self.cfg.mock:
             return CommandResult(0, f"[mock ssh] {command}", "")

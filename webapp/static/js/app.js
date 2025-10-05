@@ -663,6 +663,7 @@ async function queueDesignRun() {
       return Math.max(0, Math.floor(raw));
     })(),
     run_label: el.designRunLabel.value.trim() || null,
+    run_assess: true,
   };
 
   el.designSubmit.disabled = true;

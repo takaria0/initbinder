@@ -122,6 +122,7 @@ class DesignRunRequest(BaseModel):
     )
     af3_seed: int = Field(1, ge=0)
     run_label: Optional[str] = Field(None)
+    run_assess: bool = Field(True, description="Auto-schedule assess-rfa-all after AF3")
     submit: bool = Field(False, description="Submit jobs to scheduler immediately")
 
 

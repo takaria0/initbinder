@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shlex
 import textwrap
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -110,7 +113,87 @@ def _build_pipeline_args(
         args.extend(["--run_tag", run_label])
     if request.af3_seed is not None:
         args.extend(["--model_seeds", str(request.af3_seed)])
+    if request.run_assess:
+        args.append("--run_assess")
     return args
+
+
+def _start_squeue_monitor(
+    cluster: ClusterClient,
+    job_store: JobStore,
+    job_id: str,
+    tracked_ids: List[str],
+    *,
+    user: Optional[str] = None,
+    interval_seconds: int = 60,
+    max_minutes: int = 360,
+) -> None:
+    """Spawn a background thread to log `squeue` snapshots for tracked jobs."""
+
+    if not tracked_ids:
+        return
+    if cluster.cfg.mock:
+        job_store.append_log(job_id, "[squeue] Mock cluster; skipping queue monitor.")
+        return
+
+    queue_user = (
+        user
+        or cluster.cfg.user
+        or os.getenv("INITBINDER_CLUSTER_USER")
+        or os.getenv("USER")
+        or "inagakit"
+    )
+
+    tracked = [jid for jid in dict.fromkeys(tracked_ids) if jid]
+    if not tracked:
+        return
+
+    job_store.append_log(
+        job_id,
+        f"[squeue] Monitoring {len(tracked)} job(s) as {queue_user}: {', '.join(tracked)}",
+    )
+
+    interval_seconds = max(15, int(interval_seconds))
+    max_minutes = max(5, int(max_minutes))
+
+    def _poll() -> None:
+        last_entry: Optional[str] = None
+        missing_cycles = 0
+        start_ts = time.time()
+        while True:
+            try:
+                job_store.get(job_id)
+            except KeyError:
+                break
+
+            try:
+                result = cluster.squeue(queue_user)
+            except Exception as exc:  # pragma: no cover
+                job_store.append_log(job_id, f"[squeue][error] {exc}")
+                break
+
+            snapshot = (result.stdout or "").strip()
+            display = snapshot if snapshot else "(queue empty)"
+            stamp = datetime.utcnow().strftime("%H:%M:%S")
+            entry = f"[squeue {stamp}]\n{display}"
+            if entry != last_entry:
+                job_store.append_log(job_id, entry)
+                last_entry = entry
+
+            present = any(jid and jid in snapshot for jid in tracked)
+            missing_cycles = 0 if present else missing_cycles + 1
+            if missing_cycles >= 2:
+                job_store.append_log(job_id, "[squeue] Tracked jobs absent for two checks; stopping monitor.")
+                break
+
+            elapsed_min = (time.time() - start_ts) / 60.0
+            if elapsed_min >= max_minutes:
+                job_store.append_log(job_id, f"[squeue] Monitor reached {max_minutes} min limit; stopping.")
+                break
+
+            time.sleep(interval_seconds)
+
+    threading.Thread(target=_poll, name=f"squeue-{job_id}", daemon=True).start()
 
 
 def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_id: str) -> None:
@@ -135,12 +218,14 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "run_label": run_label,
             "af3_seed": request.af3_seed,
             "binder_chain": binder_chain,
+            "run_assess": request.run_assess,
         },
     )
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
     job_store.append_log(job_id, f"[designs_per_task] {designs_per_task}")
     job_store.append_log(job_id, f"[af3_seed] {request.af3_seed}")
     job_store.append_log(job_id, f"[binder_chain] {binder_chain}")
+    job_store.append_log(job_id, f"[run_assess] {request.run_assess}")
 
     cluster = ClusterClient()
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
@@ -208,6 +293,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     sbatch_result = cluster.run(submit_cmd)
     job_ids: Dict[str, str] = {}
     stage2_ids: List[str] = []
+    pipeline_assess_job: Optional[str] = None
     if sbatch_result.stdout:
         for line in sbatch_result.stdout.splitlines():
             job_store.append_log(job_id, line)
@@ -221,6 +307,8 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
                 job_ids[script_name] = jid
                 if "af3batch" in script_name:
                     stage2_ids.append(jid)
+                if "assess" in script_name:
+                    pipeline_assess_job = jid
                 job_store.append_log(job_id, f"[JOB] {script_name}={jid}")
                 idx += 1
     if sbatch_result.stderr:
@@ -228,26 +316,41 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
         if err:
             job_store.append_log(job_id, err)
 
+    assessment_job_id: Optional[str] = pipeline_assess_job
+    needs_manual_assess = bool(stage2_ids) and (not request.run_assess or assessment_job_id is None)
+    if needs_manual_assess:
+        try:
+            fallback_job_id = cluster.submit_assessment(
+                pdb_id=request.pdb_id,
+                binder_chain=request.binder_chain_id or "H",
+                run_label=run_label,
+                dependencies=stage2_ids,
+                include_keyword=run_label,
+            )
+        except Exception as exc:  # pragma: no cover
+            job_store.append_log(job_id, f"[assessment][error] {exc}")
+        else:
+            if fallback_job_id:
+                assessment_job_id = fallback_job_id
+                job_store.append_log(job_id, f"[assessment] Scheduled sbatch job {fallback_job_id}")
+
     job_store.update(
         job_id,
         details={
             "job_ids": job_ids,
             "remote_launch": launcher_path,
             "assessment_dependencies": stage2_ids,
+            "assessment_job_id": assessment_job_id,
+            "assessment_via_pipeline": bool(pipeline_assess_job),
+            "run_assess_requested": request.run_assess,
+            "assessment_run_label": run_label,
         },
     )
 
-    if stage2_ids:
-        assessment_job_id = cluster.submit_assessment(
-            pdb_id=request.pdb_id,
-            binder_chain=request.binder_chain_id or "H",
-            run_label=run_label,
-            dependencies=stage2_ids,
-            include_keyword=run_label,
-        )
-        if assessment_job_id:
-            job_store.append_log(job_id, f"[assessment] Scheduled sbatch job {assessment_job_id}")
-            job_store.update(job_id, details={"assessment_job_id": assessment_job_id})
+    tracked_for_monitor: List[str] = list(stage2_ids)
+    if assessment_job_id:
+        tracked_for_monitor.append(assessment_job_id)
+    _start_squeue_monitor(cluster, job_store, job_id, tracked_for_monitor)
 
     job_store.update(
         job_id,
