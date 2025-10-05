@@ -825,10 +825,16 @@ function updateJobUI(job) {
     if (job.status === 'running' || job.status === 'pending') {
       setBadge(el.resultsMeta, 'Exporting…');
     } else if (job.status === 'success') {
-      const outDir = job.details?.out_dir ? ` → ${job.details.out_dir}` : '';
-      setBadge(el.resultsMeta, `Export complete${outDir}`, 'rgba(134, 239, 172, 0.25)');
+      const outDir = job.details?.out_dir ? job.details.out_dir : '';
+      const suffix = outDir ? ` → ${outDir}` : '';
+      setBadge(el.resultsMeta, `Export complete${suffix}`, 'rgba(134, 239, 172, 0.25)');
       el.exportButton.disabled = false;
       stopJobPolling();
+      if (outDir) {
+        showAlert(`Exports saved in ${outDir}`, false);
+      } else {
+        showAlert('Exports finished successfully.', false);
+      }
     } else {
       showAlert(job.message || 'Export failed.');
       el.exportButton.disabled = false;
