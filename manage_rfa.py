@@ -1189,14 +1189,20 @@ def main():
         model_seeds = args.model_seeds or list(range(1, 11))
         print("[plan] pipeline:", ", ".join(f"{e}@{v}={n}" for (e,v),n in zip(arms,allocs)))
 
+        total_designs = sum(allocs)
+
         assess_job_info = None
         assess_job_script: Path | None = None
+        assess_merge_script: Path | None = None
         assess_job_id: str | None = None
+        assess_merge_job_id: str | None = None
         assess_run_label: str | None = None
+        assess_shards = 1
         stage2_job_ids: list[str] = []
         if args.run_assess:
             assess_run_label = args.run_tag or time.strftime("pipeline_%Y%m%d_%H%M%S")
             assess_include_kw = args.run_tag or assess_run_label
+            assess_shards = max(1, math.ceil(total_designs / 1000))
             assess_job_info = _write_assess_rfa_all_sbatch(
                 args.pdb,
                 binder_chain_id=args.binder_chain_id,
@@ -1210,14 +1216,18 @@ def main():
                 time_h=24,
                 mem_gb=8,
                 cpus=2,
-                shard_mod=1,
+                shard_mod=assess_shards,
                 shard_idx=None,
-                array_size=1,
+                array_size=assess_shards,
             )
             assess_job_script = assess_job_info.get("primary") if assess_job_info else None
+            assess_merge_script = assess_job_info.get("merge") if assess_job_info else None
             if assess_job_script is None:
                 raise RuntimeError("Failed to prepare assess-rfa-all sbatch script")
-            print(f"[plan] assess-rfa-all will run after AF3 (run_label={assess_run_label})")
+            print(
+                f"[plan] assess-rfa-all will run after AF3 (run_label={assess_run_label}, "
+                f"shards={assess_shards}, total_designs={total_designs})"
+            )
 
         rfd_scripts, mpnn_scripts, af3_scripts = {}, {}, {}
         for (ep, var), n in zip(arms, allocs):
@@ -1272,7 +1282,18 @@ def main():
                 if stage2_job_ids:
                     dep_str = ":".join(stage2_job_ids)
                     assess_job_id = _sbatch(assess_job_script, dep=f"afterok:{dep_str}")
-                    print(f"[submit] assess-rfa-all -> job {assess_job_id} (depends on {len(stage2_job_ids)} AF3 jobs)")
+                    print(
+                        f"[submit] assess-rfa-all array -> job {assess_job_id} "
+                        f"(shards={assess_shards}, deps={len(stage2_job_ids)})"
+                    )
+                    if assess_merge_script and assess_shards > 1:
+                        assess_merge_job_id = _sbatch(
+                            assess_merge_script,
+                            dep=f"afterok:{assess_job_id}",
+                        )
+                        print(
+                            f"[submit] assess-rfa-all merge -> job {assess_merge_job_id} (dep={assess_job_id})"
+                        )
                 else:
                     print("[warn] No AF3 Stage2 jobs recorded; skipping assess-rfa-all submission.")
 
@@ -1282,12 +1303,18 @@ def main():
             with tsv.open("w") as f:
                 headers = ["arm","rfd_jid","mpnn_jid","af3_stage1_jid","af3_stage2_jid"]
                 if args.run_assess:
-                    headers.append("assess_jid")
+                    headers.append("assess_array_jid")
+                    if assess_merge_job_id:
+                        headers.append("assess_merge_jid")
+                    headers.append("assess_shards")
                 f.write("\t".join(headers) + "\n")
                 for idx, row in enumerate(job_table):
                     values = list(map(str, row))
                     if args.run_assess:
                         values.append(assess_job_id if idx == 0 and assess_job_id else "")
+                        if assess_merge_job_id:
+                            values.append(assess_merge_job_id if idx == 0 else "")
+                        values.append(str(assess_shards) if idx == 0 else "")
                     f.write("\t".join(values) + "\n")
             print(f"[ok] Submitted pipeline; job ledger at {tsv}")
         else:
@@ -1337,14 +1364,20 @@ def main():
                     lines.append(f'deps_assess="${{deps_assess}}:${{jid_af3s2_{idx}}}"')
             if args.run_assess and assess_job_script:
                 assess_path = shlex.quote(str(assess_job_script))
+                assess_merge_path = shlex.quote(str(assess_merge_script)) if assess_merge_script else None
                 lines.extend([
                     'if [ -z "${deps_assess:-}" ]; then',
                     '  echo "[launch] No AF3 Stage2 job IDs recorded; skipping assess-rfa-all submission."',
                     'else',
                     f'  jid_assess=$(sbatch --dependency=afterok:${{deps_assess}} {assess_path} | awk \'{{print $4}}\')',
-                    f'  echo "[launch] assess-rfa-all ({assess_run_label}) -> ${{jid_assess}}"',
-                    'fi'
+                    f'  echo "[launch] assess-rfa-all ({assess_run_label}, shards={assess_shards}) -> ${{jid_assess}}"',
                 ])
+                if assess_merge_path and assess_shards > 1:
+                    lines.extend([
+                        f'  jid_assess_merge=$(sbatch --dependency=afterok:${{jid_assess}} {assess_merge_path} | awk \'{{print $4}}\')',
+                        '  echo "[launch] assess-rfa-all merge -> ${jid_assess_merge}"'
+                    ])
+                lines.append('fi')
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")
 

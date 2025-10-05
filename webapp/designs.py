@@ -23,6 +23,7 @@ from .models import DesignRunRequest
 
 _LAUNCH_PATH_RE = re.compile(r"\[ok] Wrote launcher: (?P<path>.*)")
 _JOB_ECHO_RE = re.compile(r"^\[JOB] (?P<var>[A-Za-z0-9_]+)=(?P<jid>\d+)")
+_SCRIPT_PATH_RE = re.compile(r"sbatch[^|;]*?([^\s]+\.sh)")
 
 
 def _parse_launcher_path(log_lines: List[str]) -> Optional[Path]:
@@ -208,6 +209,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     run_label = request.run_label or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     designs_per_task = max(1, math.ceil(request.total_designs / max(len(arms), 1)))
     binder_chain = (request.binder_chain_id or "H").strip().upper() or "H"
+    assessment_shards = max(1, math.ceil(request.total_designs / 1000))
 
     job_store.update(
         job_id,
@@ -219,6 +221,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "af3_seed": request.af3_seed,
             "binder_chain": binder_chain,
             "run_assess": request.run_assess,
+            "assessment_shards": assessment_shards,
         },
     )
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
@@ -226,6 +229,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.append_log(job_id, f"[af3_seed] {request.af3_seed}")
     job_store.append_log(job_id, f"[binder_chain] {binder_chain}")
     job_store.append_log(job_id, f"[run_assess] {request.run_assess}")
+    job_store.append_log(job_id, f"[assessment_shards] {assessment_shards}")
 
     cluster = ClusterClient()
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
@@ -283,7 +287,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     launcher_contents = cluster.run(cat_cmd).stdout or ""
     script_order: List[str] = []
     for line in launcher_contents.splitlines():
-        match = re.search(r"sbatch\s+([^\s|]+)", line)
+        match = _SCRIPT_PATH_RE.search(line)
         if match:
             script_order.append(match.group(1))
 
@@ -294,6 +298,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_ids: Dict[str, str] = {}
     stage2_ids: List[str] = []
     pipeline_assess_job: Optional[str] = None
+    pipeline_assess_merge_job: Optional[str] = None
     if sbatch_result.stdout:
         for line in sbatch_result.stdout.splitlines():
             job_store.append_log(job_id, line)
@@ -308,7 +313,10 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
                 if "af3batch" in script_name:
                     stage2_ids.append(jid)
                 if "assess" in script_name:
-                    pipeline_assess_job = jid
+                    if "merge" in script_name:
+                        pipeline_assess_merge_job = jid
+                    else:
+                        pipeline_assess_job = jid
                 job_store.append_log(job_id, f"[JOB] {script_name}={jid}")
                 idx += 1
     if sbatch_result.stderr:
@@ -317,6 +325,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, err)
 
     assessment_job_id: Optional[str] = pipeline_assess_job
+    assessment_merge_job_id: Optional[str] = pipeline_assess_merge_job
     needs_manual_assess = bool(stage2_ids) and (not request.run_assess or assessment_job_id is None)
     if needs_manual_assess:
         try:
@@ -342,6 +351,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "assessment_dependencies": stage2_ids,
             "assessment_job_id": assessment_job_id,
             "assessment_via_pipeline": bool(pipeline_assess_job),
+            "assessment_merge_job_id": assessment_merge_job_id,
             "run_assess_requested": request.run_assess,
             "assessment_run_label": run_label,
         },
@@ -350,6 +360,8 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     tracked_for_monitor: List[str] = list(stage2_ids)
     if assessment_job_id:
         tracked_for_monitor.append(assessment_job_id)
+    if assessment_merge_job_id:
+        tracked_for_monitor.append(assessment_merge_job_id)
     _start_squeue_monitor(cluster, job_store, job_id, tracked_for_monitor)
 
     job_store.update(
