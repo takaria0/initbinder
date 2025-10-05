@@ -44,6 +44,22 @@ def _copy_bundle(src: Path, dest: Path) -> Path:
 def _launch_pymol(script_path: Path) -> None:
     cfg = load_config()
     pymol_bin = cfg.cluster.pymol_path or "pymol"
+    # On macOS prefer the GUI launcher when no explicit binary is configured.
+    if sys.platform == "darwin" and (not cfg.cluster.pymol_path or cfg.cluster.pymol_path.strip() in {"", "pymol"}):
+        try:
+            subprocess.Popen(
+                ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+            raise PyMolLaunchError(
+                "macOS `open` command not available; install the PyMOL CLI or set cluster.pymol_path"
+            ) from exc
+        except Exception:
+            # Fall back to the configured binary so we can surface any useful error message from it.
+            pass
     try:
         subprocess.Popen([pymol_bin, str(script_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment

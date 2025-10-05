@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import shlex
 import textwrap
-import re
+import re, os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,21 +44,25 @@ class ClusterClient:
         self.remote_root = self.cfg.remote_root
         self.target_root = self.cfg.target_root or self.remote_root
         self.conda_activate = (self.cfg.conda_activate or "").strip() or None
-        print(
-            f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}",
-            flush=True,
+        self._debug_enabled = bool(os.getenv("INITBINDER_CLUSTER_DEBUG"))
+        self._debug(
+            f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}"
         )
+
+    def _debug(self, message: str) -> None:
+        if self._debug_enabled:
+            print(message, flush=True)
 
     def _run(self, cmd: Iterable[str], *, check: bool = True) -> CommandResult:
         cmd_list = list(cmd)
-        print(f"[cluster] exec: {' '.join(cmd_list)}", flush=True)
+        self._debug(f"[cluster] exec: {' '.join(cmd_list)}")
         process = subprocess.run(list(cmd), capture_output=True, text=True)
         if check and process.returncode != 0:
             raise RuntimeError(f"Command failed ({process.returncode}): {' '.join(cmd)}\n{process.stderr}")
         if process.stdout:
-            print(f"[cluster] stdout: {process.stdout.strip()}", flush=True)
+            self._debug(f"[cluster] stdout: {process.stdout.strip()}")
         if process.stderr:
-            print(f"[cluster] stderr: {process.stderr.strip()}", flush=True)
+            self._debug(f"[cluster] stderr: {process.stderr.strip()}")
         return CommandResult(process.returncode, process.stdout, process.stderr)
 
     def _control_args(self, *, include_persist: bool = False) -> list[str]:
@@ -132,7 +136,7 @@ class ClusterClient:
                 shutil.copytree(local, dest)
             else:
                 shutil.copy2(local, dest)
-            print(f"[cluster] rsync_push (mock) {local} -> {dest}", flush=True)
+            self._debug(f"[cluster] rsync_push (mock) {local} -> {dest}")
             return CommandResult(0, f"[mock] copied {local} -> {dest}", "")
 
         base = remote_base or self.remote_root
@@ -146,7 +150,7 @@ class ClusterClient:
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
-        print(f"[cluster] rsync_push {local} -> {target} delete={delete}", flush=True)
+        self._debug(f"[cluster] rsync_push {local} -> {target} delete={delete}")
         src = str(local) + ("/" if is_dir else "")
         dest = str(target) + ("/" if is_dir else "")
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, dest]
@@ -167,7 +171,7 @@ class ClusterClient:
                 shutil.copytree(src, local, dirs_exist_ok=True)
             else:
                 shutil.copytree(src, local)
-            print(f"[cluster] rsync_pull (mock) {src} -> {local}", flush=True)
+            self._debug(f"[cluster] rsync_pull (mock) {src} -> {local}")
             return CommandResult(0, f"[mock] copied {src} -> {local}", "")
 
         base = remote_base or self.remote_root
@@ -182,9 +186,8 @@ class ClusterClient:
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
-        print(
-            f"[cluster] rsync_pull {self._ssh_target()}:{remote_path} -> {local} delete={delete}",
-            flush=True,
+        self._debug(
+            f"[cluster] rsync_pull {self._ssh_target()}:{remote_path} -> {local} delete={delete}"
         )
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, str(local) + "/"]
         return self._run(args)
@@ -196,7 +199,7 @@ class ClusterClient:
             command = f"bash -lc {shlex.quote(command)}"
         self._ensure_master()
         args = ["ssh", *self._control_args(), self._ssh_target(), command]
-        print(f"[cluster] ssh -> {' '.join(args)}", flush=True)
+        self._debug(f"[cluster] ssh -> {' '.join(args)}")
         return self._run(args, check=check)
 
     def run(self, command: str, *, check: bool = True, use_conda: bool = False) -> CommandResult:
@@ -211,7 +214,7 @@ class ClusterClient:
         segments.append(command)
         full_cmd = " && ".join(segments)
         self._ensure_master()
-        print(f"[cluster] run -> {full_cmd}", flush=True)
+        self._debug(f"[cluster] run -> {full_cmd}")
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
     # -- high-level helpers ----------------------------------------------
@@ -242,7 +245,7 @@ class ClusterClient:
                     copied = True
                 if copied:
                     backup_rel = Path("mock") / snapshot_dir.relative_to(self._mock_root)
-                    print(f"[cluster] backup (mock) snapshot -> {backup_rel}", flush=True)
+                    self._debug(f"[cluster] backup (mock) snapshot -> {backup_rel}")
                 else:
                     shutil.rmtree(snapshot_dir, ignore_errors=True)
         else:
@@ -327,16 +330,14 @@ class ClusterClient:
             local_dest = (self.local_root / rel).resolve()
             if _has_rankings(local_dest):
                 msg = f"[skip] Assessment {run_label} already present at {local_dest}"
-                print(f"[cluster] sync_assessments_back skip -> {msg}", flush=True)
+                self._debug(f"[cluster] sync_assessments_back skip -> {msg}")
                 return CommandResult(0, msg, "", skipped=True)
-            print(
-                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
-                flush=True,
+            self._debug(
+                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}"
             )
             result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-            print(
-                f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
-                flush=True,
+            self._debug(
+                f"[cluster] sync_assessments_back completed with exit {result.exit_code}"
             )
             return result
 
@@ -364,19 +365,17 @@ class ClusterClient:
 
         if remote_entries and not missing_labels:
             msg = f"[skip] All assessments already synced for {pdb_id.upper()}"
-            print(f"[cluster] sync_assessments_back skip -> {msg}", flush=True)
+            self._debug(f"[cluster] sync_assessments_back skip -> {msg}")
             return CommandResult(0, msg, "", skipped=True)
 
         rel = base_rel
         local_dest = (self.local_root / rel).resolve()
-        print(
-            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
-            flush=True,
+        self._debug(
+            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}"
         )
         result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-        print(
-            f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
-            flush=True,
+        self._debug(
+            f"[cluster] sync_assessments_back completed with exit {result.exit_code}"
         )
         return result
 
