@@ -33,7 +33,7 @@ def _flatten_chain_sequences(seq_block: Dict[str, str]) -> Dict[str, str]:
     return {str(chain_id).strip().upper(): str(seq) for chain_id, seq in seq_block.items() if seq}
 
 
-def compute_alignment(pdb_id: str, *, max_results: int = 3) -> Dict[str, object]:
+def compute_alignment(pdb_id: str, *, max_results: Optional[int] = None) -> Dict[str, object]:
     data = _load_target_yaml(pdb_id)
     sequences = data.get("sequences", {})
     pdb_sequences = _flatten_chain_sequences(sequences.get("pdb", {}))
@@ -67,7 +67,7 @@ def compute_alignment(pdb_id: str, *, max_results: int = 3) -> Dict[str, object]
         vendor_range=vendor_range,
         chain_residue_numbers=chain_residue_numbers,
     )
-    selected = alignments[:max_results]
+    selected = alignments if max_results is None else alignments[:max_results]
 
     clean_vendor = clean_sequence(vendor_seq)
     chain_results: List[Dict[str, object]] = []

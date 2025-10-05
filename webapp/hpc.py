@@ -233,6 +233,34 @@ class ClusterClient:
         self._debug(f"[cluster] run -> {full_cmd}")
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
+    def run_in_srun(
+        self,
+        command: str,
+        *,
+        check: bool = True,
+        use_conda: bool = False,
+        cpus: int = 4,
+        partition: str = "free",
+    ) -> CommandResult:
+        if self.cfg.mock:
+            return CommandResult(0, f"[mock srun] {command}", "", skipped=True)
+        if self.cfg.remote_root is None:
+            raise RuntimeError("remote_root not configured; cannot execute srun command")
+        safe_cpus = max(1, int(cpus))
+        safe_partition = (partition or "free").strip() or "free"
+        remote_root = shlex.quote(str(self.cfg.remote_root))
+        segments = [f"cd {remote_root}"]
+        if use_conda and self.conda_activate:
+            segments.append(self.conda_activate)
+        segments.append(command)
+        inner = " && ".join(segments)
+        srun_cmd = (
+            f"srun -c {safe_cpus} -p {shlex.quote(safe_partition)} --pty /bin/bash -lc {shlex.quote(inner)}"
+        )
+        self._ensure_master()
+        self._debug(f"[cluster] srun -> {srun_cmd}")
+        return self.ssh(srun_cmd, check=check)
+
     # -- high-level helpers ----------------------------------------------
     def sync_target(self, pdb_id: str, *, delete: bool = False) -> Tuple[CommandResult, Optional[str]]:
         local_dir = (self.local_root / "targets" / pdb_id.upper()).resolve()

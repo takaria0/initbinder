@@ -56,14 +56,34 @@
           <div class="flex-row" style="margin-top: 16px;">
             <button type="submit" id="target-submit">Run again</button>
             <span class="badge" id="target-status-badge" hidden>Idle</span>
-            <button type="button" id="pymol-hotspots" disabled>Launch hotspots in PyMOL</button>
           </div>
         </form>
       </section>
 
+        <section id="target-insights">
+        <div class="insights-header">
+          <h2>Epitope &amp; Target Insights</h2>
+          <button type="button" id="pymol-hotspots" disabled>Visualize hotspots in PyMOL</button>
+        </div>
+        <div class="insights-grid">
+          <div class="insights-column">
+            <h3>Epitopes</h3>
+            <ul id="epitope-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>PDB Chains</h3>
+            <ul id="chain-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>Antigen Details</h3>
+            <dl id="antigen-details" class="insight-details"></dl>
+          </div>
+        </div>
+      </section>
+
         <section id="alignment-section">
         <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
-          <h2>Sequence Alignment</h2>
+          <h2>Vendor antigen and PDB sequence alignment</h2>
           <button type="button" id="refresh-alignment">Refresh alignment</button>
         </div>
         <div id="alignment-meta" class="badge" hidden></div>
@@ -160,6 +180,12 @@
       </div>
 
       <aside id="jobs-sidebar">
+        <section class="sidebar-card selection-card" id="current-selection-card">
+          <h2>Current Target</h2>
+          <div class="selection-pill" id="current-selection-pdb">—</div>
+          <div class="selection-meta" id="current-selection-name">Preset: —</div>
+          <div class="selection-meta" id="current-selection-antigen">Antigen URL: —</div>
+        </section>
         <section class="sidebar-card">
           <div class="sidebar-header">
             <h2>Job Activity</h2>
