@@ -87,7 +87,7 @@ class WebAppConfig:
     paths: AppPaths = field(default_factory=AppPaths)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     log_dir: Path = field(default_factory=lambda: Path.cwd() / "logs" / "webapp")
-    background_concurrency: int = 4
+    background_concurrency: int = 10
 
     def ensure_dirs(self) -> None:
         for path in [self.log_dir, self.paths.cache_dir]:

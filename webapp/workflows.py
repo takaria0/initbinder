@@ -25,6 +25,7 @@ from .exporter import ExportError, run_export
 
 
 _executor: ThreadPoolExecutor | None = None
+_init_executor: ThreadPoolExecutor | None = None
 _export_executor: ThreadPoolExecutor | None = None
 _cluster_executor: ThreadPoolExecutor | None = None
 
@@ -35,6 +36,15 @@ def _get_executor() -> ThreadPoolExecutor:
         cfg = load_config()
         _executor = ThreadPoolExecutor(max_workers=cfg.background_concurrency)
     return _executor
+
+
+def _get_init_executor() -> ThreadPoolExecutor:
+    global _init_executor
+    if _init_executor is None:
+        cfg = load_config()
+        workers = max(1, min(2, cfg.background_concurrency or 1))
+        _init_executor = ThreadPoolExecutor(max_workers=workers)
+    return _init_executor
 
 
 def _get_export_executor() -> ThreadPoolExecutor:
@@ -91,7 +101,7 @@ def submit_target_initialization(request: TargetInitRequest, *,
         except Exception as exc:  # pragma: no cover - defensive
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
 
-    executor = _get_executor()
+    executor = _get_init_executor()
     executor.submit(_run)
     return job.job_id
 
