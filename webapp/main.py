@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -153,7 +154,7 @@ async def api_alignment(pdb_id: str) -> AlignmentResponse:
 async def api_cluster_status() -> dict[str, object]:
     try:
         client = ClusterClient()
-        return client.connection_status()
+        return await run_in_threadpool(client.connection_status)
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -207,7 +208,7 @@ async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
 
     client = ClusterClient()
     try:
-        remote_entries = client.list_remote_assessments(pdb_id)
+        remote_entries = await run_in_threadpool(client.list_remote_assessments, pdb_id)
     except Exception as exc:  # pragma: no cover - cluster access may fail
         print(f"[runs] warn: unable to list remote assessments for {pdb_id}: {exc}")
         remote_entries = []
@@ -292,17 +293,22 @@ async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> dic
     remote_root = client.target_root or client.remote_root
     remote_path = Path(remote_root) / rel if remote_root else None
     try:
-        result = client.sync_assessments_back(pdb_id, run_label=run_label)
+        result = await run_in_threadpool(client.sync_assessments_back, pdb_id, run_label=run_label)
     except Exception as exc:  # pragma: no cover - depends on cluster
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    message = "Synced assessments from cluster"
+    if getattr(result, "skipped", False):
+        stripped = (result.stdout or "").strip()
+        message = stripped or "Assessments already synced locally"
     return {
-        "message": "Synced assessments from cluster",
+        "message": message,
         "stdout": result.stdout,
         "stderr": result.stderr,
         "run_label": run_label,
         "local_path": str(local_path),
         "remote_path": str(remote_path) if remote_path else None,
         "exit_code": result.exit_code,
+        "skipped": bool(getattr(result, "skipped", False)),
     }
 
 

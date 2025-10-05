@@ -21,6 +21,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    skipped: bool = False
 
 
 class ClusterClient:
@@ -161,9 +162,11 @@ class ClusterClient:
                 raise FileNotFoundError(src)
             if delete and local.exists():
                 shutil.rmtree(local)
+            local.parent.mkdir(parents=True, exist_ok=True)
             if local.exists():
-                shutil.rmtree(local)
-            shutil.copytree(src, local)
+                shutil.copytree(src, local, dirs_exist_ok=True)
+            else:
+                shutil.copytree(src, local)
             print(f"[cluster] rsync_pull (mock) {src} -> {local}", flush=True)
             return CommandResult(0, f"[mock] copied {src} -> {local}", "")
 
@@ -174,8 +177,6 @@ class ClusterClient:
         src = f"{self._ssh_target()}:{remote_path}/"
         local.parent.mkdir(parents=True, exist_ok=True)
         if delete and local.exists():
-            shutil.rmtree(local)
-        if local.exists():
             shutil.rmtree(local)
         local.mkdir(parents=True, exist_ok=True)
         self._ensure_master()
@@ -301,15 +302,73 @@ class ClusterClient:
 
     def sync_assessments_back(self, pdb_id: str, run_label: Optional[str] = None) -> CommandResult:
         base_rel = Path("targets") / pdb_id.upper() / "designs"
-        if run_label:
-            rel = base_rel / "_assessments" / run_label
-        else:
-            rel = base_rel
-        local_dest = (self.local_root / rel).resolve()
+        assessments_rel = base_rel / "_assessments"
         base = self.target_root or self.remote_root
         remote_base = Path(base) if base else None
         if not remote_base:
             raise RuntimeError("Neither target_root nor remote_root configured; cannot sync assessments")
+
+        def _has_rankings(path: Path) -> bool:
+            if not path.exists() or not path.is_dir():
+                return False
+            rankings = path / "af3_rankings.tsv"
+            if rankings.exists():
+                return True
+            try:
+                next(path.iterdir())
+            except StopIteration:
+                return False
+            except FileNotFoundError:
+                return False
+            return False
+
+        if run_label:
+            rel = assessments_rel / run_label
+            local_dest = (self.local_root / rel).resolve()
+            if _has_rankings(local_dest):
+                msg = f"[skip] Assessment {run_label} already present at {local_dest}"
+                print(f"[cluster] sync_assessments_back skip -> {msg}", flush=True)
+                return CommandResult(0, msg, "", skipped=True)
+            print(
+                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
+                flush=True,
+            )
+            result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
+            print(
+                f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
+                flush=True,
+            )
+            return result
+
+        # No run_label provided: determine whether anything is missing locally.
+        local_assessments = (self.local_root / assessments_rel).resolve()
+        existing_labels: set[str] = set()
+        if local_assessments.exists():
+            for child in local_assessments.iterdir():
+                if child.is_dir() and _has_rankings(child):
+                    existing_labels.add(child.name)
+
+        missing_labels: list[str] = []
+        try:
+            remote_entries = self.list_remote_assessments(pdb_id)
+        except Exception as exc:
+            print(f"[cluster] sync_assessments_back warn: unable to list remote assessments: {exc}", flush=True)
+            remote_entries = []
+
+        for entry in remote_entries:
+            label = str(entry.get("run_label") or "").strip()
+            if not label:
+                continue
+            if label not in existing_labels:
+                missing_labels.append(label)
+
+        if remote_entries and not missing_labels:
+            msg = f"[skip] All assessments already synced for {pdb_id.upper()}"
+            print(f"[cluster] sync_assessments_back skip -> {msg}", flush=True)
+            return CommandResult(0, msg, "", skipped=True)
+
+        rel = base_rel
+        local_dest = (self.local_root / rel).resolve()
         print(
             f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
             flush=True,

@@ -966,12 +966,22 @@ async function launchTopBinders() {
 }
 
 async function syncResultsFromCluster(options = {}) {
-  const { runLabel: forcedRunLabel = null, silent = false, disableButton = true } = options;
+  const {
+    runLabel: explicitRunLabel,
+    silent = false,
+    disableButton = true,
+    useInputRunLabel = true,
+  } = options;
   if (!state.currentPdb) {
     if (!silent) showAlert('Initialize target first.');
     return;
   }
-  const runLabelInput = forcedRunLabel !== null ? forcedRunLabel : el.resultsRunLabel.value.trim();
+  let runLabelInput = '';
+  if (explicitRunLabel !== undefined) {
+    runLabelInput = (explicitRunLabel || '').trim();
+  } else if (useInputRunLabel && el.resultsRunLabel) {
+    runLabelInput = el.resultsRunLabel.value.trim();
+  }
   const params = runLabelInput ? `?run_label=${encodeURIComponent(runLabelInput)}` : '';
   if (disableButton && el.syncResultsBtn) {
     el.syncResultsBtn.disabled = true;
@@ -1055,7 +1065,7 @@ function initEventHandlers() {
   el.refreshResultsBtn.addEventListener('click', fetchRankings);
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
-  el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster());
+  el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster({ useInputRunLabel: false }));
   if (el.assessSubmit) {
     el.assessSubmit.addEventListener('click', queueAssessmentRun);
   }
