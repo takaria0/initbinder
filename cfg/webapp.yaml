@@ -4,6 +4,7 @@ cluster:
   ssh_config_alias: hpc3.rcic.uci.edu
   remote_root: /data/homezvol1/inagakit/Projects/initbinder    # adjust to your repo path on HPC
   target_root: /pub/inagakit/Projects/initbinder/  # adjust to your target root path on HPC
+  control_path: /Users/inagakit/.ssh/cm-initbinder-hpc3.rcic.uci.edu  # adjust if needed
   conda_activate: "conda activate takashi"
   rsync_path: rsync
   sbatch_path: sbatch
@@ -15,3 +16,4 @@ cluster:
   assess_time_minutes: 600
   assess_mem_gb: 4
   assess_cpus: 1
+  debug: true

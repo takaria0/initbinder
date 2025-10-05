@@ -38,13 +38,13 @@ class ClusterClient:
             self.control_path = Path(self.cfg.control_path).expanduser()
         else:
             self.control_path = (Path.home() / ".ssh" / f"cm-initbinder-{sanitized}").expanduser()
-        self.control_persist = str(self.cfg.control_persist or "600")
+        self.control_persist = str(self.cfg.control_persist or "yes")
         self.ensure_master = getattr(self.cfg, "ensure_master", True)
         self._master_checked = False
         self.remote_root = self.cfg.remote_root
         self.target_root = self.cfg.target_root or self.remote_root
         self.conda_activate = (self.cfg.conda_activate or "").strip() or None
-        self._debug_enabled = bool(os.getenv("INITBINDER_CLUSTER_DEBUG"))
+        self._debug_enabled = self.cfg.debug
         self._debug(
             f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}"
         )
@@ -575,8 +575,9 @@ PY
                 self._ssh_target(),
                 f"test -d {remote_root} && echo OK",
             ]
+            self._debug(f"[cluster] connection_status -> probe remote root: {' '.join(probe_cmd)}")
             try:
-                probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=5)
+                probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
             except subprocess.TimeoutExpired:
                 status["message"] = "Remote root probe timed out"
                 return status

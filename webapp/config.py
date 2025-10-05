@@ -37,6 +37,7 @@ class ClusterConfig:
     control_persist: int | str = 600
     ensure_master: bool = True
     conda_activate: Optional[str] = None
+    debug: bool = False
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:

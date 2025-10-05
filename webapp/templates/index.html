@@ -8,21 +8,6 @@
   </head>
   <body>
     <main class="app-shell">
-      <aside id="jobs-sidebar">
-        <section class="sidebar-card">
-          <div class="sidebar-header">
-            <h2>Job Activity</h2>
-            <button type="button" id="refresh-jobs">Refresh</button>
-          </div>
-          <div id="job-alert" class="alert" hidden></div>
-          <div class="status-log" id="job-log">Waiting for commands...</div>
-        </section>
-        <section class="sidebar-card" id="recent-jobs-card">
-          <h3>Recent Jobs</h3>
-          <ul id="job-list"></ul>
-        </section>
-      </aside>
-
       <div id="main-content">
         <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
         <header class="page-header">
@@ -173,6 +158,21 @@
       </section>
 
       </div>
+
+      <aside id="jobs-sidebar">
+        <section class="sidebar-card">
+          <div class="sidebar-header">
+            <h2>Job Activity</h2>
+            <button type="button" id="refresh-jobs">Refresh</button>
+          </div>
+          <div id="job-alert" class="alert" hidden></div>
+          <div class="status-log" id="job-log">Waiting for commands...</div>
+        </section>
+        <section class="sidebar-card" id="recent-jobs-card">
+          <h3>Recent Jobs</h3>
+          <ul id="job-list"></ul>
+        </section>
+      </aside>
     </main>
 
     <div id="export-modal" class="modal" hidden>
