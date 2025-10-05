@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
@@ -70,6 +72,10 @@ def init_decide_prep(pdb_id: str, antigen_url: Optional[str], *, job_store: JobS
         job_store.append_log(job_id, line)
 
     job_store.update(job_id, status=JobStatus.RUNNING, message="Initializing target")
+    snapshot_dir = _snapshot_target_state(pdb_id)
+    if snapshot_dir:
+        job_store.append_log(job_id, f"[snapshot] Saved prior target state → {snapshot_dir}")
+        job_store.update(job_id, details={"snapshot_dir": str(snapshot_dir)})
     args = [pdb_id]
     if antigen_url:
         args.extend(["--antigen_url", antigen_url])
@@ -85,6 +91,59 @@ def init_decide_prep(pdb_id: str, antigen_url: Optional[str], *, job_store: JobS
         run_manage_rfa("prep-target", [pdb_id], log=_log)
 
     job_store.update(job_id, status=JobStatus.SUCCESS, message="Target ready")
+
+
+def _snapshot_target_state(pdb_id: str, *, keep: int = 8) -> Optional[Path]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = (targets_dir / pdb_id.upper()).resolve()
+    if not target_dir.exists():
+        return None
+
+    target_yaml = target_dir / "target.yaml"
+    prep_dir = target_dir / "prep"
+    if not target_yaml.exists() and not prep_dir.exists():
+        return None
+
+    history_root = target_dir / "history"
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    attempt = 0
+    snapshot_dir = history_root / timestamp
+    while snapshot_dir.exists():
+        attempt += 1
+        snapshot_dir = history_root / f"{timestamp}_{attempt:02d}"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_any = False
+    try:
+        if target_yaml.exists():
+            shutil.copy2(target_yaml, snapshot_dir / "target.yaml")
+            copied_any = True
+        if prep_dir.exists():
+            shutil.copytree(prep_dir, snapshot_dir / "prep")
+            copied_any = True
+    except Exception:
+        # Cleanup partially created snapshot on failure
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        raise
+
+    if not copied_any:
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        return None
+
+    _prune_old_snapshots(history_root, keep=keep)
+    return snapshot_dir
+
+
+def _prune_old_snapshots(history_root: Path, *, keep: int = 8) -> None:
+    if keep <= 0 or not history_root.exists():
+        return
+    snapshots = [p for p in history_root.iterdir() if p.is_dir()]
+    if len(snapshots) <= keep:
+        return
+    snapshots.sort(key=lambda p: p.stat().st_mtime)
+    for candidate in snapshots[:-keep]:
+        shutil.rmtree(candidate, ignore_errors=True)
 
 
 __all__ = ["PipelineError", "run_manage_rfa", "init_decide_prep"]

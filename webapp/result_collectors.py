@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import load_config
+from .models import AssessmentRunSummary
 
 
 class RankingsNotFoundError(FileNotFoundError):
@@ -139,10 +140,60 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
     )
 
 
+def list_assessment_runs(pdb_id: str) -> List[AssessmentRunSummary]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    pdb_dir = (targets_dir / pdb_id.upper()).resolve()
+    assessments_dir = pdb_dir / "designs" / "_assessments"
+    if not assessments_dir.exists():
+        return []
+
+    runs: List[AssessmentRunSummary] = []
+    for path in assessments_dir.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        rankings_path = path / "af3_rankings.tsv"
+        rankings_str: Optional[str] = None
+        total_rows: Optional[int] = None
+        if rankings_path.exists():
+            rankings_str = str(rankings_path)
+            total_rows = _estimate_row_count(rankings_path)
+        runs.append(
+            AssessmentRunSummary(
+                run_label=path.name,
+                updated_at=mtime,
+                rankings_path=rankings_str,
+                total_rows=total_rows,
+            )
+        )
+
+    runs.sort(key=lambda item: item.updated_at, reverse=True)
+    return runs
+
+
+def _estimate_row_count(path: Path, *, limit: int = 20000) -> int:
+    count = 0
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            # Skip header
+            next(handle, None)
+            for _ in handle:
+                count += 1
+                if count >= limit:
+                    break
+    except FileNotFoundError:
+        return 0
+    return count
+
+
 __all__ = [
     "RankingRowData",
     "RankingPayload",
     "RankingNotFoundError",
     "load_rankings",
+    "list_assessment_runs",
 ]
-

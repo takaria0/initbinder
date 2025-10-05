@@ -39,6 +39,15 @@ class JobSummary(BaseModel):
     created_at: float
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    pdb_id: Optional[str] = None
+    run_label: Optional[str] = None
+
+
+class AssessmentRunSummary(BaseModel):
+    run_label: str
+    updated_at: float
+    rankings_path: Optional[str] = None
+    total_rows: Optional[int] = None
 
 
 class AlignmentResponse(BaseModel):
@@ -54,6 +63,7 @@ class DesignRunRequest(BaseModel):
     num_sequences: int = Field(1, ge=1, le=32)
     temperature: float = Field(0.1, ge=0.0, le=1.0)
     binder_chain_id: str = Field("H", min_length=1, max_length=1)
+    af3_seed: int = Field(1, ge=0)
     run_label: Optional[str] = Field(None)
     submit: bool = Field(False, description="Submit jobs to scheduler immediately")
 

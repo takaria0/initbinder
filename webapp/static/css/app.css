@@ -199,6 +199,38 @@ button:active:not(:disabled) {
   font-weight: 600;
 }
 
+.run-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.run-history.empty {
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.run-history button {
+  background: #e0e7ff;
+  color: #1e293b;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.run-history button:hover:not(:disabled) {
+  background: #c7d2fe;
+}
+
+.run-history button.active {
+  background: #bfdbfe;
+  border-color: rgba(37, 99, 235, 0.35);
+}
+
 .job-list .meta {
   font-size: 0.75rem;
   color: #475569;

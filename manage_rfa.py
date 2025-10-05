@@ -1248,19 +1248,40 @@ def main():
             launch = led/f"launch_pipeline_{args.pdb}_{ts}.sh"
             lines = ["#!/bin/bash", "set -euo pipefail"]
             first_arm = next(iter(rfd_scripts))
+            first_rfd_name = rfd_scripts[first_arm]["script"].name
+            first_mpnn_name = mpnn_scripts[first_arm]["script"].name
+            first_af3_stage1_name = af3_scripts[first_arm]["script_stage1"].name
+            first_af3_stage2_name = af3_scripts[first_arm]["script_stage2"].name
             lines.extend([
                 f'echo "[LAUNCH] {first_arm} (with shared AF3 seed)"',
                 f'jid_rfd_0=$(sbatch {rfd_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_rfd_name} -> ${{jid_rfd_0}}"',
+                'echo "Submitted batch job ${jid_rfd_0}"',
                 f'jid_mpnn_0=$(sbatch --dependency=afterok:${{jid_rfd_0}} {mpnn_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_mpnn_name} -> ${{jid_mpnn_0}}"',
+                'echo "Submitted batch job ${jid_mpnn_0}"',
                 f'jid_seed=$(sbatch --dependency=afterok:${{jid_mpnn_0}} {af3_scripts[first_arm]["script_stage1"]} | awk \'{{print $4}}\')',
-                f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')'
+                f'echo "[launch] {first_af3_stage1_name} -> ${{jid_seed}}"',
+                'echo "Submitted batch job ${jid_seed}"',
+                f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_af3_stage2_name} -> ${{jid_af3s2_0}}"',
+                'echo "Submitted batch job ${jid_af3s2_0}"'
             ])
             for idx, arm_key in enumerate([k for k in rfd_scripts.keys() if k != first_arm], start=1):
+                rfd_name = rfd_scripts[arm_key]["script"].name
+                mpnn_name = mpnn_scripts[arm_key]["script"].name
+                af3_stage2_name = af3_scripts[arm_key]["script_stage2"].name
                 lines.extend([
                     f'echo "[LAUNCH] {arm_key} (reuse shared AF3 seed)"',
                     f'jid_rfd_{idx}=$(sbatch {rfd_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+                    f'echo "[launch] {rfd_name} -> ${{jid_rfd_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_rfd_{idx}}}"',
                     f'jid_mpnn_{idx}=$(sbatch --dependency=afterok:${{jid_rfd_{idx}}} {mpnn_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
-                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')'
+                    f'echo "[launch] {mpnn_name} -> ${{jid_mpnn_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_mpnn_{idx}}}"',
+                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')',
+                    f'echo "[launch] {af3_stage2_name} -> ${{jid_af3s2_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_af3s2_{idx}}}"'
                 ])
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")

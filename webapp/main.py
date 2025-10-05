@@ -15,6 +15,7 @@ from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
 from .models import (
     AlignmentResponse,
+    AssessmentRunSummary,
     DesignRunRequest,
     DesignRunResponse,
     ExportRequest,
@@ -32,7 +33,7 @@ from .models import (
     TargetInitResponse,
 )
 from .pymol import PyMolLaunchError, launch_hotspots, launch_top_binders
-from .result_collectors import RankingsNotFoundError, load_rankings
+from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
 from .workflows import submit_design_run, submit_export, submit_target_initialization
 
 app = FastAPI(title="InitBinder UI API", version="0.1.0")
@@ -99,6 +100,15 @@ async def api_job_list(limit: int = 20) -> list[JobSummary]:
     records.sort(key=lambda rec: rec.created_at, reverse=True)
     summaries: list[JobSummary] = []
     for rec in records[:limit]:
+        details = rec.details or {}
+        pdb_id = None
+        if isinstance(details, dict):
+            pdb_id = details.get("pdb_id") or details.get("pdb")
+            if pdb_id:
+                pdb_id = str(pdb_id).upper()
+        run_label = None
+        if isinstance(details, dict):
+            run_label = details.get("run_label")
         summaries.append(
             JobSummary(
                 job_id=rec.job_id,
@@ -108,6 +118,8 @@ async def api_job_list(limit: int = 20) -> list[JobSummary]:
                 created_at=rec.created_at,
                 started_at=rec.started_at,
                 finished_at=rec.finished_at,
+                pdb_id=pdb_id,
+                run_label=run_label,
             )
         )
     return summaries
@@ -179,6 +191,11 @@ async def api_rankings(
         scatter=scatter,
         source_path=str(payload.source_path),
     )
+
+
+@app.get("/api/targets/{pdb_id}/runs", response_model=list[AssessmentRunSummary])
+async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
+    return list_assessment_runs(pdb_id)
 
 
 @app.post("/api/targets/{pdb_id}/pymol/hotspots", response_model=PyMolHotspotResponse)

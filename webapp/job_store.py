@@ -47,6 +47,7 @@ class JobStore:
         self._persist_dir = persist_dir
         if self._persist_dir:
             self._persist_dir.mkdir(parents=True, exist_ok=True)
+            self._restore_from_disk()
 
     # -- job lifecycle -----------------------------------------------------
     def create_job(self, kind: str, label: str, *, job_id: Optional[str] = None,
@@ -100,6 +101,62 @@ class JobStore:
         path = self._persist_dir / f"{record.job_id}.json"
         path.write_text(json.dumps(record.to_dict(), indent=2))
 
+    # -- persistence helpers -----------------------------------------------
+    def _restore_from_disk(self) -> None:
+        if not self._persist_dir:
+            return
+
+        candidates = sorted(self._persist_dir.glob("*.json"))
+        restored: Dict[str, JobRecord] = {}
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            def _coerce_float(value: Optional[object]) -> Optional[float]:
+                if value is None:
+                    return None
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            job_id = str(payload.get("job_id") or path.stem)
+            kind = str(payload.get("kind") or "unknown")
+            label = str(payload.get("label") or job_id)
+            status_raw = payload.get("status", JobStatus.PENDING.value)
+            try:
+                status = JobStatus(status_raw)
+            except ValueError:
+                status = JobStatus.PENDING
+
+            record = JobRecord(
+                job_id=job_id,
+                kind=kind,
+                label=label,
+                status=status,
+                created_at=_coerce_float(payload.get("created_at")) or path.stat().st_mtime,
+                started_at=_coerce_float(payload.get("started_at")),
+                finished_at=_coerce_float(payload.get("finished_at")),
+                progress=_coerce_float(payload.get("progress")),
+                message=payload.get("message"),
+                details=payload.get("details") or {},
+                logs=list(payload.get("logs") or []),
+            )
+            restored[job_id] = record
+
+        if not restored:
+            return
+
+        # Limit to most recent entries by created_at to keep memory bounded.
+        recent = sorted(restored.values(), key=lambda rec: rec.created_at, reverse=True)
+        for record in recent[:500]:
+            self._jobs[record.job_id] = record
+
 
 _default_store: Optional[JobStore] = None
 
@@ -117,4 +174,3 @@ __all__ = [
     "JobStore",
     "get_job_store",
 ]
-

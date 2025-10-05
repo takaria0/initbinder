@@ -105,19 +105,31 @@ class ClusterClient:
         return target
 
     # -- rsync helpers ----------------------------------------------------
-    def rsync_push(self, local: Path, remote_relative: Path, *, delete: bool = False, remote_base: Optional[Path] = None) -> CommandResult:
+    def rsync_push(self, local: Path, remote_relative: Path, *, delete: bool = False,
+                   remote_base: Optional[Path] = None) -> CommandResult:
         local = local.expanduser().resolve()
         if not local.exists():
             raise FileNotFoundError(local)
 
+        is_dir = local.is_dir()
+
         if self.cfg.mock:
             dest = (self._mock_root / remote_relative).resolve()
             if dest.exists() and delete:
-                shutil.rmtree(dest)
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(local, dest)
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            if is_dir:
+                shutil.copytree(local, dest)
+            else:
+                shutil.copy2(local, dest)
             print(f"[cluster] rsync_push (mock) {local} -> {dest}", flush=True)
             return CommandResult(0, f"[mock] copied {local} -> {dest}", "")
 
@@ -125,13 +137,18 @@ class ClusterClient:
         if base is None:
             raise RuntimeError("remote_root not configured")
         remote_path = Path(base) / remote_relative
+        if not is_dir:
+            # Ensure destination directory exists before rsync when pushing a single file
+            self.run(f"mkdir -p {shlex.quote(str(remote_path.parent))}", check=True)
         target = f"{self._ssh_target()}:{remote_path}"
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
         print(f"[cluster] rsync_push {local} -> {target} delete={delete}", flush=True)
-        args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, str(local) + "/", str(target) + "/"]
-        if delete:
+        src = str(local) + ("/" if is_dir else "")
+        dest = str(target) + ("/" if is_dir else "")
+        args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, dest]
+        if delete and is_dir:
             args.insert(1, "--delete")
         return self._run(args)
 
@@ -205,26 +222,60 @@ class ClusterClient:
         if self.cfg.mock:
             dest = (self._mock_root / remote_rel).resolve()
             if dest.exists():
-                backup = dest.parent / f"{dest.name}_{timestamp}"
-                if backup.exists():
-                    shutil.rmtree(backup)
-                dest.rename(backup)
-                backup_rel = Path("mock") / backup.relative_to(self._mock_root)
-                print(f"[cluster] backup (mock) {dest} -> {backup}", flush=True)
+                history_root = dest / "history"
+                snapshot_dir = history_root / timestamp
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                copied = False
+                target_yaml = dest / "target.yaml"
+                if target_yaml.exists():
+                    shutil.copy2(target_yaml, snapshot_dir / "target.yaml")
+                    copied = True
+                prep_dir = dest / "prep"
+                if prep_dir.exists():
+                    shutil.copytree(prep_dir, snapshot_dir / "prep")
+                    copied = True
+                if copied:
+                    backup_rel = Path("mock") / snapshot_dir.relative_to(self._mock_root)
+                    print(f"[cluster] backup (mock) snapshot -> {backup_rel}", flush=True)
+                else:
+                    shutil.rmtree(snapshot_dir, ignore_errors=True)
         else:
             target_base = Path(rel_root)
+            target_path = target_base / remote_rel
+            history_rel = remote_rel / "history"
+            snapshot_rel = history_rel / timestamp
             self.run(f"mkdir -p {shlex.quote(str(target_base / rel.parent))}", check=True)
-            exists_result = self.run(
-                f"if [ -d {shlex.quote(str(target_base / remote_rel))} ]; then echo 1; fi",
-                check=False,
-            )
-            if exists_result.stdout.strip():
-                backup_rel = remote_rel.parent / f"{remote_rel.name}_{timestamp}"
-                self.run(
-                    f"mv {shlex.quote(str(target_base / remote_rel))} {shlex.quote(str(target_base / backup_rel))}",
-                    check=True,
-                )
-                print(f"[cluster] backup {rel} -> {backup_rel}", flush=True)
+
+            target_q = shlex.quote(str(target_path))
+            history_q = shlex.quote(str(target_base / history_rel))
+            snapshot_q = shlex.quote(str(target_base / snapshot_rel))
+            backup_cmd = textwrap.dedent(
+                f"""
+                set -euo pipefail
+                if [ -d {target_q} ]; then
+                    mkdir -p {history_q}
+                    need=0
+                    if [ -f {target_q}/target.yaml ]; then
+                        mkdir -p {snapshot_q}
+                        cp {target_q}/target.yaml {snapshot_q}/target.yaml
+                        need=1
+                    fi
+                    if [ -d {target_q}/prep ]; then
+                        mkdir -p {snapshot_q}
+                        cp -a {target_q}/prep {snapshot_q}/prep
+                        need=1
+                    fi
+                    if [ $need -ne 0 ]; then
+                        echo SNAPSHOT_CREATED
+                    elif [ -d {snapshot_q} ]; then
+                        rmdir {snapshot_q} >/dev/null 2>&1 || true
+                    fi
+                fi
+                """
+            ).strip()
+            backup_result = self.run(backup_cmd, check=False)
+            if "SNAPSHOT_CREATED" in (backup_result.stdout or ""):
+                backup_rel = snapshot_rel
 
         result = self.rsync_push(local_dir, remote_rel, delete=delete, remote_base=Path(rel_root))
         return result, str(backup_rel) if backup_rel else None
@@ -232,7 +283,16 @@ class ClusterClient:
     def sync_tools(self) -> CommandResult:
         local_dir = (self.local_root / "tools").resolve()
         rel = Path("tools")
-        return self.rsync_push(local_dir, rel)
+        result = self.rsync_push(local_dir, rel)
+        # Ensure single-file entrypoints stay current on the cluster alongside tools.
+        for name in ("manage_rfa.py", "assess_rfa_design.py"):
+            path = (self.local_root / name).resolve()
+            if path.exists():
+                try:
+                    self.rsync_push(path, Path(name), remote_base=self.remote_root)
+                except Exception as exc:
+                    print(f"[cluster] warn: failed to sync {name}: {exc}", flush=True)
+        return result
 
     def sync_assessments_back(self, pdb_id: str, run_label: Optional[str] = None) -> CommandResult:
         base_rel = Path("targets") / pdb_id.upper() / "designs"

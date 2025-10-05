@@ -9,6 +9,7 @@ const state = {
   selectedDesign: null,
   jobs: [],
   selectedJobId: null,
+  runHistory: {},
 };
 
 const el = {
@@ -34,6 +35,7 @@ const el = {
   designTemp: document.querySelector('#design-temp'),
   designRunLabel: document.querySelector('#design-run-label'),
   designBinderChain: document.querySelector('#design-binder-chain'),
+  designAf3Seed: document.querySelector('#design-af3-seed'),
   refreshResultsBtn: document.querySelector('#refresh-results'),
   resultsMeta: document.querySelector('#results-meta'),
   binderDetail: document.querySelector('#binder-detail'),
@@ -55,6 +57,8 @@ const el = {
   syncResultsBtn: document.querySelector('#sync-results'),
   jobList: document.querySelector('#job-list'),
   refreshJobsBtn: document.querySelector('#refresh-jobs'),
+  runHistory: document.querySelector('#run-history'),
+  runLabelOptions: document.querySelector('#run-label-options'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -73,6 +77,17 @@ function timestampString() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function setCurrentPdb(pdbId, options = {}) {
+  if (!pdbId) return;
+  const upper = pdbId.toUpperCase();
+  state.currentPdb = upper;
+  if (options.updateInput !== false && el.pdbInput) {
+    el.pdbInput.value = upper;
+  }
+  renderRunHistory(upper);
+  fetchRunHistory(upper);
 }
 
 function refreshRunLabel(force = false) {
@@ -128,8 +143,98 @@ async function fetchJobList() {
     }
     state.jobs = await res.json();
     renderJobList();
+    if (state.currentPdb) {
+      fetchRunHistory(state.currentPdb);
+    }
   } catch (err) {
     console.error('Failed to fetch jobs', err);
+  }
+}
+
+async function fetchRunHistory(pdbId) {
+  if (!pdbId || !el.runHistory) return;
+  const upper = pdbId.toUpperCase();
+  try {
+    const res = await fetch(`/api/targets/${upper}/runs`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const payload = await res.json();
+    state.runHistory[upper] = Array.isArray(payload) ? payload : [];
+    if (state.currentPdb === upper) {
+      renderRunHistory(upper);
+    }
+  } catch (err) {
+    console.error('Failed to fetch run history', err);
+    if (!state.runHistory[upper]) {
+      state.runHistory[upper] = [];
+    }
+    if (state.currentPdb === upper) {
+      renderRunHistory(upper);
+    }
+  }
+}
+
+function highlightRunChip(selectedLabel) {
+  if (!el.runHistory) return;
+  const target = (selectedLabel || '').trim();
+  el.runHistory.querySelectorAll('button[data-run-label]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.runLabel === target && target !== '');
+  });
+}
+
+function renderRunHistory(pdbId) {
+  if (!el.runHistory) return;
+  const upper = pdbId ? pdbId.toUpperCase() : state.currentPdb;
+  const runs = (upper && state.runHistory[upper]) || [];
+
+  el.runHistory.innerHTML = '';
+  el.runHistory.classList.toggle('empty', runs.length === 0);
+
+  if (!runs.length) {
+    el.runHistory.textContent = 'No local assessments yet.';
+  } else {
+    const frag = document.createDocumentFragment();
+    const selected = el.resultsRunLabel ? el.resultsRunLabel.value.trim() : '';
+    runs.forEach((run) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.runLabel = run.run_label;
+      btn.textContent = run.run_label;
+      const parts = [];
+      parts.push(`Updated ${new Date(run.updated_at * 1000).toLocaleString()}`);
+      if (typeof run.total_rows === 'number') {
+        parts.push(`${run.total_rows} rows`);
+      }
+      btn.title = parts.join(' · ');
+      btn.classList.toggle('active', run.run_label === selected && selected !== '');
+      btn.addEventListener('click', () => {
+        if (el.resultsRunLabel) {
+          el.resultsRunLabel.value = run.run_label;
+          highlightRunChip(run.run_label);
+        }
+        fetchRankings();
+      });
+      frag.appendChild(btn);
+    });
+    el.runHistory.appendChild(frag);
+  }
+
+  if (el.runLabelOptions) {
+    el.runLabelOptions.innerHTML = '';
+    runs.forEach((run) => {
+      const option = document.createElement('option');
+      option.value = run.run_label;
+      el.runLabelOptions.appendChild(option);
+    });
+  }
+
+  if (el.resultsRunLabel) {
+    if (runs.length > 0 && !el.resultsRunLabel.value) {
+      el.resultsRunLabel.placeholder = runs[0].run_label;
+    } else if (runs.length === 0) {
+      el.resultsRunLabel.placeholder = 'latest';
+    }
   }
 }
 
@@ -147,17 +252,41 @@ function renderJobList() {
     label.textContent = job.label || job.job_id;
     const meta = document.createElement('div');
     meta.className = 'meta';
+    const parts = [];
+    if (job.pdb_id) parts.push(job.pdb_id.toUpperCase());
+    parts.push(job.kind);
+    parts.push(job.status);
+    if (job.run_label) parts.push(`run ${job.run_label}`);
     const created = new Date(job.created_at * 1000).toLocaleString();
-    meta.textContent = `${job.kind} - ${job.status} - ${created}`;
+    parts.push(created);
+    meta.textContent = parts.join(' · ');
     li.appendChild(label);
     li.appendChild(meta);
     li.addEventListener('click', () => {
       state.selectedJobId = job.job_id;
       renderJobList();
+      if (job.pdb_id) {
+        setCurrentPdb(job.pdb_id);
+      }
+      if (job.run_label && el.resultsRunLabel) {
+        el.resultsRunLabel.value = job.run_label;
+      }
       startJobPolling(job.job_id, null, { manual: true });
+      highlightRunChip(job.run_label || '');
     });
     el.jobList.appendChild(li);
   });
+
+  if (!state.currentPdb && state.jobs.length > 0) {
+    const first = state.jobs[0];
+    if (first.pdb_id) {
+      setCurrentPdb(first.pdb_id);
+      if (first.run_label && el.resultsRunLabel) {
+        el.resultsRunLabel.value = first.run_label;
+        highlightRunChip(first.run_label);
+      }
+    }
+  }
 }
 
 function showAlert(message, isError = true) {
@@ -184,7 +313,7 @@ async function queueTargetInit(event) {
   event.preventDefault();
   const pdbId = el.pdbInput.value.trim().toUpperCase();
   if (!pdbId) return;
-  state.currentPdb = pdbId;
+  setCurrentPdb(pdbId);
   setBadge(el.targetBadge, 'Queued…');
   el.targetSubmit.disabled = true;
   el.pymolHotspots.disabled = true;
@@ -231,6 +360,12 @@ async function queueDesignRun() {
     num_sequences: Number(el.designNumSeq.value) || 1,
     temperature: Number(el.designTemp.value) || 0.1,
     binder_chain_id: el.designBinderChain.value.trim() || 'H',
+    af3_seed: (() => {
+      const raw = Number(el.designAf3Seed?.value ?? 1);
+      const fallback = 1;
+      if (!Number.isFinite(raw)) return fallback;
+      return Math.max(0, Math.floor(raw));
+    })(),
     run_label: el.designRunLabel.value.trim() || null,
   };
 
@@ -334,6 +469,13 @@ async function fetchRankings() {
       el.resultsMeta,
       `${payload.rows.length} designs · run ${payload.run_label || 'latest'}`,
     );
+    if (el.resultsRunLabel && payload.run_label) {
+      el.resultsRunLabel.value = payload.run_label;
+    }
+    highlightRunChip(el.resultsRunLabel ? el.resultsRunLabel.value : '');
+    if (state.currentPdb) {
+      fetchRunHistory(state.currentPdb);
+    }
   } catch (err) {
     setBadge(el.resultsMeta, `Rankings failed: ${err.message || err}`, 'rgba(248, 113, 113, 0.2)');
   } finally {
@@ -533,6 +675,11 @@ function updateJobUI(job) {
   if (!job) return;
   resetJobLog(job.logs.join('\n'));
 
+  if (job.details && typeof job.details === 'object' && job.details.run_label && el.resultsRunLabel) {
+    el.resultsRunLabel.value = job.details.run_label;
+    highlightRunChip(job.details.run_label);
+  }
+
   const ctx = state.jobContext;
   if (ctx === 'target') {
     if (job.status === 'running' || job.status === 'pending') {
@@ -547,6 +694,9 @@ function updateJobUI(job) {
       setBadge(el.designStatus, 'Ready for submission');
       el.refreshResultsBtn.disabled = false;
       refreshRunLabel(true);
+      if (state.currentPdb) {
+        fetchRunHistory(state.currentPdb);
+      }
     } else {
       setBadge(el.targetBadge, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Target workflow failed.');
@@ -562,6 +712,9 @@ function updateJobUI(job) {
       el.refreshResultsBtn.disabled = false;
       stopJobPolling();
       refreshRunLabel(true);
+      if (state.currentPdb) {
+        fetchRunHistory(state.currentPdb);
+      }
     } else {
       setBadge(el.designStatus, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Design pipeline failed.');
@@ -581,6 +734,11 @@ function updateJobUI(job) {
       el.exportButton.disabled = false;
       stopJobPolling();
     }
+  } else {
+    const extra = job.message ? ` — ${job.message}` : '';
+    const summary = `${job.label} (${job.kind}) ${job.status}${extra}`;
+    const isError = job.status !== 'success' && job.status !== 'pending' && job.status !== 'running';
+    showAlert(summary, isError);
   }
   fetchJobList();
 }
@@ -707,6 +865,9 @@ async function syncResultsFromCluster() {
     }
     const payload = await res.json();
     showAlert(payload.message || 'Synced results.', false);
+    if (state.currentPdb) {
+      fetchRunHistory(state.currentPdb);
+    }
   } catch (err) {
     showAlert(err.message || String(err));
   } finally {
@@ -749,6 +910,19 @@ function initEventHandlers() {
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
   el.syncResultsBtn.addEventListener('click', syncResultsFromCluster);
+  if (el.resultsRunLabel) {
+    el.resultsRunLabel.addEventListener('input', (event) => {
+      highlightRunChip(event.target.value || '');
+    });
+  }
+  if (el.pdbInput) {
+    el.pdbInput.addEventListener('blur', () => {
+      const pdb = el.pdbInput.value.trim();
+      if (pdb.length === 4) {
+        setCurrentPdb(pdb);
+      }
+    });
+  }
   if (el.refreshJobsBtn) {
     el.refreshJobsBtn.addEventListener('click', () => {
       fetchJobList();

@@ -108,6 +108,8 @@ def _build_pipeline_args(
         args.extend(["--binder_chain_id", request.binder_chain_id])
     if run_label:
         args.extend(["--run_tag", run_label])
+    if request.af3_seed is not None:
+        args.extend(["--model_seeds", str(request.af3_seed)])
     return args
 
 
@@ -130,10 +132,12 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "arms": arms,
             "designs_per_task": designs_per_task,
             "run_label": run_label,
+            "af3_seed": request.af3_seed,
         },
     )
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
     job_store.append_log(job_id, f"[designs_per_task] {designs_per_task}")
+    job_store.append_log(job_id, f"[af3_seed] {request.af3_seed}")
 
     cluster = ClusterClient()
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
