@@ -39,6 +39,7 @@ from .models import (
     TargetInitRequest,
     TargetInitResponse,
 )
+from .pipeline import get_target_status
 from .pymol import PyMolLaunchError, launch_hotspots, launch_top_binders
 from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
 from .workflows import (
@@ -156,6 +157,11 @@ async def api_target_preset_delete(preset_id: str) -> dict[str, object]:
     if not removed:
         raise HTTPException(status_code=404, detail="Preset not found")
     return {"status": "ok", "preset_id": preset_id}
+
+
+@app.get("/api/targets/{pdb_id}/status")
+async def api_target_status(pdb_id: str) -> dict[str, object]:
+    return get_target_status(pdb_id)
 
 
 @app.get("/api/targets/{pdb_id}/alignment", response_model=AlignmentResponse)

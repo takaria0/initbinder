@@ -89,6 +89,38 @@ def _persist_num_epitopes(pdb_id: str, num_epitopes: int) -> None:
         raise PipelineError(f"Failed to persist num_epitopes to {target_yaml}: {exc}") from exc
 
 
+def get_target_status(pdb_id: str) -> dict[str, object]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = (targets_dir / pdb_id.upper()).resolve()
+
+    target_yaml = target_dir / "target.yaml"
+    prep_dir = target_dir / "prep"
+    prepared_pdb = prep_dir / "prepared.pdb"
+    hotspot_files = []
+    if prep_dir.exists():
+        hotspot_files = list(prep_dir.glob("*hotspot*.json")) or list(prep_dir.glob("epitope_*hotspots*.json"))
+
+    try:
+        updated_candidates = [
+            target_yaml.stat().st_mtime if target_yaml.exists() else None,
+            prepared_pdb.stat().st_mtime if prepared_pdb.exists() else None,
+        ]
+        updated_at = max([ts for ts in updated_candidates if ts is not None], default=None)
+    except FileNotFoundError:
+        updated_at = None
+
+    return {
+        "pdb_id": pdb_id.upper(),
+        "target_path": str(target_dir) if target_dir.exists() else None,
+        "has_target_yaml": target_yaml.exists(),
+        "has_prep": prepared_pdb.exists(),
+        "has_hotspots": bool(hotspot_files),
+        "prep_path": str(prep_dir) if prep_dir.exists() else None,
+        "updated_at": updated_at,
+    }
+
+
 def init_decide_prep(
     pdb_id: str,
     antigen_url: Optional[str],
@@ -185,4 +217,4 @@ def _prune_old_snapshots(history_root: Path, *, keep: int = 8) -> None:
         shutil.rmtree(candidate, ignore_errors=True)
 
 
-__all__ = ["PipelineError", "run_manage_rfa", "init_decide_prep"]
+__all__ = ["PipelineError", "run_manage_rfa", "init_decide_prep", "get_target_status"]

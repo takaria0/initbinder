@@ -18,6 +18,7 @@ const state = {
   rankingsFetching: false,
   activeRunLabel: '',
   galleryAvailable: false,
+  targetStatus: null,
 };
 
 const el = {
@@ -131,6 +132,43 @@ function renderPresets() {
     btn.addEventListener('click', () => selectPreset(preset));
     el.presetList.appendChild(btn);
   });
+}
+
+function applyTargetStatus(status = state.targetStatus) {
+  const effectiveStatus = status || state.targetStatus;
+  const isTargetJobActive = state.jobContext === 'target' && Boolean(state.jobPoller);
+  if (effectiveStatus && el.pymolHotspots) {
+    const readyForHotspots = Boolean(effectiveStatus.has_prep);
+    el.pymolHotspots.disabled = isTargetJobActive || !readyForHotspots;
+  }
+  if (el.designSubmit && el.designStatus && !isTargetJobActive) {
+    const readyForDesigns = Boolean(effectiveStatus && effectiveStatus.has_prep);
+    if (readyForDesigns) {
+      el.designSubmit.disabled = false;
+      setBadge(el.designStatus, 'Ready for submission');
+    } else {
+      el.designSubmit.disabled = true;
+      setBadge(el.designStatus, 'Awaiting target prep');
+    }
+  }
+}
+
+async function fetchTargetStatus(pdbId = state.currentPdb, { silent = true } = {}) {
+  const target = (pdbId || '').trim();
+  if (!target) return null;
+  try {
+    const res = await fetch(`/api/targets/${target}/status`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    state.targetStatus = payload;
+    applyTargetStatus(payload);
+    return payload;
+  } catch (err) {
+    if (!silent) {
+      console.warn('Failed to retrieve target status', err);
+    }
+    return null;
+  }
 }
 
 function syncActivePreset() {
@@ -268,6 +306,7 @@ function setCurrentPdb(pdbId, options = {}) {
     loadAlignment(upper);
   }
   scheduleRankingsPolling();
+  fetchTargetStatus(upper, { silent: true });
 }
 
 function refreshRunLabel(force = false) {
@@ -565,6 +604,7 @@ async function queueTargetInit(event) {
   setBadge(el.targetBadge, 'Queued…');
   el.targetSubmit.disabled = true;
   el.pymolHotspots.disabled = true;
+  state.targetStatus = null;
   el.jobAlert.hidden = true;
   resetJobLog('Submitting init-target job…');
 
@@ -1032,6 +1072,7 @@ function updateJobUI(job) {
       refreshRunLabel(true);
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
+        fetchTargetStatus(state.currentPdb, { silent: true });
       }
       loadPresets();
       scheduleRankingsPolling();
@@ -1337,6 +1378,7 @@ function disableFutureSections() {
   el.pymolTop.disabled = true;
   el.pymolHotspots.disabled = true;
   if (el.assessSubmit) el.assessSubmit.disabled = true;
+  state.targetStatus = null;
 }
 
 function initEventHandlers() {
