@@ -541,7 +541,11 @@ PY
             return status
 
         check_cmd = ["ssh", *self._control_args(include_persist=True), "-O", "check", self._ssh_target()]
-        result = subprocess.run(check_cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            status["message"] = "SSH control check timed out"
+            return status
         status["control_master"] = result.returncode == 0
         if not status["control_master"]:
             msg = (result.stderr or result.stdout or "Control master not active").strip()
@@ -556,7 +560,11 @@ PY
                 self._ssh_target(),
                 f"test -d {remote_root} && echo OK",
             ]
-            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            try:
+                probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                status["message"] = "Remote root probe timed out"
+                return status
             status["remote_root_exists"] = "OK" in (probe.stdout or "")
             if probe.stderr:
                 status["message"] = probe.stderr.strip()
@@ -568,7 +576,11 @@ PY
                 self._ssh_target(),
                 f"test -d {target_root} && echo OK",
             ]
-            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            try:
+                probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                status.setdefault("message", "Target root probe timed out")
+                return status
             status["target_root_exists"] = "OK" in (probe.stdout or "")
             if probe.stderr:
                 status.setdefault("message", probe.stderr.strip())

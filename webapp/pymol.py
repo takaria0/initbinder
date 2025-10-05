@@ -43,12 +43,39 @@ def _copy_bundle(src: Path, dest: Path) -> Path:
 
 def _launch_pymol(script_path: Path) -> None:
     cfg = load_config()
-    pymol_bin = cfg.cluster.pymol_path or "pymol"
-    # On macOS prefer the GUI launcher when no explicit binary is configured.
-    if sys.platform == "darwin" and (not cfg.cluster.pymol_path or cfg.cluster.pymol_path.strip() in {"", "pymol"}):
+    script_arg = str(script_path)
+
+    candidates: list[str] = []
+    configured_path = (cfg.cluster.pymol_path or "").strip()
+    if configured_path:
+        candidates.append(configured_path)
+    if sys.platform == "darwin":
+        candidates.append("/Applications/PyMOL.app/Contents/MacOS/PyMOL")
+    candidates.append("pymol")
+
+    last_error: Exception | None = None
+    for cmd in candidates:
+        if not cmd:
+            continue
         try:
             subprocess.Popen(
-                ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
+                [cmd, script_arg],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        except FileNotFoundError:
+            last_error = PyMolLaunchError(f"PyMOL executable not found: {cmd}")
+            continue
+        except Exception as exc:  # pragma: no cover - best effort
+            last_error = PyMolLaunchError(str(exc))
+            continue
+
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(
+                ["open", "-n", "-a", "/Applications/PyMOL.app", script_arg],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -58,33 +85,14 @@ def _launch_pymol(script_path: Path) -> None:
             raise PyMolLaunchError(
                 "macOS `open` command not available; install the PyMOL CLI or set cluster.pymol_path"
             ) from exc
-        except Exception:
-            # Fall back to the configured binary so we can surface any useful error message from it.
-            pass
-    try:
-        subprocess.Popen(
-            [pymol_bin, str(script_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except FileNotFoundError as exc:  # pragma: no cover - depends on environment
-        if sys.platform == "darwin":
-            try:
-                subprocess.Popen(
-                    ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                return
-            except Exception as mac_exc:  # pragma: no cover - best effort
-                raise PyMolLaunchError(
-                    "PyMOL executable not found. Install the command-line tool or set cluster.pymol_path"
-                ) from mac_exc
-        raise PyMolLaunchError(f"PyMOL executable not found: {pymol_bin}") from exc
-    except Exception as exc:  # pragma: no cover - best effort
-        raise PyMolLaunchError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - best effort
+            last_error = PyMolLaunchError(str(exc))
+
+    if last_error is not None:
+        raise last_error
+    raise PyMolLaunchError(
+        "PyMOL executable not found. Install the command-line tool or set cluster.pymol_path"
+    )
 
 
 def _require_pymol_utils() -> None:
