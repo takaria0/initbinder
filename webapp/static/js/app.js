@@ -19,6 +19,7 @@ const state = {
   activeRunLabel: '',
   galleryAvailable: false,
   targetStatus: null,
+  targetDetails: null,
 };
 
 const el = {
@@ -80,6 +81,13 @@ const el = {
   runHistory: document.querySelector('#run-history'),
   runLabelOptions: document.querySelector('#run-label-options'),
   activeRunName: document.querySelector('#active-run-name'),
+  selectionCard: document.querySelector('#current-selection-card'),
+  selectionPdb: document.querySelector('#current-selection-pdb'),
+  selectionName: document.querySelector('#current-selection-name'),
+  selectionAntigen: document.querySelector('#current-selection-antigen'),
+  epitopeList: document.querySelector('#epitope-list'),
+  chainList: document.querySelector('#chain-list'),
+  antigenDetails: document.querySelector('#antigen-details'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -108,6 +116,170 @@ function setDebugMode(enabled) {
 function updateActiveRunDisplay() {
   if (!el.activeRunName) return;
   el.activeRunName.textContent = state.activeRunLabel || 'latest';
+}
+
+function renderTargetInsights(status = state.targetStatus) {
+  if (!el.epitopeList || !el.chainList || !el.antigenDetails) return;
+
+  const target = status || {};
+  state.targetDetails = target;
+
+  const epitopes = Array.isArray(target.epitopes) ? target.epitopes : [];
+  el.epitopeList.innerHTML = '';
+  if (epitopes.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'insight-empty';
+    li.textContent = 'No epitope metadata available yet.';
+    el.epitopeList.appendChild(li);
+  } else {
+    epitopes.forEach((ep) => {
+      const li = document.createElement('li');
+      const title = document.createElement('span');
+      title.className = 'insight-title';
+      title.textContent = ep.name || 'Unnamed epitope';
+      li.appendChild(title);
+      const residues = Array.isArray(ep.residues) ? ep.residues.filter(Boolean) : [];
+      const residueLine = document.createElement('div');
+      residueLine.textContent = residues.length ? `Residues: ${residues.join(', ')}` : 'Residues: —';
+      li.appendChild(residueLine);
+      if (typeof ep.surface_exposed === 'boolean') {
+        const exposedLine = document.createElement('div');
+        exposedLine.textContent = ep.surface_exposed ? 'Surface exposed: yes' : 'Surface exposed: no';
+        li.appendChild(exposedLine);
+      }
+      if (typeof ep.hotspot_count === 'number') {
+        const hotspotLine = document.createElement('div');
+        hotspotLine.textContent = `Hotspots: ${ep.hotspot_count}`;
+        li.appendChild(hotspotLine);
+      }
+      el.epitopeList.appendChild(li);
+    });
+  }
+
+  const chains = Array.isArray(target.chains) ? target.chains : [];
+  el.chainList.innerHTML = '';
+  if (chains.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'insight-empty';
+    li.textContent = 'No chain annotations available.';
+    el.chainList.appendChild(li);
+  } else {
+    chains.forEach((chain) => {
+      const li = document.createElement('li');
+      const title = document.createElement('span');
+      title.className = 'insight-title';
+      const chainId = chain.id || chain.chain_id || chain.chain || '—';
+      title.textContent = `Chain ${chainId}`;
+      li.appendChild(title);
+      const descBits = [];
+      if (chain.description) descBits.push(chain.description);
+      if (chain.length) descBits.push(`${chain.length} aa`);
+      if (chain.role) descBits.push(chain.role);
+      const detail = document.createElement('div');
+      detail.textContent = descBits.length ? descBits.join(' · ') : 'No additional description available.';
+      li.appendChild(detail);
+      el.chainList.appendChild(li);
+    });
+  }
+
+  const antigen = target.antigen || {};
+  el.antigenDetails.innerHTML = '';
+  const detailEntries = [];
+  if (antigen.url) detailEntries.push({ key: 'URL', value: antigen.url, type: 'link' });
+  if (antigen.accession) detailEntries.push({ key: 'Accession', value: antigen.accession });
+  if (antigen.expressed_range) detailEntries.push({ key: 'Expressed range', value: antigen.expressed_range });
+  if (antigen.expressed_length) detailEntries.push({ key: 'Expressed length', value: `${antigen.expressed_length} aa` });
+  if (antigen.allowed_range) detailEntries.push({ key: 'Allowed epitope range', value: antigen.allowed_range });
+  if (antigen.length) detailEntries.push({ key: 'Full length', value: `${antigen.length} aa` });
+  if (antigen.molecular_weight_kda) {
+    const massValue = typeof antigen.molecular_weight_kda === 'number'
+      ? `${antigen.molecular_weight_kda} kDa`
+      : String(antigen.molecular_weight_kda);
+    detailEntries.push({ key: 'Molecular mass', value: massValue });
+  }
+  if (antigen.expression_host) detailEntries.push({ key: 'Expression host', value: antigen.expression_host });
+  if (antigen.product_form) detailEntries.push({ key: 'Product form', value: antigen.product_form });
+  if (antigen.tags) {
+    const tags = Array.isArray(antigen.tags) ? antigen.tags.join(', ') : antigen.tags;
+    if (tags) detailEntries.push({ key: 'Tags', value: tags });
+  }
+  if (antigen.catalog) detailEntries.push({ key: 'Catalog', value: antigen.catalog });
+  if (antigen.notes) detailEntries.push({ key: 'Notes', value: antigen.notes });
+
+  if (detailEntries.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-note';
+    empty.textContent = 'No antigen metadata captured yet.';
+    el.antigenDetails.appendChild(empty);
+  } else {
+    detailEntries.forEach((entry) => {
+      const dt = document.createElement('dt');
+      dt.textContent = entry.key;
+      const dd = document.createElement('dd');
+      if (entry.type === 'link' && typeof entry.value === 'string' && /^https?:/i.test(entry.value)) {
+        const link = document.createElement('a');
+        link.href = entry.value;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = entry.value;
+        dd.appendChild(link);
+      } else {
+        dd.textContent = entry.value;
+      }
+      el.antigenDetails.appendChild(dt);
+      el.antigenDetails.appendChild(dd);
+    });
+  }
+}
+
+function renderCurrentSelection() {
+  if (!el.selectionCard) return;
+  const pdb = state.currentPdb || '';
+  if (el.selectionPdb) {
+    el.selectionPdb.textContent = pdb || '—';
+  }
+  let presetName = '';
+  if (state.activePresetId) {
+    const preset = state.presets.find((p) => p.id === state.activePresetId);
+    if (preset && preset.name) presetName = preset.name;
+  }
+  if (!presetName && state.targetDetails && state.targetDetails.target_name) {
+    presetName = state.targetDetails.target_name;
+  }
+  if (!presetName && el.targetName && el.targetName.value) {
+    presetName = el.targetName.value.trim();
+  }
+  if (el.selectionName) {
+    el.selectionName.textContent = `Preset: ${presetName || '—'}`;
+  }
+  const antigenUrl = (() => {
+    if (state.targetDetails && state.targetDetails.antigen && state.targetDetails.antigen.url) {
+      return state.targetDetails.antigen.url;
+    }
+    if (el.antigenInput && el.antigenInput.value) {
+      return el.antigenInput.value.trim();
+    }
+    return '';
+  })();
+  if (el.selectionAntigen) {
+    el.selectionAntigen.textContent = 'Antigen URL: ';
+    if (antigenUrl && /^https?:/i.test(antigenUrl)) {
+      const link = document.createElement('a');
+      link.href = antigenUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = antigenUrl;
+      el.selectionAntigen.appendChild(link);
+    } else if (antigenUrl) {
+      const span = document.createElement('span');
+      span.textContent = antigenUrl;
+      el.selectionAntigen.appendChild(span);
+    } else {
+      const span = document.createElement('span');
+      span.textContent = '—';
+      el.selectionAntigen.appendChild(span);
+    }
+  }
 }
 
 function renderPresets() {
@@ -162,6 +334,8 @@ async function fetchTargetStatus(pdbId = state.currentPdb, { silent = true } = {
     const payload = await res.json();
     state.targetStatus = payload;
     applyTargetStatus(payload);
+    renderTargetInsights(payload);
+    renderCurrentSelection();
     return payload;
   } catch (err) {
     if (!silent) {
@@ -175,6 +349,7 @@ function syncActivePreset() {
   if (!state.presets || state.presets.length === 0) {
     state.activePresetId = null;
     renderPresets();
+    renderCurrentSelection();
     return;
   }
   const pdb = state.currentPdb || (el.pdbInput?.value || '').trim().toUpperCase();
@@ -196,6 +371,7 @@ function syncActivePreset() {
     if (el.presetIdInput) el.presetIdInput.value = '';
   }
   renderPresets();
+  renderCurrentSelection();
 }
 
 async function touchPreset(preset) {
@@ -300,6 +476,7 @@ function setCurrentPdb(pdbId, options = {}) {
   state.activeRunLabel = '';
   updateActiveRunDisplay();
   syncActivePreset();
+  renderCurrentSelection();
   renderRunHistory(upper);
   fetchRunHistory(upper);
   if (options.loadAlignment) {
@@ -670,6 +847,8 @@ async function queueDesignRun() {
   setBadge(el.designStatus, 'Submitting…');
   resetJobLog('Submitting design pipeline…');
   el.jobAlert.hidden = true;
+  if (el.targetSubmit) el.targetSubmit.disabled = true;
+  if (el.assessSubmit) el.assessSubmit.disabled = true;
 
   try {
     const res = await fetch('/api/designs/run', {
@@ -689,6 +868,8 @@ async function queueDesignRun() {
     el.designSubmit.disabled = false;
     setBadge(el.designStatus, 'Error', 'rgba(248, 113, 113, 0.2)');
     showAlert(err.message || String(err));
+    if (el.targetSubmit) el.targetSubmit.disabled = false;
+    if (el.assessSubmit) el.assessSubmit.disabled = false;
   }
 }
 
@@ -1091,7 +1272,8 @@ function updateJobUI(job) {
       setBadge(el.designStatus, 'Cluster jobs submitted', 'rgba(134, 239, 172, 0.25)');
       el.designSubmit.disabled = false;
       el.refreshResultsBtn.disabled = false;
-       if (el.assessSubmit) el.assessSubmit.disabled = false;
+      if (el.targetSubmit) el.targetSubmit.disabled = false;
+      if (el.assessSubmit) el.assessSubmit.disabled = false;
       stopJobPolling();
       refreshRunLabel(true);
       if (state.currentPdb) {
@@ -1102,6 +1284,8 @@ function updateJobUI(job) {
       setBadge(el.designStatus, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Design pipeline failed.');
       el.designSubmit.disabled = false;
+      if (el.targetSubmit) el.targetSubmit.disabled = false;
+      if (el.assessSubmit) el.assessSubmit.disabled = false;
       stopJobPolling();
     }
   } else if (ctx === 'export') {
@@ -1380,6 +1564,9 @@ function disableFutureSections() {
   el.pymolHotspots.disabled = true;
   if (el.assessSubmit) el.assessSubmit.disabled = true;
   state.targetStatus = null;
+  state.targetDetails = null;
+  renderTargetInsights({});
+  renderCurrentSelection();
 }
 
 function initEventHandlers() {

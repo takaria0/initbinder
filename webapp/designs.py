@@ -232,6 +232,14 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.append_log(job_id, f"[assessment_shards] {assessment_shards}")
 
     cluster = ClusterClient()
+    local_target_dir = (workspace / "targets" / request.pdb_id.upper()).resolve()
+    remote_base = cluster.target_root or cluster.remote_root
+    remote_target_desc = (
+        str(Path(remote_base) / "targets" / request.pdb_id.upper())
+        if remote_base
+        else "<remote root unset>"
+    )
+    job_store.append_log(job_id, f"[rsync] target → {remote_target_desc} (from {local_target_dir})")
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
     if backup_rel:
         job_store.append_log(job_id, f"[sync] Remote target backup → {backup_rel}")
@@ -246,6 +254,11 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
 
     job_store.update(job_id, message="Syncing tools to cluster")
     job_store.append_log(job_id, "[cmd] sync_tools")
+    tools_dir = (workspace / "tools").resolve()
+    remote_tools_desc = (
+        str(Path(cluster.remote_root) / "tools") if cluster.remote_root else "<remote root unset>/tools"
+    )
+    job_store.append_log(job_id, f"[rsync] tools → {remote_tools_desc} (from {tools_dir})")
     tools_result = cluster.sync_tools()
     if tools_result.stdout:
         for line in tools_result.stdout.splitlines():
@@ -263,7 +276,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     remote_cmd = f"{env_prefix} " + shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
     job_store.update(job_id, message="Generating pipeline scripts on cluster")
     job_store.append_log(job_id, f"[cmd] {remote_cmd}")
-    pipeline_result = cluster.run(remote_cmd, use_conda=True)
+    pipeline_result = cluster.run_in_srun(remote_cmd, use_conda=True)
 
     log_buffer: List[str] = []
     if pipeline_result.stdout:
@@ -294,7 +307,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.update(job_id, message="Submitting SLURM pipeline")
     submit_cmd = f"conda deactivate >/dev/null 2>&1 || true; conda deactivate >/dev/null 2>&1 || true; bash {shlex.quote(launcher_path)}"
     job_store.append_log(job_id, f"[cmd] {submit_cmd}")
-    sbatch_result = cluster.run(submit_cmd)
+    sbatch_result = cluster.run_in_srun(submit_cmd)
     job_ids: Dict[str, str] = {}
     stage2_ids: List[str] = []
     pipeline_assess_job: Optional[str] = None
