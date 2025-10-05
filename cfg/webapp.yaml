@@ -16,4 +16,4 @@ cluster:
   assess_time_minutes: 600
   assess_mem_gb: 4
   assess_cpus: 1
-  debug: true
+  debug: false

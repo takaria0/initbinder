@@ -74,6 +74,7 @@ class ClusterClient:
         return args
 
     def _ensure_master(self) -> None:
+        return
         if self.cfg.mock or not self.ensure_master:
             return
         if self._master_checked:
