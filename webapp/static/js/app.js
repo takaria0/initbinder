@@ -56,6 +56,7 @@ const el = {
   resultsLimit: document.querySelector('#results-limit'),
   pymolTop: document.querySelector('#pymol-top'),
   syncResultsBtn: document.querySelector('#sync-results'),
+  assessSubmit: document.querySelector('#assess-submit'),
   jobList: document.querySelector('#job-list'),
   refreshJobsBtn: document.querySelector('#refresh-jobs'),
   runHistory: document.querySelector('#run-history'),
@@ -277,6 +278,16 @@ function renderRunHistory(pdbId) {
       el.resultsRunLabel.placeholder = runs[0].run_label;
     }
   }
+
+  if (el.assessSubmit) {
+    const hasCandidates = runs.length > 0 || !!(el.resultsRunLabel && el.resultsRunLabel.value.trim());
+    const assessRunning = state.jobContext === 'assess' && state.jobPoller;
+    if (!hasCandidates && !assessRunning) {
+      el.assessSubmit.disabled = true;
+    } else if (hasCandidates && !assessRunning) {
+      el.assessSubmit.disabled = false;
+    }
+  }
 }
 
 function renderJobList() {
@@ -432,6 +443,47 @@ async function queueDesignRun() {
   } catch (err) {
     el.designSubmit.disabled = false;
     setBadge(el.designStatus, 'Error', 'rgba(248, 113, 113, 0.2)');
+    showAlert(err.message || String(err));
+  }
+}
+
+async function queueAssessmentRun() {
+  if (!state.currentPdb) {
+    showAlert('Initialize a target first.');
+    return;
+  }
+  const runLabel = el.resultsRunLabel.value.trim();
+  if (!runLabel) {
+    showAlert('Enter a run label to assess.');
+    return;
+  }
+  const binderChain = el.designBinderChain?.value.trim() || 'H';
+  const payload = {
+    pdb_id: state.currentPdb,
+    run_label: runLabel,
+    binder_chain_id: binderChain,
+    include_keyword: runLabel,
+  };
+
+  if (el.assessSubmit) el.assessSubmit.disabled = true;
+  setBadge(el.resultsMeta, 'Submitting assessment…');
+  try {
+    const res = await fetch(`/api/targets/${state.currentPdb}/assess`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Request failed with ${res.status}`);
+    }
+    const body = await res.json();
+    state.selectedJobId = body.job_id;
+    startJobPolling(body.job_id, 'assess');
+    fetchJobList();
+  } catch (err) {
+    if (el.assessSubmit) el.assessSubmit.disabled = false;
+    setBadge(el.resultsMeta, 'Assessment submission failed', 'rgba(248, 113, 113, 0.25)');
     showAlert(err.message || String(err));
   }
 }
@@ -734,6 +786,7 @@ function updateJobUI(job) {
       el.designSubmit.disabled = false;
       setBadge(el.designStatus, 'Ready for submission');
       el.refreshResultsBtn.disabled = false;
+      if (el.assessSubmit) el.assessSubmit.disabled = false;
       refreshRunLabel(true);
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
@@ -752,6 +805,7 @@ function updateJobUI(job) {
       setBadge(el.designStatus, 'Cluster jobs submitted', 'rgba(134, 239, 172, 0.25)');
       el.designSubmit.disabled = false;
       el.refreshResultsBtn.disabled = false;
+       if (el.assessSubmit) el.assessSubmit.disabled = false;
       stopJobPolling();
       refreshRunLabel(true);
       if (state.currentPdb) {
@@ -774,6 +828,24 @@ function updateJobUI(job) {
     } else {
       showAlert(job.message || 'Export failed.');
       el.exportButton.disabled = false;
+      stopJobPolling();
+    }
+  } else if (ctx === 'assess') {
+    if (job.status === 'running' || job.status === 'pending') {
+      setBadge(el.resultsMeta, 'Submitting assessment…');
+      if (el.assessSubmit) el.assessSubmit.disabled = true;
+    } else if (job.status === 'success') {
+      setBadge(el.resultsMeta, 'Assessment submitted to cluster', 'rgba(134, 239, 172, 0.25)');
+      if (el.assessSubmit) el.assessSubmit.disabled = false;
+      stopJobPolling();
+      if (state.currentPdb) {
+        fetchRunHistory(state.currentPdb);
+        syncResultsFromCluster({ runLabel: job.details?.run_label || el.resultsRunLabel.value.trim(), silent: true });
+      }
+    } else {
+      setBadge(el.resultsMeta, 'Assessment failed', 'rgba(248, 113, 113, 0.25)');
+      showAlert(job.message || 'Assessment submission failed.');
+      if (el.assessSubmit) el.assessSubmit.disabled = false;
       stopJobPolling();
     }
   } else {
@@ -966,6 +1038,7 @@ function disableFutureSections() {
   el.exportButton.disabled = true;
   el.pymolTop.disabled = true;
   el.pymolHotspots.disabled = true;
+  if (el.assessSubmit) el.assessSubmit.disabled = true;
 }
 
 function initEventHandlers() {
@@ -979,6 +1052,9 @@ function initEventHandlers() {
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
   el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster());
+  if (el.assessSubmit) {
+    el.assessSubmit.addEventListener('click', queueAssessmentRun);
+  }
   if (el.resultsRunLabel) {
     el.resultsRunLabel.addEventListener('input', (event) => {
       highlightRunChip(event.target.value || '');

@@ -15,6 +15,8 @@ from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
 from .models import (
     AlignmentResponse,
+    AssessmentRunRequest,
+    AssessmentRunResponse,
     AssessmentRunSummary,
     DesignRunRequest,
     DesignRunResponse,
@@ -34,7 +36,12 @@ from .models import (
 )
 from .pymol import PyMolLaunchError, launch_hotspots, launch_top_binders
 from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
-from .workflows import submit_design_run, submit_export, submit_target_initialization
+from .workflows import (
+    submit_assessment_run,
+    submit_design_run,
+    submit_export,
+    submit_target_initialization,
+)
 
 app = FastAPI(title="InitBinder UI API", version="0.1.0")
 
@@ -297,6 +304,15 @@ async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> dic
         "remote_path": str(remote_path) if remote_path else None,
         "exit_code": result.exit_code,
     }
+
+
+@app.post("/api/targets/{pdb_id}/assess", response_model=AssessmentRunResponse)
+async def api_assess_run(pdb_id: str, payload: AssessmentRunRequest) -> AssessmentRunResponse:
+    if payload.pdb_id.upper() != pdb_id.upper():
+        raise HTTPException(status_code=400, detail="Payload pdb_id mismatch")
+    job_id = submit_assessment_run(payload, job_store=store)
+    message = f"Submitted assess-rfa-all for {payload.pdb_id.upper()}"
+    return AssessmentRunResponse(job_id=job_id, message=message)
 
 
 @app.get("/")

@@ -55,6 +55,18 @@ class AssessmentRunSummary(BaseModel):
     origin: Literal["local", "remote", "both"] = "local"
 
 
+class AssessmentRunRequest(BaseModel):
+    pdb_id: str
+    run_label: str
+    binder_chain_id: str = Field("H", min_length=1, max_length=1)
+    include_keyword: Optional[str] = None
+
+
+class AssessmentRunResponse(BaseModel):
+    job_id: str
+    message: str
+
+
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]
