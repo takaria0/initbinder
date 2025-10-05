@@ -7,14 +7,30 @@
     <link rel="stylesheet" href="/static/css/app.css">
   </head>
   <body>
-    <main>
-      <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
-      <header>
-        <h1>InitBinder Pipeline Control Center</h1>
-        <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
-      </header>
+    <main class="app-shell">
+      <aside id="jobs-sidebar">
+        <section class="sidebar-card">
+          <div class="sidebar-header">
+            <h2>Job Activity</h2>
+            <button type="button" id="refresh-jobs">Refresh</button>
+          </div>
+          <div id="job-alert" class="alert" hidden></div>
+          <div class="status-log" id="job-log">Waiting for commands...</div>
+        </section>
+        <section class="sidebar-card" id="recent-jobs-card">
+          <h3>Recent Jobs</h3>
+          <ul id="job-list"></ul>
+        </section>
+      </aside>
 
-      <section id="target-setup">
+      <div id="main-content">
+        <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
+        <header>
+          <h1>InitBinder Pipeline Control Center</h1>
+          <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
+        </header>
+
+        <section id="target-setup">
         <h2>Target Setup</h2>
         <form id="target-form">
           <div class="form-row">
@@ -38,24 +54,7 @@
         </form>
       </section>
 
-      <section id="job-status">
-        <h2>Job Status</h2>
-        <div class="job-status-grid">
-          <div>
-            <div id="job-alert" class="alert" hidden></div>
-            <div class="status-log" id="job-log">Waiting for commands...</div>
-          </div>
-          <div class="job-list">
-            <div class="job-list-header">
-              <span>Recent Jobs</span>
-              <button type="button" id="refresh-jobs">Refresh</button>
-            </div>
-            <ul id="job-list"></ul>
-          </div>
-        </div>
-      </section>
-
-      <section id="alignment-section">
+        <section id="alignment-section">
         <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
           <h2>Sequence Alignment</h2>
           <button type="button" id="refresh-alignment">Refresh alignment</button>
@@ -64,7 +63,7 @@
         <div id="alignment-view" class="alignments" hidden></div>
       </section>
 
-      <section id="design-config">
+        <section id="design-config">
         <h2>Design Run Configuration</h2>
         <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Arms and hotspot variants are detected automatically from the prepared target.</p>
         <form id="design-form">
@@ -97,7 +96,7 @@
         </form>
       </section>
 
-      <section id="results-section">
+        <section id="results-section">
         <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
           <h2>Assessment Results</h2>
           <div class="flex-row">
@@ -109,11 +108,12 @@
               Limit
               <input type="number" id="results-limit" value="200" min="1" style="width: 100px;">
             </label>
-            <button type="button" id="refresh-results">Refresh</button>
-            <button type="button" id="sync-results">Sync from cluster</button>
+            <button type="button" id="refresh-results">Reload local data</button>
+            <button type="button" id="sync-results">Download from cluster</button>
             <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
           </div>
         </div>
+        <p class="help-text">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
         <datalist id="run-label-options"></datalist>
         <div id="run-history" class="run-history"></div>
         <div id="results-meta" class="badge" hidden></div>
@@ -137,7 +137,7 @@
         </div>
       </section>
 
-      <section id="exports-section">
+        <section id="exports-section">
         <h2>Export Helpers</h2>
         <form id="export-form">
           <div class="form-row">
@@ -172,6 +172,7 @@
           </div>
         </form>
       </section>
+      </div>
     </main>
 
     <script type="module" src="/static/js/app.js"></script>

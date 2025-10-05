@@ -10,6 +10,7 @@ const state = {
   jobs: [],
   selectedJobId: null,
   runHistory: {},
+  jobRefreshTimer: null,
 };
 
 const el = {
@@ -192,7 +193,7 @@ function renderRunHistory(pdbId) {
   el.runHistory.classList.toggle('empty', runs.length === 0);
 
   if (!runs.length) {
-    el.runHistory.textContent = 'No local assessments yet.';
+    el.runHistory.textContent = 'No assessments found locally or on the cluster.';
   } else {
     const frag = document.createDocumentFragment();
     const selected = el.resultsRunLabel ? el.resultsRunLabel.value.trim() : '';
@@ -200,20 +201,57 @@ function renderRunHistory(pdbId) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.dataset.runLabel = run.run_label;
-      btn.textContent = run.run_label;
-      const parts = [];
-      parts.push(`Updated ${new Date(run.updated_at * 1000).toLocaleString()}`);
-      if (typeof run.total_rows === 'number') {
-        parts.push(`${run.total_rows} rows`);
-      }
-      btn.title = parts.join(' · ');
+      btn.dataset.origin = run.origin || 'local';
+      btn.classList.toggle('has-local', !!run.available_local);
+      btn.classList.toggle('has-remote', !!run.available_remote);
       btn.classList.toggle('active', run.run_label === selected && selected !== '');
-      btn.addEventListener('click', () => {
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'label';
+      labelSpan.textContent = run.run_label;
+
+      const originSpan = document.createElement('span');
+      originSpan.className = 'origin';
+      if (run.available_local && run.available_remote) {
+        originSpan.textContent = 'local + cluster';
+      } else if (run.available_local) {
+        originSpan.textContent = 'local';
+      } else if (run.available_remote) {
+        originSpan.textContent = 'cluster';
+      } else {
+        originSpan.textContent = 'pending';
+      }
+
+      const infoParts = [`Updated ${new Date(run.updated_at * 1000).toLocaleString()}`];
+      if (typeof run.total_rows === 'number') {
+        infoParts.push(`${run.total_rows} rows`);
+      }
+      if (run.local_path) {
+        infoParts.push(`local: ${run.local_path}`);
+      }
+      if (run.remote_path) {
+        infoParts.push(`cluster: ${run.remote_path}`);
+      }
+      btn.title = infoParts.join(' · ');
+
+      btn.append(labelSpan, originSpan);
+      btn.addEventListener('click', async () => {
         if (el.resultsRunLabel) {
           el.resultsRunLabel.value = run.run_label;
           highlightRunChip(run.run_label);
         }
-        fetchRankings();
+        try {
+          if (run.available_local) {
+            await fetchRankings();
+          } else if (run.available_remote) {
+            await syncResultsFromCluster({ runLabel: run.run_label, disableButton: false });
+            await fetchRankings();
+          } else {
+            showAlert('No rankings available yet for this run.');
+          }
+        } catch (err) {
+          console.warn('[run-history] action failed', err);
+        }
       });
       frag.appendChild(btn);
     });
@@ -230,10 +268,13 @@ function renderRunHistory(pdbId) {
   }
 
   if (el.resultsRunLabel) {
-    if (runs.length > 0 && !el.resultsRunLabel.value) {
-      el.resultsRunLabel.placeholder = runs[0].run_label;
+    const firstLocal = runs.find((run) => run.available_local);
+    if (firstLocal && !el.resultsRunLabel.value) {
+      el.resultsRunLabel.placeholder = firstLocal.run_label;
     } else if (runs.length === 0) {
       el.resultsRunLabel.placeholder = 'latest';
+    } else if (!el.resultsRunLabel.value && runs[0]) {
+      el.resultsRunLabel.placeholder = runs[0].run_label;
     }
   }
 }
@@ -706,6 +747,7 @@ function updateJobUI(job) {
   } else if (ctx === 'design') {
     if (job.status === 'running' || job.status === 'pending') {
       setBadge(el.designStatus, job.status === 'running' ? 'Running…' : 'Queued…');
+      el.designSubmit.disabled = true;
     } else if (job.status === 'success') {
       setBadge(el.designStatus, 'Cluster jobs submitted', 'rgba(134, 239, 172, 0.25)');
       el.designSubmit.disabled = false;
@@ -847,15 +889,18 @@ async function launchTopBinders() {
   }
 }
 
-async function syncResultsFromCluster() {
+async function syncResultsFromCluster(options = {}) {
+  const { runLabel: forcedRunLabel = null, silent = false, disableButton = true } = options;
   if (!state.currentPdb) {
-    showAlert('Initialize target first.');
+    if (!silent) showAlert('Initialize target first.');
     return;
   }
-  el.syncResultsBtn.disabled = true;
+  const runLabelInput = forcedRunLabel !== null ? forcedRunLabel : el.resultsRunLabel.value.trim();
+  const params = runLabelInput ? `?run_label=${encodeURIComponent(runLabelInput)}` : '';
+  if (disableButton && el.syncResultsBtn) {
+    el.syncResultsBtn.disabled = true;
+  }
   try {
-    const runLabel = el.resultsRunLabel.value.trim();
-    const params = runLabel ? `?run_label=${encodeURIComponent(runLabel)}` : '';
     const res = await fetch(`/api/targets/${state.currentPdb}/sync${params}`, {
       method: 'POST',
     });
@@ -866,7 +911,7 @@ async function syncResultsFromCluster() {
     const payload = await res.json();
     console.group('[sync-results]');
     console.info('PDB:', state.currentPdb);
-    console.info('Run label:', payload.run_label || runLabel || '(all)');
+    console.info('Run label:', payload.run_label || runLabelInput || '(all)');
     console.info('Remote path:', payload.remote_path || '(unknown)');
     console.info('Local path:', payload.local_path || '(unknown)');
     console.info('Exit code:', payload.exit_code);
@@ -877,17 +922,25 @@ async function syncResultsFromCluster() {
       console.warn('stderr:', payload.stderr);
     }
     console.groupEnd();
-    const desc = [payload.message || 'Synced results.'];
-    if (payload.run_label) desc.push(`run ${payload.run_label}`);
-    if (payload.local_path) desc.push(`→ ${payload.local_path}`);
-    showAlert(desc.join(' · '), false);
+    if (!silent) {
+      const desc = [payload.message || 'Synced results.'];
+      if (payload.run_label) desc.push(`run ${payload.run_label}`);
+      if (payload.local_path) desc.push(`→ ${payload.local_path}`);
+      showAlert(desc.join(' · '), false);
+    }
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
     }
+    return payload;
   } catch (err) {
-    showAlert(err.message || String(err));
+    if (!silent) {
+      showAlert(err.message || String(err));
+    }
+    throw err;
   } finally {
-    el.syncResultsBtn.disabled = false;
+    if (disableButton && el.syncResultsBtn) {
+      el.syncResultsBtn.disabled = false;
+    }
   }
 }
 
@@ -925,7 +978,7 @@ function initEventHandlers() {
   el.refreshResultsBtn.addEventListener('click', fetchRankings);
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
-  el.syncResultsBtn.addEventListener('click', syncResultsFromCluster);
+  el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster());
   if (el.resultsRunLabel) {
     el.resultsRunLabel.addEventListener('input', (event) => {
       highlightRunChip(event.target.value || '');
@@ -955,6 +1008,9 @@ function init() {
   updateClusterStatus();
   setInterval(updateClusterStatus, 15000);
   fetchJobList();
+  if (!state.jobRefreshTimer) {
+    state.jobRefreshTimer = setInterval(fetchJobList, 15000);
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

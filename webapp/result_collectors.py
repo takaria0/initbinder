@@ -157,17 +157,17 @@ def list_assessment_runs(pdb_id: str) -> List[AssessmentRunSummary]:
         except FileNotFoundError:
             continue
         rankings_path = path / "af3_rankings.tsv"
-        rankings_str: Optional[str] = None
-        total_rows: Optional[int] = None
-        if rankings_path.exists():
-            rankings_str = str(rankings_path)
-            total_rows = _estimate_row_count(rankings_path)
+        has_rankings = rankings_path.exists()
         runs.append(
             AssessmentRunSummary(
                 run_label=path.name,
                 updated_at=mtime,
-                rankings_path=rankings_str,
-                total_rows=total_rows,
+                rankings_path=str(rankings_path) if has_rankings else None,
+                total_rows=_estimate_row_count(rankings_path) if has_rankings else None,
+                available_local=True,
+                available_remote=False,
+                local_path=str(path),
+                origin="local",
             )
         )
 

@@ -48,6 +48,11 @@ class AssessmentRunSummary(BaseModel):
     updated_at: float
     rankings_path: Optional[str] = None
     total_rows: Optional[int] = None
+    available_local: bool = False
+    available_remote: bool = False
+    local_path: Optional[str] = None
+    remote_path: Optional[str] = None
+    origin: Literal["local", "remote", "both"] = "local"
 
 
 class AlignmentResponse(BaseModel):

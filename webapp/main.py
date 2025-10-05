@@ -195,7 +195,51 @@ async def api_rankings(
 
 @app.get("/api/targets/{pdb_id}/runs", response_model=list[AssessmentRunSummary])
 async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
-    return list_assessment_runs(pdb_id)
+    local_runs = list_assessment_runs(pdb_id)
+    runs_by_label: dict[str, AssessmentRunSummary] = {run.run_label: run for run in local_runs}
+
+    client = ClusterClient()
+    try:
+        remote_entries = client.list_remote_assessments(pdb_id)
+    except Exception as exc:  # pragma: no cover - cluster access may fail
+        print(f"[runs] warn: unable to list remote assessments for {pdb_id}: {exc}")
+        remote_entries = []
+
+    for entry in remote_entries:
+        label = str(entry.get("run_label"))
+        if not label:
+            continue
+        updated = float(entry.get("updated_at") or 0.0)
+        has_rankings = bool(entry.get("has_rankings"))
+        remote_path = entry.get("remote_path")
+
+        if label in runs_by_label:
+            run = runs_by_label[label]
+            run.available_remote = has_rankings
+            run.remote_path = remote_path
+            run.updated_at = max(run.updated_at, updated)
+            if run.available_local and has_rankings:
+                run.origin = "both"
+            elif run.available_local:
+                run.origin = "local"
+            elif has_rankings:
+                run.origin = "remote"
+        else:
+            runs_by_label[label] = AssessmentRunSummary(
+                run_label=label,
+                updated_at=updated,
+                rankings_path=None,
+                total_rows=None,
+                available_local=False,
+                available_remote=has_rankings,
+                local_path=None,
+                remote_path=remote_path,
+                origin="remote" if has_rankings else "remote",
+            )
+
+    combined = list(runs_by_label.values())
+    combined.sort(key=lambda item: item.updated_at, reverse=True)
+    return combined
 
 
 @app.post("/api/targets/{pdb_id}/pymol/hotspots", response_model=PyMolHotspotResponse)

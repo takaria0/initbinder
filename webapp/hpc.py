@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import shlex
@@ -319,6 +320,71 @@ class ClusterClient:
             flush=True,
         )
         return result
+
+    def list_remote_assessments(self, pdb_id: str) -> list[dict[str, object]]:
+        remote_root = self.target_root or self.remote_root
+        if self.cfg.mock:
+            base = (self._mock_root / "targets" / pdb_id.upper() / "designs" / "_assessments").resolve()
+            entries: list[dict[str, object]] = []
+            if not base.exists():
+                return entries
+            for child in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if not child.is_dir():
+                    continue
+                stat = child.stat()
+                rankings_path = child / "af3_rankings.tsv"
+                entries.append(
+                    {
+                        "run_label": child.name,
+                        "updated_at": stat.st_mtime,
+                        "has_rankings": rankings_path.exists(),
+                        "remote_path": str(child),
+                    }
+                )
+            return entries
+
+        if remote_root is None:
+            raise RuntimeError("Cluster remote_root/target_root not configured; cannot list assessments")
+
+        remote_rel = Path("targets") / pdb_id.upper() / "designs" / "_assessments"
+        remote_path = Path(remote_root) / remote_rel
+        script = textwrap.dedent(
+            f"""
+            python - <<'PY'
+import json
+from pathlib import Path
+base = Path({str(remote_path)!r})
+entries = []
+if base.exists():
+    items = sorted(
+        (p for p in base.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for item in items:
+        stat = item.stat()
+        rankings = item / "af3_rankings.tsv"
+        entries.append({
+            "run_label": item.name,
+            "updated_at": stat.st_mtime,
+            "has_rankings": rankings.exists(),
+            "remote_path": str(item),
+        })
+print(json.dumps(entries))
+PY
+            """
+        ).strip()
+        result = self.run(script, check=False)
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr or result.stdout or "Failed to list remote assessments")
+        data = result.stdout.strip()
+        if not data:
+            return []
+        try:
+            entries = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse remote assessments listing: {exc}") from exc
+        return entries
 
     def submit_assessment(
         self,
