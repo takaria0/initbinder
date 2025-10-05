@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -46,6 +47,18 @@ def _launch_pymol(script_path: Path) -> None:
     try:
         subprocess.Popen([pymol_bin, str(script_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+        if sys.platform == "darwin":
+            try:
+                subprocess.Popen(
+                    ["open", "-a", "/Applications/PyMOL.app", str(script_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            except Exception as mac_exc:  # pragma: no cover - best effort
+                raise PyMolLaunchError(
+                    "PyMOL executable not found. Install the command-line tool or set cluster.pymol_path"
+                ) from mac_exc
         raise PyMolLaunchError(f"PyMOL executable not found: {pymol_bin}") from exc
     except Exception as exc:  # pragma: no cover - best effort
         raise PyMolLaunchError(str(exc)) from exc
