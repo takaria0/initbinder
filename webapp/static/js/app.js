@@ -762,6 +762,7 @@ function startJobPolling(jobId, context, opts = {}) {
       if (context === 'target') el.targetSubmit.disabled = false;
       if (context === 'design') el.designSubmit.disabled = false;
       if (context === 'export') el.exportButton.disabled = false;
+      if (context === 'sync' && el.syncResultsBtn) el.syncResultsBtn.disabled = false;
     }
   };
   poll();
@@ -838,6 +839,27 @@ function updateJobUI(job) {
     } else {
       showAlert(job.message || 'Export failed.');
       el.exportButton.disabled = false;
+      stopJobPolling();
+    }
+  } else if (ctx === 'sync') {
+    if (job.status === 'running' || job.status === 'pending') {
+      setBadge(el.resultsMeta, job.status === 'running' ? 'Syncing…' : 'Queued…');
+    } else if (job.status === 'success') {
+      const skipped = Boolean(job.details?.skipped);
+      const localPath = job.details?.local_path ? String(job.details.local_path) : '';
+      const statusText = skipped ? 'Assessments already synced' : 'Assessments synced';
+      const suffix = localPath ? ` → ${localPath}` : '';
+      setBadge(el.resultsMeta, `${statusText}${suffix}`, 'rgba(134, 239, 172, 0.25)');
+      if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
+      stopJobPolling();
+      const alertMsg = localPath ? `${statusText}. Saved to ${localPath}` : statusText;
+      showAlert(alertMsg, false);
+      if (state.currentPdb) {
+        fetchRunHistory(state.currentPdb);
+      }
+    } else {
+      if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
+      showAlert(job.message || 'Cluster sync failed.');
       stopJobPolling();
     }
   } else if (ctx === 'assess') {
@@ -1001,38 +1023,25 @@ async function syncResultsFromCluster(options = {}) {
       throw new Error(detail.detail || `Failed with ${res.status}`);
     }
     const payload = await res.json();
-    console.group('[sync-results]');
-    console.info('PDB:', state.currentPdb);
-    console.info('Run label:', payload.run_label || runLabelInput || '(all)');
-    console.info('Remote path:', payload.remote_path || '(unknown)');
-    console.info('Local path:', payload.local_path || '(unknown)');
-    console.info('Exit code:', payload.exit_code);
-    if (payload.stdout) {
-      console.info('stdout:', payload.stdout);
-    }
-    if (payload.stderr) {
-      console.warn('stderr:', payload.stderr);
-    }
-    console.groupEnd();
     if (!silent) {
-      const desc = [payload.message || 'Synced results.'];
+      const desc = [payload.message || 'Sync queued.'];
       if (payload.run_label) desc.push(`run ${payload.run_label}`);
-      if (payload.local_path) desc.push(`→ ${payload.local_path}`);
       showAlert(desc.join(' · '), false);
     }
-    if (state.currentPdb) {
-      fetchRunHistory(state.currentPdb);
+    if (payload.job_id) {
+      startJobPolling(payload.job_id, 'sync');
+    } else if (disableButton && el.syncResultsBtn) {
+      el.syncResultsBtn.disabled = false;
     }
     return payload;
   } catch (err) {
     if (!silent) {
       showAlert(err.message || String(err));
     }
-    throw err;
-  } finally {
     if (disableButton && el.syncResultsBtn) {
       el.syncResultsBtn.disabled = false;
     }
+    throw err;
   }
 }
 

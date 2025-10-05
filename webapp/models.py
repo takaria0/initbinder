@@ -67,6 +67,12 @@ class AssessmentRunResponse(BaseModel):
     message: str
 
 
+class AssessmentSyncResponse(BaseModel):
+    job_id: str
+    message: str
+    run_label: Optional[str] = None
+
+
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]

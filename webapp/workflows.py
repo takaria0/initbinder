@@ -6,6 +6,7 @@ import asyncio
 import re
 import shlex
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable
 
 from .config import load_config
@@ -24,6 +25,7 @@ from .exporter import ExportError, run_export
 
 _executor: ThreadPoolExecutor | None = None
 _export_executor: ThreadPoolExecutor | None = None
+_cluster_executor: ThreadPoolExecutor | None = None
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -44,6 +46,16 @@ def _get_export_executor() -> ThreadPoolExecutor:
         workers = max(1, min(4, cfg.background_concurrency or 1))
         _export_executor = ThreadPoolExecutor(max_workers=workers)
     return _export_executor
+
+
+def _get_cluster_executor() -> ThreadPoolExecutor:
+    """Dedicated executor for cluster sync operations."""
+    global _cluster_executor
+    if _cluster_executor is None:
+        cfg = load_config()
+        workers = max(1, min(2, cfg.background_concurrency or 1))
+        _cluster_executor = ThreadPoolExecutor(max_workers=workers)
+    return _cluster_executor
 
 
 def submit_target_initialization(request: TargetInitRequest, *,
@@ -179,6 +191,58 @@ def submit_assessment_run(request: AssessmentRunRequest, *, job_store: JobStore 
     return job.job_id
 
 
+def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
+                           *, job_store: JobStore | None = None) -> str:
+    store = job_store or get_job_store(load_config().log_dir)
+    label = f"Sync assessments {pdb_id.upper()}"
+    if run_label:
+        label += f" ({run_label})"
+    details = {"pdb_id": pdb_id, "run_label": run_label}
+    job = store.create_job("assessment_sync", label, details=details)
+
+    def _run() -> None:
+        client = ClusterClient()
+        store.update(job.job_id, status=JobStatus.RUNNING, message="Syncing assessments from cluster")
+
+        base_rel = Path("targets") / pdb_id.upper() / "designs"
+        if run_label:
+            rel = base_rel / "_assessments" / run_label
+        else:
+            rel = base_rel
+        local_path = (client.local_root / rel).resolve()
+        remote_root = client.target_root or client.remote_root
+        remote_path = str(Path(remote_root) / rel) if remote_root else None
+
+        try:
+            result = client.sync_assessments_back(pdb_id, run_label=run_label)
+            if result.stdout:
+                for line in result.stdout.splitlines():
+                    store.append_log(job.job_id, line)
+            if result.stderr:
+                for line in result.stderr.splitlines():
+                    store.append_log(job.job_id, line)
+
+            message = "Assessments already synced" if result.skipped else "Assessments synced"
+            store.update(
+                job.job_id,
+                status=JobStatus.SUCCESS,
+                message=message,
+                details={
+                    "pdb_id": pdb_id,
+                    "run_label": run_label,
+                    "local_path": str(local_path),
+                    "remote_path": str(remote_path) if remote_path else None,
+                    "skipped": result.skipped,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_cluster_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
 async def wait_for_job(job_id: str, *, job_store: JobStore | None = None,
                        poll_interval: float = 0.5) -> None:
     store = job_store or get_job_store()
@@ -194,5 +258,6 @@ __all__ = [
     "submit_design_run",
     "submit_export",
     "submit_assessment_run",
+    "submit_assessment_sync",
     "wait_for_job",
 ]
