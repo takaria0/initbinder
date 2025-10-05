@@ -195,6 +195,8 @@ function renderRunHistory(pdbId) {
 
   if (!runs.length) {
     el.runHistory.textContent = 'No assessments found locally or on the cluster.';
+    if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = true;
+    if (el.syncResultsBtn) el.syncResultsBtn.disabled = true;
   } else {
     const frag = document.createDocumentFragment();
     const selected = el.resultsRunLabel ? el.resultsRunLabel.value.trim() : '';
@@ -257,6 +259,8 @@ function renderRunHistory(pdbId) {
       frag.appendChild(btn);
     });
     el.runHistory.appendChild(frag);
+    if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = false;
+    if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
   }
 
   if (el.runLabelOptions) {
