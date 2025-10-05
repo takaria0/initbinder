@@ -25,14 +25,28 @@
 
       <div id="main-content">
         <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
-        <header>
-          <h1>InitBinder Pipeline Control Center</h1>
-          <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
+        <header class="page-header">
+          <div>
+            <h1>InitBinder Pipeline Control Center</h1>
+            <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
+          </div>
+          <label class="debug-toggle">
+            <input type="checkbox" id="debug-toggle">
+            <span>Enable debug controls</span>
+          </label>
         </header>
 
         <section id="target-setup">
         <h2>Target Setup</h2>
+        <div class="preset-strip">
+          <div class="preset-strip-header">
+            <span>Saved target pairs</span>
+            <button type="button" id="presets-refresh" class="debug-only">Refresh</button>
+          </div>
+          <div id="preset-list" class="chip-row" role="list"></div>
+        </div>
         <form id="target-form">
+          <input type="hidden" id="preset-id">
           <div class="form-row">
             <label for="pdb-id">PDB ID
               <input id="pdb-id" name="pdb_id" type="text" maxlength="4" required placeholder="e.g. 6M17" autocomplete="off">
@@ -41,7 +55,15 @@
               <input id="antigen-url" name="antigen_url" type="text" placeholder="https://vendor/product">
             </label>
           </div>
-          <div class="flex-row">
+          <div class="form-row">
+            <label for="target-name">Preset name
+              <input id="target-name" type="text" placeholder="e.g. RBD">
+            </label>
+            <label for="target-epitopes">Number of epitopes
+              <input id="target-epitopes" type="number" min="1" max="32" placeholder="auto" autocomplete="off">
+            </label>
+          </div>
+          <div class="flex-row advanced-row debug-only">
             <label><input type="checkbox" id="force-refresh"> Force refresh</label>
             <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>
             <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
@@ -82,7 +104,7 @@
             <label>Run label
               <input type="text" id="design-run-label" placeholder="optional tag">
             </label>
-            <label>Binder chain ID
+            <label class="debug-only">Binder chain ID
               <input type="text" id="design-binder-chain" value="H" maxlength="1">
             </label>
             <label>AlphaFold 3 seed
@@ -97,24 +119,28 @@
       </section>
 
         <section id="results-section">
-        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
+        <div class="results-header">
           <h2>Assessment Results</h2>
-          <div class="flex-row">
-            <label style="margin-bottom: 0;">
-              Run label
-              <input type="text" id="results-run-label" placeholder="latest" style="width: 150px;" list="run-label-options">
+          <div class="results-controls">
+            <span class="run-pill">Run <strong id="active-run-name">—</strong></span>
+            <label>
+              Row Limit
+              <input type="number" id="results-limit" value="200" min="1">
             </label>
-            <label style="margin-bottom: 0;">
-              Limit
-              <input type="number" id="results-limit" value="200" min="1" style="width: 100px;">
-            </label>
-            <button type="button" id="refresh-results">Reload local data</button>
-            <button type="button" id="sync-results">Download from cluster</button>
             <button type="button" id="assess-submit">Submit assess-all</button>
-            <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
           </div>
         </div>
-        <p class="help-text">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
+        <div class="results-advanced debug-only">
+          <label>
+            Run label
+            <input type="text" id="results-run-label" placeholder="latest" list="run-label-options">
+          </label>
+          <div class="button-row">
+            <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
+            <button type="button" id="sync-results" class="debug-only">Download from cluster</button>
+          </div>
+        </div>
+        <p class="help-text debug-only">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
         <datalist id="run-label-options"></datalist>
         <div id="run-history" class="run-history"></div>
         <div id="results-meta" class="badge" hidden></div>
@@ -123,6 +149,10 @@
           <canvas id="scatter-plot" width="720" height="360"></canvas>
         </div>
         <div class="table-scroll" style="margin-top: 16px;" hidden id="results-table-wrapper">
+          <div class="table-toolbar">
+            <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
+            <button type="button" id="export-open" disabled>Export…</button>
+          </div>
           <table id="results-table">
             <thead>
               <tr>
@@ -138,8 +168,16 @@
         </div>
       </section>
 
-        <section id="exports-section">
-        <h2>Export Helpers</h2>
+      </div>
+    </main>
+
+    <div id="export-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="export"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Export Options</h3>
+          <button type="button" id="export-close" class="ghost">Close</button>
+        </div>
         <form id="export-form">
           <div class="form-row">
             <label>Top N designs
@@ -152,6 +190,8 @@
                 <option value="human">Human</option>
               </select>
             </label>
+          </div>
+          <div class="form-row">
             <label>GC target
               <input type="number" id="export-gc" value="0.45" min="0" max="1" step="0.05">
             </label>
@@ -167,14 +207,13 @@
               <input type="text" id="export-suffix" placeholder="optional">
             </label>
           </div>
-          <div class="flex-row">
-            <label><input type="checkbox" id="export-dnachisel" checked> Codon optimize with DNA Chisel</label>
+          <div class="modal-actions">
+            <label class="checkbox-inline"><input type="checkbox" id="export-dnachisel" checked> Codon optimize with DNA Chisel</label>
             <button type="button" id="export-run" disabled>Generate exports</button>
           </div>
         </form>
-      </section>
       </div>
-    </main>
+    </div>
 
     <script type="module" src="/static/js/app.js"></script>
   </body>

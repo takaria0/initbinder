@@ -31,6 +31,7 @@ class RankingPayload:
     run_label: Optional[str]
     source_path: Path
     rows: List[RankingRowData]
+    gallery_path: Optional[Path] = None
 
     def scatter_points(self) -> List[Dict[str, object]]:
         points: List[Dict[str, object]] = []
@@ -100,6 +101,23 @@ def _load_tsv(path: Path) -> List[Dict[str, str]]:
         return [ { (k or "").strip(): (v or "").strip() for k, v in row.items() } for row in reader ]
 
 
+def _discover_gallery_script(directory: Path) -> Optional[Path]:
+    gallery_root = directory / "gallery"
+    if not gallery_root.exists():
+        return None
+    candidates = [
+        gallery_root / "gallery.pml",
+        gallery_root / "gallery_top50.pml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    # Fallback: first *.pml file
+    for pml in gallery_root.glob("*.pml"):
+        return pml
+    return None
+
+
 def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Optional[int] = None) -> RankingPayload:
     assessment_dir, resolved_label = _discover_assessment_dir(pdb_id, run_label)
     rankings_path = assessment_dir / "af3_rankings.tsv"
@@ -137,6 +155,7 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
         run_label=resolved_label,
         source_path=rankings_path,
         rows=parsed,
+        gallery_path=_discover_gallery_script(rankings_path.parent),
     )
 
 

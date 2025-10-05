@@ -96,6 +96,7 @@ def _build_pipeline_args(
     arms: List[str],
     designs_per_task: int,
     run_label: Optional[str],
+    binder_chain: str,
 ) -> List[str]:
     args: List[str] = [request.pdb_id]
     for arm in arms:
@@ -104,8 +105,7 @@ def _build_pipeline_args(
     args.extend(["--designs_per_task", str(designs_per_task)])
     args.extend(["--num_seq", str(request.num_sequences)])
     args.extend(["--temp", str(request.temperature)])
-    if request.binder_chain_id:
-        args.extend(["--binder_chain_id", request.binder_chain_id])
+    args.extend(["--binder_chain_id", binder_chain])
     if run_label:
         args.extend(["--run_tag", run_label])
     if request.af3_seed is not None:
@@ -124,6 +124,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
 
     run_label = request.run_label or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     designs_per_task = max(1, math.ceil(request.total_designs / max(len(arms), 1)))
+    binder_chain = (request.binder_chain_id or "H").strip().upper() or "H"
 
     job_store.update(
         job_id,
@@ -133,11 +134,13 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "designs_per_task": designs_per_task,
             "run_label": run_label,
             "af3_seed": request.af3_seed,
+            "binder_chain": binder_chain,
         },
     )
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
     job_store.append_log(job_id, f"[designs_per_task] {designs_per_task}")
     job_store.append_log(job_id, f"[af3_seed] {request.af3_seed}")
+    job_store.append_log(job_id, f"[binder_chain] {binder_chain}")
 
     cluster = ClusterClient()
     sync_result, backup_rel = cluster.sync_target(request.pdb_id)
@@ -163,7 +166,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
         if err:
             job_store.append_log(job_id, err)
 
-    pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label)
+    pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label, binder_chain)
     binder_root = cluster.remote_root
     if binder_root is None:
         raise RuntimeError("Neither target_root nor remote_root configured on cluster; cannot run pipeline")

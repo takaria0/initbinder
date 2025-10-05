@@ -10,6 +10,7 @@ import yaml
 from sequence_alignment import (
     biotite_gapped_alignment,
     biotite_local_alignments,
+    clean_sequence,
 )
 
 from .config import load_config
@@ -68,6 +69,7 @@ def compute_alignment(pdb_id: str, *, max_results: int = 3) -> Dict[str, object]
     )
     selected = alignments[:max_results]
 
+    clean_vendor = clean_sequence(vendor_seq)
     chain_results: List[Dict[str, object]] = []
     for result in selected:
         if not result.chain_ids:
@@ -80,6 +82,14 @@ def compute_alignment(pdb_id: str, *, max_results: int = 3) -> Dict[str, object]
             aligned_vendor, aligned_combo = biotite_gapped_alignment(vendor_seq, chain_seq)
         except ValueError as exc:
             raise ValueError(f"Alignment failed for chain {chain_id}: {exc}") from exc
+
+        vendor_range = result.vendor_range or (1, len(clean_vendor))
+        aligned_range = result.vendor_aligned_range or vendor_range
+        base_start = vendor_range[0]
+        align_start = max(0, aligned_range[0] - base_start)
+        align_end = max(align_start - 1, aligned_range[1] - base_start)
+        left_seq = clean_vendor[:align_start] if align_start > 0 else ""
+        right_seq = clean_vendor[align_end + 1 :] if align_end + 1 < len(clean_vendor) else ""
 
         chain_results.append({
             "chain_ids": list(result.chain_ids),
@@ -96,6 +106,10 @@ def compute_alignment(pdb_id: str, *, max_results: int = 3) -> Dict[str, object]
             "chain_ranges": {cid: list(span) for cid, span in result.chain_ranges.items()},
             "vendor_aligned_range": result.vendor_aligned_range,
             "vendor_overlap_range": result.vendor_overlap_range,
+            "left_unaligned_length": len(left_seq),
+            "left_unaligned_preview": left_seq[-15:] if left_seq else "",
+            "right_unaligned_length": len(right_seq),
+            "right_unaligned_preview": right_seq[:15] if right_seq else "",
         })
 
     return {

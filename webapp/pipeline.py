@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
+import yaml
+
 from .config import load_config
 from .job_store import JobStatus, JobStore
 
@@ -65,9 +67,39 @@ def run_manage_rfa(subcommand: str, args: List[str], *, log: Optional[LogCallbac
     _run_command(cmd, cwd=cwd, env=env, log=log)
 
 
-def init_decide_prep(pdb_id: str, antigen_url: Optional[str], *, job_store: JobStore,
-                     job_id: str, run_decide: bool = True, run_prep: bool = True,
-                     force: bool = False) -> None:
+def _persist_num_epitopes(pdb_id: str, num_epitopes: int) -> None:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+    target_yaml = target_dir / "target.yaml"
+    if not target_yaml.exists():
+        return
+
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        data = {}
+
+    webapp_block = data.setdefault("webapp", {})
+    webapp_block["num_epitopes"] = int(num_epitopes)
+
+    try:
+        target_yaml.write_text(yaml.safe_dump(data, sort_keys=False))
+    except Exception as exc:
+        raise PipelineError(f"Failed to persist num_epitopes to {target_yaml}: {exc}") from exc
+
+
+def init_decide_prep(
+    pdb_id: str,
+    antigen_url: Optional[str],
+    *,
+    job_store: JobStore,
+    job_id: str,
+    run_decide: bool = True,
+    run_prep: bool = True,
+    force: bool = False,
+    num_epitopes: Optional[int] = None,
+) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
 
@@ -89,6 +121,13 @@ def init_decide_prep(pdb_id: str, antigen_url: Optional[str], *, job_store: JobS
     if run_prep:
         job_store.update(job_id, message="Running prep-target")
         run_manage_rfa("prep-target", [pdb_id], log=_log)
+
+    if num_epitopes is not None:
+        try:
+            _persist_num_epitopes(pdb_id, num_epitopes)
+            job_store.append_log(job_id, f"[prefs] recorded num_epitopes={num_epitopes}")
+        except Exception as exc:  # pragma: no cover - best effort to persist metadata
+            job_store.append_log(job_id, f"[warn] failed to persist num_epitopes: {exc}")
 
     job_store.update(job_id, status=JobStatus.SUCCESS, message="Target ready")
 

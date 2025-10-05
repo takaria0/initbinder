@@ -828,11 +828,13 @@ def build_pymol_gallery_from_rankings(
     if not prepared_pdb.exists():
         raise FileNotFoundError(f"Missing prepared target: {prepared_pdb}")
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    bundle_dir = tdir / "designs" / "_assessments" / f"gallery_{stamp}"
-    models_dir = bundle_dir / "models"; _ensure_dir(models_dir)
-    pml_path   = bundle_dir / "gallery.pml"
-    readme     = bundle_dir / "README.txt"
+    bundle_dir = rankings_tsv.parent / "gallery"
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    models_dir = bundle_dir / "models"
+    _ensure_dir(models_dir)
+    pml_path = bundle_dir / "gallery.pml"
+    readme = bundle_dir / "README.txt"
     _ensure_dir(bundle_dir)
 
     rows = []

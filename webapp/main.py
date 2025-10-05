@@ -12,8 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .config import load_config
 from .hpc import ClusterClient
-from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
+from . import preferences
 from .models import (
     AlignmentResponse,
     AssessmentRunRequest,
@@ -33,6 +33,9 @@ from .models import (
     RankingResponse,
     RankingRow,
     ScatterPoint,
+    TargetPresetListResponse,
+    TargetPresetRequest,
+    TargetPresetResponse,
     TargetInitRequest,
     TargetInitResponse,
 )
@@ -135,6 +138,26 @@ async def api_job_list(limit: int = 20) -> list[JobSummary]:
     return summaries
 
 
+@app.get("/api/targets/presets", response_model=TargetPresetListResponse)
+async def api_target_presets() -> TargetPresetListResponse:
+    presets = preferences.list_presets()
+    return TargetPresetListResponse(presets=presets)
+
+
+@app.post("/api/targets/presets", response_model=TargetPresetResponse)
+async def api_target_presets_save(payload: TargetPresetRequest) -> TargetPresetResponse:
+    preset = preferences.save_preset(payload)
+    return TargetPresetResponse(preset=preset)
+
+
+@app.delete("/api/targets/presets/{preset_id}")
+async def api_target_preset_delete(preset_id: str) -> dict[str, object]:
+    removed = preferences.delete_preset(preset_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"status": "ok", "preset_id": preset_id}
+
+
 @app.get("/api/targets/{pdb_id}/alignment", response_model=AlignmentResponse)
 async def api_alignment(pdb_id: str) -> AlignmentResponse:
     try:
@@ -200,6 +223,7 @@ async def api_rankings(
         rows=rows,
         scatter=scatter,
         source_path=str(payload.source_path),
+        gallery_path=str(payload.gallery_path) if payload.gallery_path else None,
     )
 
 

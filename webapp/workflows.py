@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+from . import preferences
 from .config import load_config
 from .hpc import ClusterClient
 from .job_store import JobStatus, JobStore, get_job_store
@@ -74,7 +75,17 @@ def submit_target_initialization(request: TargetInitRequest, *,
                 run_decide=request.run_decide_scope,
                 run_prep=request.run_prep,
                 force=request.force_refresh,
+                num_epitopes=request.num_epitopes,
             )
+            try:
+                preferences.record_target_usage(
+                    pdb_id=request.pdb_id,
+                    name=request.preset_name,
+                    antigen_url=request.antigen_url,
+                    num_epitopes=request.num_epitopes,
+                )
+            except Exception as exc:  # pragma: no cover - preferences are best effort
+                store.append_log(job.job_id, f"[warn] failed to update target presets: {exc}")
         except PipelineError as exc:
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
         except Exception as exc:  # pragma: no cover - defensive

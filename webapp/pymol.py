@@ -164,6 +164,18 @@ def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str]
     except RankingsNotFoundError as exc:
         raise PyMolLaunchError(str(exc)) from exc
 
+    if payload.gallery_path and payload.gallery_path.exists():
+        dest_root = _cache_dir("pymol_gallery")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        session_dir = dest_root / f"{pdb_id.upper()}_{payload.run_label}_{timestamp}"
+        _copy_bundle(payload.gallery_path.parent, session_dir)
+        gallery_script = session_dir / payload.gallery_path.name
+        launched = False
+        if launch and gallery_script.exists():
+            _launch_pymol(gallery_script)
+            launched = True
+        return gallery_script, launched
+
     rows = _collect_top_rows(payload, top_n)
     dest_root = _cache_dir("pymol_top_binders")
     timestamp = time.strftime("%Y%m%d_%H%M%S")

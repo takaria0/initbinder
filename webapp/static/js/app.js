@@ -11,13 +11,26 @@ const state = {
   selectedJobId: null,
   runHistory: {},
   jobRefreshTimer: null,
+  presets: [],
+  activePresetId: null,
+  debugMode: false,
+  rankingsPollTimer: null,
+  rankingsFetching: false,
+  activeRunLabel: '',
+  galleryAvailable: false,
 };
 
 const el = {
   targetForm: document.querySelector('#target-form'),
   clusterStatus: document.querySelector('#cluster-status'),
+  debugToggle: document.querySelector('#debug-toggle'),
   pdbInput: document.querySelector('#pdb-id'),
   antigenInput: document.querySelector('#antigen-url'),
+  targetName: document.querySelector('#target-name'),
+  targetEpitopes: document.querySelector('#target-epitopes'),
+  presetIdInput: document.querySelector('#preset-id'),
+  presetList: document.querySelector('#preset-list'),
+  presetRefresh: document.querySelector('#presets-refresh'),
   forceCheckbox: document.querySelector('#force-refresh'),
   decideCheckbox: document.querySelector('#skip-decide'),
   prepCheckbox: document.querySelector('#skip-prep'),
@@ -44,6 +57,10 @@ const el = {
   resultsTable: document.querySelector('#results-table'),
   scatterCanvas: document.querySelector('#scatter-plot'),
   plotContainer: document.querySelector('#plot-container'),
+  exportOpen: document.querySelector('#export-open'),
+  exportModal: document.querySelector('#export-modal'),
+  exportClose: document.querySelector('#export-close'),
+  exportBackdrop: document.querySelector('#export-modal .modal-backdrop'),
   exportButton: document.querySelector('#export-run'),
   exportTopN: document.querySelector('#export-topn'),
   exportCodonHost: document.querySelector('#export-codon-host'),
@@ -61,6 +78,7 @@ const el = {
   refreshJobsBtn: document.querySelector('#refresh-jobs'),
   runHistory: document.querySelector('#run-history'),
   runLabelOptions: document.querySelector('#run-label-options'),
+  activeRunName: document.querySelector('#active-run-name'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -81,6 +99,159 @@ function timestampString() {
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
+function setDebugMode(enabled) {
+  state.debugMode = Boolean(enabled);
+  document.body.classList.toggle('debug-mode', state.debugMode);
+}
+
+function updateActiveRunDisplay() {
+  if (!el.activeRunName) return;
+  el.activeRunName.textContent = state.activeRunLabel || 'latest';
+}
+
+function renderPresets() {
+  if (!el.presetList) return;
+  el.presetList.innerHTML = '';
+  if (!state.presets || state.presets.length === 0) {
+    const span = document.createElement('span');
+    span.className = 'empty-note';
+    span.textContent = 'No saved pairs yet.';
+    el.presetList.appendChild(span);
+    return;
+  }
+  state.presets.forEach((preset) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = preset.name || preset.pdb_id;
+    btn.classList.toggle('active', preset.id === state.activePresetId);
+    const metaParts = [preset.pdb_id];
+    if (preset.antigen_url) metaParts.push(preset.antigen_url);
+    if (preset.num_epitopes) metaParts.push(`${preset.num_epitopes} epitopes`);
+    btn.title = metaParts.join(' · ');
+    btn.addEventListener('click', () => selectPreset(preset));
+    el.presetList.appendChild(btn);
+  });
+}
+
+function syncActivePreset() {
+  if (!state.presets || state.presets.length === 0) {
+    state.activePresetId = null;
+    renderPresets();
+    return;
+  }
+  const pdb = state.currentPdb || (el.pdbInput?.value || '').trim().toUpperCase();
+  const antigen = (el.antigenInput?.value || '').trim();
+  const match = state.presets.find((preset) => {
+    if (!pdb || preset.pdb_id !== pdb) return false;
+    const presetUrl = (preset.antigen_url || '').trim();
+    return presetUrl === antigen;
+  });
+  if (match) {
+    state.activePresetId = match.id;
+    if (el.presetIdInput) el.presetIdInput.value = match.id;
+    if (el.targetName && !el.targetName.value) el.targetName.value = match.name || '';
+    if (el.targetEpitopes && !el.targetEpitopes.value && match.num_epitopes) {
+      el.targetEpitopes.value = match.num_epitopes;
+    }
+  } else {
+    state.activePresetId = null;
+    if (el.presetIdInput) el.presetIdInput.value = '';
+  }
+  renderPresets();
+}
+
+async function touchPreset(preset) {
+  try {
+    const payload = {
+      preset_id: preset.id,
+      name: preset.name,
+      pdb_id: preset.pdb_id,
+      antigen_url: preset.antigen_url,
+      num_epitopes: preset.num_epitopes,
+    };
+    await fetch('/api/targets/presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.warn('Failed to update preset usage', err);
+  }
+}
+
+function selectPreset(preset) {
+  state.activePresetId = preset.id;
+  if (el.presetIdInput) el.presetIdInput.value = preset.id;
+  if (el.targetName) el.targetName.value = preset.name || '';
+  if (el.antigenInput) el.antigenInput.value = preset.antigen_url || '';
+  if (el.targetEpitopes) {
+    if (preset.num_epitopes) {
+      el.targetEpitopes.value = preset.num_epitopes;
+    } else {
+      el.targetEpitopes.value = '';
+    }
+  }
+  if (el.pdbInput) el.pdbInput.value = preset.pdb_id;
+  setCurrentPdb(preset.pdb_id, { loadAlignment: true });
+  touchPreset(preset);
+  renderPresets();
+  fetchRankings({ silent: true }).catch(() => {});
+}
+
+async function loadPresets() {
+  try {
+    const res = await fetch('/api/targets/presets');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    const list = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload.presets)
+        ? payload.presets
+        : [];
+    state.presets = list.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      pdb_id: (entry.pdb_id || '').toUpperCase(),
+      antigen_url: entry.antigen_url || '',
+      num_epitopes: entry.num_epitopes || null,
+      last_used: entry.last_used || 0,
+    }));
+    state.presets.sort((a, b) => (b.last_used || 0) - (a.last_used || 0));
+    syncActivePreset();
+  } catch (err) {
+    console.warn('Failed to load presets', err);
+    renderPresets();
+  }
+}
+
+function stopRankingsPolling() {
+  if (state.rankingsPollTimer) {
+    clearInterval(state.rankingsPollTimer);
+    state.rankingsPollTimer = null;
+  }
+}
+
+function scheduleRankingsPolling() {
+  stopRankingsPolling();
+  if (!state.currentPdb) return;
+  state.rankingsPollTimer = setInterval(() => {
+    if (!state.currentPdb || state.rankingsFetching) return;
+    fetchRankings({ silent: true }).catch(() => {});
+  }, 8000);
+}
+
+function openExportModal() {
+  if (!el.exportModal) return;
+  el.exportModal.hidden = false;
+  document.body.classList.add('modal-open');
+}
+
+function closeExportModal() {
+  if (!el.exportModal) return;
+  el.exportModal.hidden = true;
+  document.body.classList.remove('modal-open');
+}
+
 function setCurrentPdb(pdbId, options = {}) {
   if (!pdbId) return;
   const upper = pdbId.toUpperCase();
@@ -88,8 +259,15 @@ function setCurrentPdb(pdbId, options = {}) {
   if (options.updateInput !== false && el.pdbInput) {
     el.pdbInput.value = upper;
   }
+  state.activeRunLabel = '';
+  updateActiveRunDisplay();
+  syncActivePreset();
   renderRunHistory(upper);
   fetchRunHistory(upper);
+  if (options.loadAlignment) {
+    loadAlignment(upper);
+  }
+  scheduleRankingsPolling();
 }
 
 function refreshRunLabel(force = false) {
@@ -177,7 +355,7 @@ async function fetchRunHistory(pdbId) {
   }
 }
 
-function highlightRunChip(selectedLabel) {
+function highlightRunChip(selectedLabel = state.activeRunLabel) {
   if (!el.runHistory) return;
   const target = (selectedLabel || '').trim();
   el.runHistory.querySelectorAll('button[data-run-label]').forEach((btn) => {
@@ -199,7 +377,16 @@ function renderRunHistory(pdbId) {
     if (el.syncResultsBtn) el.syncResultsBtn.disabled = !state.currentPdb;
   } else {
     const frag = document.createDocumentFragment();
-    const selected = el.resultsRunLabel ? el.resultsRunLabel.value.trim() : '';
+    let selected = state.activeRunLabel || '';
+    if (!state.activeRunLabel) {
+      const firstRunLabel = runs[0]?.run_label || '';
+      if (firstRunLabel) {
+        state.activeRunLabel = firstRunLabel;
+        if (el.resultsRunLabel) el.resultsRunLabel.value = firstRunLabel;
+        updateActiveRunDisplay();
+        selected = state.activeRunLabel || '';
+      }
+    }
     runs.forEach((run) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -239,10 +426,12 @@ function renderRunHistory(pdbId) {
 
       btn.append(labelSpan, originSpan);
       btn.addEventListener('click', async () => {
+        state.activeRunLabel = run.run_label || '';
+        updateActiveRunDisplay();
         if (el.resultsRunLabel) {
-          el.resultsRunLabel.value = run.run_label;
-          highlightRunChip(run.run_label);
+          el.resultsRunLabel.value = run.run_label || '';
         }
+        highlightRunChip(run.run_label);
         try {
           if (run.available_local) {
             await fetchRankings();
@@ -252,6 +441,7 @@ function renderRunHistory(pdbId) {
           } else {
             showAlert('No rankings available yet for this run.');
           }
+          scheduleRankingsPolling();
         } catch (err) {
           console.warn('[run-history] action failed', err);
         }
@@ -262,6 +452,8 @@ function renderRunHistory(pdbId) {
     if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = false;
     if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
   }
+
+  highlightRunChip();
 
   if (el.runLabelOptions) {
     el.runLabelOptions.innerHTML = '';
@@ -379,6 +571,14 @@ async function queueTargetInit(event) {
   const payload = {
     pdb_id: pdbId,
     antigen_url: el.antigenInput.value.trim() || null,
+    preset_name: el.targetName?.value.trim() || null,
+    num_epitopes: (() => {
+      const raw = el.targetEpitopes?.value || '';
+      if (!raw) return null;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed <= 0) return null;
+      return Math.round(parsed);
+    })(),
     force_refresh: el.forceCheckbox.checked,
     run_decide_scope: el.decideCheckbox.checked,
     run_prep: el.prepCheckbox.checked,
@@ -415,7 +615,7 @@ async function queueDesignRun() {
     total_designs: Number(el.designTotal.value) || 90,
     num_sequences: Number(el.designNumSeq.value) || 1,
     temperature: Number(el.designTemp.value) || 0.1,
-    binder_chain_id: el.designBinderChain.value.trim() || 'H',
+    binder_chain_id: el.designBinderChain?.value.trim() || null,
     af3_seed: (() => {
       const raw = Number(el.designAf3Seed?.value ?? 1);
       const fallback = 1;
@@ -456,7 +656,10 @@ async function queueAssessmentRun() {
     showAlert('Initialize a target first.');
     return;
   }
-  const runLabel = el.resultsRunLabel.value.trim();
+  let runLabel = el.resultsRunLabel?.value.trim() || '';
+  if (!runLabel && state.activeRunLabel) {
+    runLabel = state.activeRunLabel;
+  }
   if (!runLabel) {
     showAlert('Enter a run label to assess.');
     return;
@@ -510,6 +713,7 @@ async function runExport() {
   };
 
   el.exportButton.disabled = true;
+  if (el.exportOpen) el.exportOpen.disabled = true;
   resetJobLog('Submitting export job…');
   el.jobAlert.hidden = true;
 
@@ -527,26 +731,39 @@ async function runExport() {
     state.selectedJobId = body.job_id;
     startJobPolling(body.job_id, 'export');
     fetchJobList();
+    closeExportModal();
   } catch (err) {
     showAlert(err.message || String(err));
     el.exportButton.disabled = false;
+    if (el.exportOpen) el.exportOpen.disabled = false;
   }
 }
 
-async function fetchRankings() {
+async function fetchRankings(options = {}) {
+  const { silent = false } = options;
   if (!state.currentPdb) {
-    showAlert('Initialize target first.');
+    if (!silent) showAlert('Initialize target first.');
     return;
   }
-  const runLabel = el.resultsRunLabel.value.trim();
-  const limitVal = Number(el.resultsLimit.value) || null;
+  if (state.rankingsFetching) return;
+  state.rankingsFetching = true;
+
+  let runLabel = el.resultsRunLabel?.value.trim() || '';
+  if (!runLabel && state.activeRunLabel) {
+    runLabel = state.activeRunLabel;
+  }
+  const limitVal = Number(el.resultsLimit?.value) || null;
   const params = new URLSearchParams();
   if (runLabel) params.append('run_label', runLabel);
   if (limitVal) params.append('limit', String(limitVal));
 
-  el.refreshResultsBtn.disabled = true;
-  setBadge(el.resultsMeta, `Loading rankings for ${state.currentPdb}…`);
-  el.resultsMeta.hidden = false;
+  if (!silent && el.refreshResultsBtn) {
+    el.refreshResultsBtn.disabled = true;
+  }
+  if (!silent) {
+    setBadge(el.resultsMeta, `Loading rankings for ${state.currentPdb}…`);
+    el.resultsMeta.hidden = false;
+  }
 
   try {
     const res = await fetch(`/api/targets/${state.currentPdb}/rankings?${params.toString()}`);
@@ -560,23 +777,35 @@ async function fetchRankings() {
     state.tableSort = { key: 'iptm', dir: 'desc' };
     state.scatterLayout = [];
     state.selectedDesign = null;
+    state.activeRunLabel = payload.run_label || '';
+    state.galleryAvailable = Boolean(payload.gallery_path);
+    updateActiveRunDisplay();
+    if (el.resultsRunLabel) {
+      el.resultsRunLabel.value = state.activeRunLabel;
+    }
     el.binderDetail.hidden = true;
     renderResults();
-    setBadge(
-      el.resultsMeta,
-      `${payload.rows.length} designs · run ${payload.run_label || 'latest'}`,
-    );
-    if (el.resultsRunLabel && payload.run_label) {
-      el.resultsRunLabel.value = payload.run_label;
+    if (!silent) {
+      const label = state.activeRunLabel || 'latest';
+      setBadge(el.resultsMeta, `${payload.rows.length} designs · run ${label}`);
     }
-    highlightRunChip(el.resultsRunLabel ? el.resultsRunLabel.value : '');
+    highlightRunChip(state.activeRunLabel);
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
     }
+    renderPresets();
+    scheduleRankingsPolling();
   } catch (err) {
-    setBadge(el.resultsMeta, `Rankings failed: ${err.message || err}`, 'rgba(248, 113, 113, 0.2)');
+    if (!silent) {
+      setBadge(el.resultsMeta, `Rankings failed: ${err.message || err}`, 'rgba(248, 113, 113, 0.2)');
+    } else {
+      console.warn('Rankings refresh failed', err);
+    }
   } finally {
-    el.refreshResultsBtn.disabled = false;
+    if (!silent && el.refreshResultsBtn) {
+      el.refreshResultsBtn.disabled = false;
+    }
+    state.rankingsFetching = false;
   }
 }
 
@@ -688,11 +917,16 @@ function renderResults() {
   const scatterPoints = state.rankingsResponse?.scatter || [];
   computeScatterLayout(scatterPoints);
   renderScatter();
-  el.resultsTableWrapper.hidden = state.rankings.length === 0;
-  el.plotContainer.hidden = state.scatterLayout.length === 0;
-  el.exportButton.disabled = state.rankings.length === 0;
-  el.pymolTop.disabled = state.rankings.length === 0;
-  el.refreshResultsBtn.disabled = false;
+  const hasRows = state.rankings.length > 0;
+  if (el.resultsTableWrapper) el.resultsTableWrapper.hidden = !hasRows;
+  if (el.plotContainer) el.plotContainer.hidden = state.scatterLayout.length === 0;
+  if (el.exportButton) el.exportButton.disabled = !hasRows;
+  if (el.exportOpen) el.exportOpen.disabled = !hasRows;
+  if (el.pymolTop) {
+    el.pymolTop.disabled = !hasRows;
+    el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
+  }
+  if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = false;
 }
 
 function selectDesign(designName) {
@@ -761,7 +995,10 @@ function startJobPolling(jobId, context, opts = {}) {
       stopJobPolling();
       if (context === 'target') el.targetSubmit.disabled = false;
       if (context === 'design') el.designSubmit.disabled = false;
-      if (context === 'export') el.exportButton.disabled = false;
+      if (context === 'export') {
+        el.exportButton.disabled = false;
+        if (el.exportOpen) el.exportOpen.disabled = false;
+      }
       if (context === 'sync' && el.syncResultsBtn) el.syncResultsBtn.disabled = false;
     }
   };
@@ -796,6 +1033,8 @@ function updateJobUI(job) {
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
       }
+      loadPresets();
+      scheduleRankingsPolling();
     } else {
       setBadge(el.targetBadge, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Target workflow failed.');
@@ -816,6 +1055,7 @@ function updateJobUI(job) {
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
       }
+      scheduleRankingsPolling();
     } else {
       setBadge(el.designStatus, 'Failed', 'rgba(248, 113, 113, 0.25)');
       showAlert(job.message || 'Design pipeline failed.');
@@ -830,6 +1070,7 @@ function updateJobUI(job) {
       const suffix = outDir ? ` → ${outDir}` : '';
       setBadge(el.resultsMeta, `Export complete${suffix}`, 'rgba(134, 239, 172, 0.25)');
       el.exportButton.disabled = false;
+      if (el.exportOpen) el.exportOpen.disabled = false;
       stopJobPolling();
       if (outDir) {
         showAlert(`Exports saved in ${outDir}`, false);
@@ -839,6 +1080,7 @@ function updateJobUI(job) {
     } else {
       showAlert(job.message || 'Export failed.');
       el.exportButton.disabled = false;
+      if (el.exportOpen) el.exportOpen.disabled = false;
       stopJobPolling();
     }
   } else if (ctx === 'sync') {
@@ -872,7 +1114,10 @@ function updateJobUI(job) {
       stopJobPolling();
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
-        syncResultsFromCluster({ runLabel: job.details?.run_label || el.resultsRunLabel.value.trim(), silent: true });
+        const syncLabel = job.details?.run_label
+          || el.resultsRunLabel?.value.trim()
+          || state.activeRunLabel;
+        syncResultsFromCluster({ runLabel: syncLabel, silent: true });
       }
     } else {
       setBadge(el.resultsMeta, 'Assessment failed', 'rgba(248, 113, 113, 0.25)');
@@ -906,6 +1151,20 @@ async function loadAlignment(pdbId) {
     } else {
       const fragments = payload.chain_results.map((result) => {
         const header = `Chains ${result.chain_ids.join('+')} · identity ${(result.identity * 100).toFixed(1)}% · coverage ${(result.coverage * 100).toFixed(1)}% · mismatches ${result.mismatches}`;
+        const leftLen = result.left_unaligned_length || 0;
+        const rightLen = result.right_unaligned_length || 0;
+        const leftPreviewRaw = result.left_unaligned_preview || '';
+        const rightPreviewRaw = result.right_unaligned_preview || '';
+        const leftPreview = leftLen > leftPreviewRaw.length && leftPreviewRaw ? `…${leftPreviewRaw}` : leftPreviewRaw;
+        const rightPreview = rightLen > rightPreviewRaw.length && rightPreviewRaw ? `${rightPreviewRaw}…` : rightPreviewRaw;
+        const gapBits = [];
+        if (leftLen) {
+          gapBits.push(`Left gap ${leftLen} aa${leftPreview ? ` (${leftPreview})` : ''}`);
+        }
+        if (rightLen) {
+          gapBits.push(`Right gap ${rightLen} aa${rightPreview ? ` (${rightPreview})` : ''}`);
+        }
+        const gapLine = gapBits.length ? `<div class="alignment-gap">${gapBits.join(' · ')}</div>` : '';
         const vendorLine = result.aligned_vendor
           .split('')
           .map((v, idx) => {
@@ -925,6 +1184,7 @@ async function loadAlignment(pdbId) {
         return `
           <div style="margin-bottom: 18px;">
             <div style="margin-bottom: 8px; font-size: 0.9rem; opacity: 0.85;">${header}</div>
+            ${gapLine}
             <div class="monospace">Vendor&nbsp;&nbsp;&nbsp;| ${vendorLine}</div>
             <div class="monospace">Target&nbsp;&nbsp;&nbsp;| ${targetLine}</div>
           </div>`;
@@ -1010,6 +1270,9 @@ async function syncResultsFromCluster(options = {}) {
   } else if (useInputRunLabel && el.resultsRunLabel) {
     runLabelInput = el.resultsRunLabel.value.trim();
   }
+  if (!runLabelInput && state.activeRunLabel) {
+    runLabelInput = state.activeRunLabel.trim();
+  }
   const params = runLabelInput ? `?run_label=${encodeURIComponent(runLabelInput)}` : '';
   if (disableButton && el.syncResultsBtn) {
     el.syncResultsBtn.disabled = true;
@@ -1061,32 +1324,60 @@ function registerScatterClick() {
 }
 
 function disableFutureSections() {
+  stopRankingsPolling();
   el.designSubmit.disabled = true;
   setBadge(el.designStatus, 'Awaiting target prep');
-  el.refreshResultsBtn.disabled = true;
+  if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = true;
   el.exportButton.disabled = true;
+  if (el.exportOpen) el.exportOpen.disabled = true;
   el.pymolTop.disabled = true;
   el.pymolHotspots.disabled = true;
   if (el.assessSubmit) el.assessSubmit.disabled = true;
 }
 
 function initEventHandlers() {
+  if (el.debugToggle) {
+    setDebugMode(el.debugToggle.checked);
+    el.debugToggle.addEventListener('change', (event) => {
+      setDebugMode(event.target.checked);
+    });
+  }
+  if (el.presetRefresh) {
+    el.presetRefresh.addEventListener('click', () => loadPresets());
+  }
   el.targetForm.addEventListener('submit', queueTargetInit);
   el.refreshAlignmentBtn.addEventListener('click', () => {
     if (state.currentPdb) loadAlignment(state.currentPdb);
   });
   el.designSubmit.addEventListener('click', queueDesignRun);
+  if (el.exportOpen) el.exportOpen.addEventListener('click', () => {
+    if (el.exportOpen.disabled) return;
+    openExportModal();
+  });
+  if (el.exportClose) el.exportClose.addEventListener('click', () => closeExportModal());
+  if (el.exportBackdrop) el.exportBackdrop.addEventListener('click', () => closeExportModal());
   el.exportButton.addEventListener('click', runExport);
-  el.refreshResultsBtn.addEventListener('click', fetchRankings);
+  if (el.refreshResultsBtn) {
+    el.refreshResultsBtn.addEventListener('click', () => fetchRankings({ silent: false }));
+  }
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
-  el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster({ useInputRunLabel: false }));
+  if (el.syncResultsBtn) {
+    el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster({ useInputRunLabel: false }));
+  }
   if (el.assessSubmit) {
     el.assessSubmit.addEventListener('click', queueAssessmentRun);
   }
   if (el.resultsRunLabel) {
     el.resultsRunLabel.addEventListener('input', (event) => {
+      state.activeRunLabel = event.target.value.trim();
+      updateActiveRunDisplay();
       highlightRunChip(event.target.value || '');
+    });
+  }
+  if (el.resultsLimit) {
+    el.resultsLimit.addEventListener('change', () => {
+      fetchRankings({ silent: false });
     });
   }
   if (el.pdbInput) {
@@ -1096,6 +1387,16 @@ function initEventHandlers() {
         setCurrentPdb(pdb);
       }
     });
+    el.pdbInput.addEventListener('input', () => {
+      const pdb = el.pdbInput.value.trim();
+      if (pdb.length === 4) {
+        syncActivePreset();
+      }
+    });
+  }
+  if (el.antigenInput) {
+    el.antigenInput.addEventListener('blur', () => syncActivePreset());
+    el.antigenInput.addEventListener('input', () => syncActivePreset());
   }
   if (el.refreshJobsBtn) {
     el.refreshJobsBtn.addEventListener('click', () => {
@@ -1109,6 +1410,9 @@ function initEventHandlers() {
 
 function init() {
   initEventHandlers();
+  updateActiveRunDisplay();
+  renderPresets();
+  loadPresets();
   refreshRunLabel(true);
   updateClusterStatus();
   setInterval(updateClusterStatus, 15000);

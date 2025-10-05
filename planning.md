@@ -1,5 +1,29 @@
 # UI Revamp Planning
 
+## Requested UI Improvements (Apr 2025)
+- Introduce a debug/advanced toggle that reveals `Force Refresh`, `Run Decide-Scope`, and `Run Prep-Target`; hide these controls during normal use.
+- Extend target setup form with an explicit `Number of Epitopes` input tied to downstream pipeline configuration.
+- In Sequence Alignment view, display both termini of unmatched regions alongside the mismatched length for clearer context.
+- Within Design Run Configuration, remove the `Binder Chain ID` input from the primary UI (move to debug/advanced if still needed).
+- In Assessment Results:
+  - Hide the run-label input and rename `Limit` to `Row Limit`.
+  - Remove visible `Reload Local Data` and `Download from Cluster` buttons; instead poll automatically every few seconds (these controls can live under the debug toggle if required).
+  - Move the `PyMOL Top 96` button to the top control row of the TSV viewer (before table header) and add a sibling `Export` button that opens a modal for configuring exports.
+- Add persistent tracking of PDB ID + Antigen URL pairs (with user-defined names) so users can quickly re-select past combinations; selecting a saved pair should auto-populate the relevant fields throughout the app.
+- Adjust gallery handling so `assess_all` (or equivalent) writes gallery outputs into the same directory that hosts `af3_rankings.tsv`; update the UI so the PyMOL gallery launcher targets the colocated folder.
+
+### Design Notes
+- Introduce a `debugMode` flag in frontend state driven by a toggle; hide advanced controls with a shared CSS class when disabled.
+- Add a new backend store (`TargetPreferences`) that keeps named PDB/antigen pairs on disk (`cache/ui_state/targets.json`) and expose `/api/targets/prefs` endpoints for list/create/update/delete.
+- Extend `TargetInitRequest` schema with `num_epitopes` and persist to `target.yaml` through existing workflow helpers.
+- Sequence alignment API should return mismatched flank residues (`left_context`/`right_context`) in addition to length; update renderer to surface them.
+- Rework rankings polling so the UI refreshes via interval when the table is visible; manual reload/sync buttons move into debug panel.
+- `designs.run_design` should treat binder chain as optional; only use value when provided.
+- Create modal infrastructure (simple hidden div) to support TSV export configuration triggered by the new top-level Export button.
+- Attach PDB/antigen selections to design + assessment requests so dependent forms auto-populate when a saved set is chosen.
+- Update assessment workflow so gallery artifacts are copied into the same leaf directory as `af3_rankings.tsv`; adjust PyMOL launcher to reference that path.
+
+
 ## Goals
 - Provide a single-page web UI where a scientist can feed a PDB ID and vendor antigen URL, then drive the entire InitBinder pipeline without touching the CLI.
 - Expose design artifacts visually (sequence alignment, plots, tables) and operationally (cluster batch submissions, PyMOL launches, export bundles).
@@ -121,4 +145,3 @@
 - Should design runs use `manage_rfa.py pipeline` (single command) or the per-stage scripts? (Plan: start with `pipeline` for coarse control, add advanced toggles later.)
 - For scatter plot interactivity, is Plotly acceptable or should we craft custom D3? (Default: Plotly for speed.)
 - Export settings default values (GC target, codon host) – expose minimal necessary knobs initially.
-

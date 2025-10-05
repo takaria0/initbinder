@@ -7,9 +7,38 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class TargetPreset(BaseModel):
+    id: str
+    name: str
+    pdb_id: str
+    antigen_url: Optional[str] = None
+    num_epitopes: Optional[int] = Field(None, ge=1, le=32)
+    created_at: float
+    updated_at: float
+    last_used: float
+
+
+class TargetPresetRequest(BaseModel):
+    name: Optional[str] = Field(None, max_length=120)
+    pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$")
+    antigen_url: Optional[str] = None
+    num_epitopes: Optional[int] = Field(None, ge=1, le=32)
+    preset_id: Optional[str] = None
+
+
+class TargetPresetResponse(BaseModel):
+    preset: TargetPreset
+
+
+class TargetPresetListResponse(BaseModel):
+    presets: List[TargetPreset]
+
+
 class TargetInitRequest(BaseModel):
     pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$", description="4-character PDB accession")
     antigen_url: Optional[str] = Field(None, description="Vendor product URL")
+    preset_name: Optional[str] = Field(None, max_length=120, description="Friendly name for saved target preset")
+    num_epitopes: Optional[int] = Field(None, ge=1, le=32, description="Desired number of epitopes to surface")
     force_refresh: bool = Field(False, description="Redo init even if target folder exists")
     run_decide_scope: bool = Field(True, description="Also run decide-scope after initialization")
     run_prep: bool = Field(True, description="Also run prep-target after decide-scope")
@@ -85,7 +114,12 @@ class DesignRunRequest(BaseModel):
     total_designs: int = Field(90, ge=1, le=50000)
     num_sequences: int = Field(1, ge=1, le=32)
     temperature: float = Field(0.1, ge=0.0, le=1.0)
-    binder_chain_id: str = Field("H", min_length=1, max_length=1)
+    binder_chain_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=1,
+        description="Optional binder chain override; defaults to H when omitted",
+    )
     af3_seed: int = Field(1, ge=0)
     run_label: Optional[str] = Field(None)
     submit: bool = Field(False, description="Submit jobs to scheduler immediately")
@@ -118,6 +152,7 @@ class RankingResponse(BaseModel):
     rows: List[RankingRow]
     scatter: List[ScatterPoint] = Field(default_factory=list)
     source_path: Optional[str] = None
+    gallery_path: Optional[str] = None
 
 
 class ExportRequest(BaseModel):
