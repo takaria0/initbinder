@@ -162,18 +162,19 @@ def submit_assessment_run(request: AssessmentRunRequest, *, job_store: JobStore 
         client = ClusterClient(log_hook=lambda line: store.append_log(job.job_id, line))
         store.update(job.job_id, status=JobStatus.RUNNING, message="Submitting assessment jobs")
 
-        try:
-            store.append_log(job.job_id, "[cmd] sync_tools")
-            sync_result = client.sync_tools()
-            if sync_result.stdout:
-                for line in sync_result.stdout.splitlines():
-                    store.append_log(job.job_id, line)
-            if sync_result.stderr:
-                err = sync_result.stderr.strip()
-                if err:
-                    store.append_log(job.job_id, err)
-        except Exception as exc:
-            store.append_log(job.job_id, f"[warn] sync_tools failed: {exc}")
+        # Skip tool sync for now; assume user has done it recently.
+        # try:
+        #     store.append_log(job.job_id, "[cmd] sync_tools")
+        #     sync_result = client.sync_tools()
+        #     if sync_result.stdout:
+        #         for line in sync_result.stdout.splitlines():
+        #             store.append_log(job.job_id, line)
+        #     if sync_result.stderr:
+        #         err = sync_result.stderr.strip()
+        #         if err:
+        #             store.append_log(job.job_id, err)
+        # except Exception as exc:
+        #     store.append_log(job.job_id, f"[warn] sync_tools failed: {exc}")
 
         remote_root = client.remote_root
         if remote_root is None:
