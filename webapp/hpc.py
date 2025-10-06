@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
 
 from .config import ClusterConfig, load_config
-
+from utils import SLURM_CPU_ACCOUNT  # new import
 
 @dataclass
 class CommandResult:
@@ -291,6 +291,7 @@ class ClusterClient:
         use_conda: bool = False,
         cpus: int = 4,
         partition: str = "standard",
+        account: str = SLURM_CPU_ACCOUNT,  # added account parameter
     ) -> CommandResult:
         if self.cfg.mock:
             self._emit(f"[cluster] srun (mock) -> {command}", always_print=True)
@@ -306,7 +307,7 @@ class ClusterClient:
         segments.append(command)
         inner = " && ".join(segments)
         srun_cmd = (
-            f"srun -c {safe_cpus} -p {shlex.quote(safe_partition)} --pty /bin/bash -lc {shlex.quote(inner)}"
+            f"srun -c {safe_cpus} -p {shlex.quote(safe_partition)} -A {shlex.quote(account)} --pty /bin/bash -lc {shlex.quote(inner)}"
         )
         self._ensure_master()
         self._emit(f"[cluster] srun -> {srun_cmd}", always_print=True)

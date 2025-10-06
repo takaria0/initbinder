@@ -1,4 +1,4 @@
-from utils import _ensure_dir, ROOT, TARGETS_ROOT, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
+from utils import _ensure_dir, ROOT, TARGETS_ROOT_LOCAL, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
 import requests
 import yaml
 from Bio.PDB import PDBIO, PDBParser
@@ -93,7 +93,7 @@ def init_target(
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     if force:
         print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
-    tdir = TARGETS_ROOT/pdb_id.upper()
+    tdir = ROOT/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
 
     for url, out in [

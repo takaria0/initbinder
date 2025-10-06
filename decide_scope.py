@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple, Optional, Set
 from utils import (
     _ensure_dir,
     ROOT,
-    TARGETS_ROOT,
+    TARGETS_ROOT_LOCAL,
     SCHEMA,
     RCSB_ENTRY,
     RCSB_ASSEM,
@@ -375,7 +375,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         _llm_provider, _max_new = "gpt-oss-local", 1024
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
-    tdir = TARGETS_ROOT/pdb_id.upper()
+    tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
     _ensure_dir(tdir/"reports")
 
     # Load target.yaml to check for pre-defined chains, target name, and allowed range
