@@ -820,7 +820,7 @@ def build_pymol_gallery_from_rankings(
 ):
     import csv, shutil
 
-    tdir = TARGETS_ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / pdb_id.upper()
     rankings_tsv = Path(rankings_tsv)
     assert rankings_tsv.exists(), f"rankings TSV not found: {rankings_tsv}"
 
@@ -1211,7 +1211,7 @@ def assess_rfa_all(
         pass
 
     print(f"=== Assessing all designs for target {pdb_id} ===")
-    tdir = TARGETS_ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / pdb_id.upper()
     cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
 
     prepared_pdb = tdir / "prep" / "prepared.pdb"
