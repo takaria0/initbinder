@@ -119,7 +119,8 @@ def _resolve_targets_root() -> Path:
     return candidates[0] if candidates else ROOT / "targets"
 
 
-TARGETS_ROOT = _resolve_targets_root()
+# TARGETS_ROOT = _resolve_targets_root()
+TARGETS_ROOT = '/pub/inagakit/Projects/initbinder/targets'
 
 print(f"[info] Running manage_rfa_eco.py from {ROOT}")
 print(f"[info] Using targets root: {TARGETS_ROOT}")
