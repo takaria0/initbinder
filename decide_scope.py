@@ -406,17 +406,54 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
 
     # 1. Target Chain and Name Constraint
     target_focus_prompt = ""
-    if target_chains and target_name_from_yaml:
+    chain_constraints_block = ""
+    if target_chains:
         chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
-        target_focus_prompt = textwrap.dedent(f"""
+        antigen_context_sentence = (
+            f"Commercial antigen verification confirmed that only chain(s) {chain_list_str} are supported."
+        )
+        if target_name_from_yaml:
+            target_focus_prompt = textwrap.dedent(
+                f"""
+                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
+                {antigen_context_sentence}
+                You are defining epitopes for the protein named '{target_name_from_yaml}'.
+                - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
+                - The `chains` **and** `target_chains` fields MUST be exactly [{chain_list_str}].
+                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
+                - Ignore any other polymer chains in the PDB; they are background context only.
+                --- END CRITICAL INSTRUCTION ---
+                """
+            )
+        else:
+            target_focus_prompt = textwrap.dedent(
+                f"""
+                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
+                {antigen_context_sentence}
+                - The `chains` **and** `target_chains` fields in your YAML MUST be exactly [{chain_list_str}].
+                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
+                - Ignore any other polymer chains in the PDB; they are background context only.
+                --- END CRITICAL INSTRUCTION ---
+                """
+            )
+
+        chain_constraints_block = textwrap.dedent(
+            f"""
+            --- ANTIGEN VALIDATION SUMMARY ---
+            Validated antigen-supported chain(s): {chain_list_str}
+            These chains were experimentally matched to the commercial antigen and must remain fixed in your plan.
+            --- END ANTIGEN VALIDATION SUMMARY ---
+            """
+        )
+    elif target_name_from_yaml:
+        target_focus_prompt = textwrap.dedent(
+            f"""
             --- CRITICAL INSTRUCTION: TARGET FOCUS ---
-            Your primary and most important task is to define epitopes for the specific protein named: '{target_name_from_yaml}'.
-            This protein is located exclusively on chain(s): {chain_list_str}.
+            You are defining epitopes for the protein named '{target_name_from_yaml}'.
             - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
-            - ALL proposed epitopes and their `residues` fields MUST be on the specified chain(s): {chain_list_str}.
-            - Ignore all other polymer entities in the PDB file for the purpose of defining the target and epitopes. They are context only.
             --- END CRITICAL INSTRUCTION ---
-        """)
+            """
+        )
 
     # 2. Allowed Residue Range Constraint (from antigen verification)
     range_constraint_prompt = ""
@@ -493,7 +530,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         return prefix + prompt_template.format(
             meta=json.dumps(meta, indent=2),
             uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else ""),
-            chain_constraints=""
+            chain_constraints=chain_constraints_block
         )
 
     retry_extra = ""
