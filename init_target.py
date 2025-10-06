@@ -223,10 +223,26 @@ def init_target(
     normalized_chosen = _normalize_chain_ids(chosen_chains)
 
     if normalized_chosen:
-        existing = config.get("chains", []) or []
-        merged = list(dict.fromkeys(existing + normalized_chosen))
-        config["chains"] = _normalize_chain_ids(merged)
-        config["target_chains"] = normalized_chosen
+        existing = _normalize_chain_ids(config.get("chains"))
+        supporting: list[str] = []
+        for ch in existing:
+            if ch not in normalized_chosen and ch not in supporting:
+                supporting.append(ch)
+
+        # Preserve any pre-existing supporting list while avoiding duplicates
+        prior_supporting = _normalize_chain_ids(config.get("supporting_chains"))
+        for ch in prior_supporting:
+            if ch not in normalized_chosen and ch not in supporting:
+                supporting.append(ch)
+
+        if supporting:
+            config["supporting_chains"] = supporting
+            print(f"[info] Marking non-target chains as supporting: {supporting}")
+        else:
+            config.pop("supporting_chains", None)
+
+        config["chains"] = list(normalized_chosen)
+        config["target_chains"] = list(normalized_chosen)
     elif config.get("chains"):
         config["target_chains"] = _normalize_chain_ids(config["chains"])
     elif pdb_sequences:

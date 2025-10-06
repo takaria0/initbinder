@@ -250,17 +250,33 @@ def _build_expression_region(
     }
 
 
-def _collect_expression_regions(pdb_id: str) -> tuple[Optional[str], List[dict[str, str]]]:
+def _normalize_chain_list(chains: Optional[Sequence[object]]) -> list[str]:
+    result: list[str] = []
+    if not isinstance(chains, Sequence) or isinstance(chains, (str, bytes)):
+        return result
+    for entry in chains:
+        text = str(entry).strip()
+        if not text:
+            continue
+        text = text.upper()
+        if text not in result:
+            result.append(text)
+    return result
+
+
+def _collect_expression_regions(
+    pdb_id: str,
+) -> tuple[Optional[str], List[dict[str, str]], dict[str, list[str]]]:
     if ROOT is None:
-        return None, []
+        return None, [], {"target": [], "supporting": []}
     target_yaml = ROOT / "targets" / pdb_id.upper() / "target.yaml"
     if not target_yaml.exists():
-        return None, []
+        return None, [], {"target": [], "supporting": []}
     try:
         data = yaml.safe_load(target_yaml.read_text()) or {}
     except Exception as exc:
         print(f"[pymol_utils] Warning: could not parse {target_yaml}: {exc}")
-        return None, []
+        return None, [], {"target": [], "supporting": []}
 
     sequences = data.get("sequences") or {}
     residue_numbers_block = sequences.get("pdb_residue_numbers")
@@ -303,7 +319,12 @@ def _collect_expression_regions(pdb_id: str) -> tuple[Optional[str], List[dict[s
         if region:
             expression_regions.append(region)
 
-    return vendor_range, expression_regions
+    target_chains = _normalize_chain_list(data.get("chains"))
+    supporting_chains = _normalize_chain_list(data.get("supporting_chains"))
+    return vendor_range, expression_regions, {
+        "target": target_chains,
+        "supporting": supporting_chains,
+    }
 
 
 def _write_hotspot_pml(
@@ -313,6 +334,9 @@ def _write_hotspot_pml(
     *,
     expression_regions: Optional[List[dict[str, str]]] = None,
     vendor_range: Optional[str] = None,
+    full_struct_name: Optional[str] = None,
+    target_chains: Optional[Sequence[str]] = None,
+    supporting_chains: Optional[Sequence[str]] = None,
 ) -> None:
     """
     struct_name: バンドル内に配置した prepared 構造のファイル名（例: prepared.pdb）
@@ -335,6 +359,18 @@ def _write_hotspot_pml(
             ch, resi = m.group(1), m.group(2)
             parts.append(f"( {obj} and chain {ch} and resi {resi} )")
         return " or ".join(parts)
+
+    def _select_chains(sel_name: str, obj: str, chains: Optional[Sequence[str]]):
+        cleaned: list[str] = []
+        for ch in chains or []:
+            text = str(ch).strip().upper()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        if not cleaned:
+            return None, None
+        cond = " or ".join(f"chain {ch}" for ch in cleaned)
+        safe_name = _sanitize(sel_name) or sel_name
+        return f"select {safe_name}, {obj} and ({cond})", safe_name
 
     # 視認性の良い固定パレット（順番はエピトープ名のアルファベット順で安定）
     base_palette = [
@@ -374,6 +410,28 @@ def _write_hotspot_pml(
     pml.append("set cartoon_rect_width, 0.4\n")
     pml.append("set cartoon_oval_width, 0.2\n")
     pml.append("set auto_zoom, off\n\n")
+
+    if full_struct_name:
+        pml.append("# Load full raw PDB for context\n")
+        pml.append(f"load {full_struct_name}, assembly_full\n")
+        pml.append("hide everything, assembly_full\n")
+        pml.append("show cartoon, assembly_full\n")
+        pml.append("color gray90, assembly_full\n")
+        pml.append("set cartoon_transparency, 0.85, assembly_full\n")
+        tgt_cmd, tgt_sel = _select_chains("assembly_target", "assembly_full", target_chains)
+        if tgt_cmd and tgt_sel:
+            pml.append(f"{tgt_cmd}\\n")
+            pml.append(f"hide cartoon, {tgt_sel}\\n")
+        sup_cmd, sup_sel = _select_chains("assembly_support", "assembly_full", supporting_chains)
+        if sup_cmd and sup_sel:
+            pml.append(f"{sup_cmd}\\n")
+            pml.append(f"show cartoon, {sup_sel}\\n")
+            pml.append(f"show surface, {sup_sel}\\n")
+            pml.append(f"set cartoon_transparency, 0.35, {sup_sel}\\n")
+            pml.append(f"set surface_transparency, 0.25, {sup_sel}\\n")
+            pml.append(f"color gray60, {sup_sel}\\n")
+            pml.append(f"group full_assembly, {sup_sel}\\n")
+        pml.append("group full_assembly, assembly_full\n\n")
 
     if expression_regions:
         pml.append("# Highlight recombinant expression overlap\n")
@@ -452,6 +510,10 @@ def _send_hotspots_to_remote(
     *,
     vendor_range: Optional[str] = None,
     expression_regions: Optional[List[dict[str, str]]] = None,
+    raw_pdb_path: Optional[Path] = None,
+    raw_object_name: Optional[str] = None,
+    target_chains: Optional[Sequence[str]] = None,
+    supporting_chains: Optional[Sequence[str]] = None,
 ) -> bool:
     """Attempts to send hotspot visualization commands to a remote PyMOL."""
     try:
@@ -476,12 +538,18 @@ def _send_hotspots_to_remote(
             pml_path,
             expression_regions=expression_regions,
             vendor_range=vendor_range,
+            full_struct_name=raw_object_name,
+            target_chains=target_chains,
+            supporting_chains=supporting_chains,
         )
 
         # Execute line-by-line
         pymol.do("reinitialize")
         # --- FIX: Use set_state instead of load_pdb ---
         pymol.set_state(pdb_content, object="target", format="pdb")
+        if raw_pdb_path and raw_pdb_path.exists():
+            raw_content = raw_pdb_path.read_text()
+            pymol.set_state(raw_content, object="assembly_full", format="pdb")
 
         for line in pml_path.read_text().splitlines():
             line = line.strip()
@@ -553,7 +621,9 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
 
-    vendor_range_label, expression_regions = _collect_expression_regions(pdb_id_u)
+    vendor_range_label, expression_regions, chain_meta = _collect_expression_regions(pdb_id_u)
+    target_chain_ids = chain_meta.get("target", []) if chain_meta else []
+    supporting_chain_ids = chain_meta.get("supporting", []) if chain_meta else []
     if expression_regions:
         desc = ", ".join(
             (
@@ -570,12 +640,34 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
         )
 
     # --- NEW: Mode Toggle ---
+    raw_pdb_path: Optional[Path] = None
+    raw_dir = prep_dir.parent / "raw"
+    if raw_dir.exists():
+        candidates = [pdb_id, pdb_id_u, pdb_id.lower()]
+        for candidate in candidates:
+            path = raw_dir / f"{candidate}.pdb"
+            if path.exists():
+                raw_pdb_path = path
+                break
+        if raw_pdb_path is None:
+            first_raw = next((p for p in sorted(raw_dir.glob("*.pdb"))), None)
+            if first_raw:
+                raw_pdb_path = first_raw
+
+    raw_bundle_name: Optional[str] = None
+    if raw_pdb_path is not None:
+        raw_bundle_name = "raw_full.pdb"
+
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
             prepared_pdb,
             epitopes,
             vendor_range=vendor_range_label,
             expression_regions=expression_regions,
+            raw_pdb_path=raw_pdb_path,
+            raw_object_name=raw_bundle_name,
+            target_chains=target_chain_ids,
+            supporting_chains=supporting_chain_ids,
         )
         if success:
             return None # Success in remote mode, no bundle created.
@@ -587,6 +679,8 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
     # Copy prepared structure with just its basename
     dest_pdb_name = prepared_pdb.name
     shutil.copy(str(prepared_pdb), str(bundle_dir / dest_pdb_name))
+    if raw_pdb_path is not None and raw_bundle_name:
+        shutil.copy(str(raw_pdb_path), str(bundle_dir / raw_bundle_name))
     # Write PML script
     pml_path = bundle_dir / "hotspot_visualization.pml"
     _write_hotspot_pml(
@@ -595,6 +689,9 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
         pml_path,
         expression_regions=expression_regions,
         vendor_range=vendor_range_label,
+        full_struct_name=raw_bundle_name,
+        target_chains=target_chain_ids,
+        supporting_chains=supporting_chain_ids,
     )
     # Optionally copy to remote
     _maybe_scp_to_local(bundle_dir)
