@@ -317,7 +317,6 @@ async def api_pymol_top_binders(pdb_id: str, payload: PyMolTopBindersRequest) ->
 @app.post("/api/targets/{pdb_id}/sync", response_model=AssessmentSyncResponse)
 async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> AssessmentSyncResponse:
     try:
-        raise RuntimeError("test")
         job_id = submit_assessment_sync(pdb_id, run_label=run_label, job_store=store)
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=str(exc)) from exc

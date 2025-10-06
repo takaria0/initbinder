@@ -25,7 +25,7 @@ const state = {
   pendingClusterSyncTimer: null,
 };
 
-const SYNC_RESULTS_MIN_INTERVAL_MS = 60000;
+const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
 
 const el = {
   targetForm: document.querySelector('#target-form'),

@@ -370,21 +370,21 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             job_store.append_log(job_id, err)
 
     # Skip tool sync for now; assume user has done it recently.
-    # job_store.update(job_id, message="Syncing tools to cluster")
-    # job_store.append_log(job_id, "[cmd] sync_tools")
-    # tools_dir = (workspace / "tools").resolve()
-    # remote_tools_desc = (
-    #     str(Path(cluster.remote_root) / "tools") if cluster.remote_root else "<remote root unset>/tools"
-    # )
-    # job_store.append_log(job_id, f"[rsync] tools → {remote_tools_desc} (from {tools_dir})")
-    # tools_result = cluster.sync_tools()
-    # if tools_result.stdout:
-    #     for line in tools_result.stdout.splitlines():
-    #         job_store.append_log(job_id, line)
-    # if tools_result.stderr:
-    #     err = tools_result.stderr.strip()
-    #     if err:
-    #         job_store.append_log(job_id, err)
+    job_store.update(job_id, message="Syncing tools to cluster")
+    job_store.append_log(job_id, "[cmd] sync_tools")
+    tools_dir = (workspace / "tools").resolve()
+    remote_tools_desc = (
+        str(Path(cluster.remote_root) / "tools") if cluster.remote_root else "<remote root unset>/tools"
+    )
+    job_store.append_log(job_id, f"[rsync] tools → {remote_tools_desc} (from {tools_dir})")
+    tools_result = cluster.sync_tools()
+    if tools_result.stdout:
+        for line in tools_result.stdout.splitlines():
+            job_store.append_log(job_id, line)
+    if tools_result.stderr:
+        err = tools_result.stderr.strip()
+        if err:
+            job_store.append_log(job_id, err)
 
     pipeline_args = _build_pipeline_args(request, arms, designs_per_task, run_label, binder_chain)
     binder_root = cluster.remote_root
