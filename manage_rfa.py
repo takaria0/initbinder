@@ -567,7 +567,6 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{array_name}_%A_%a.out",
             f"#SBATCH --error=slurm_logs/{array_name}_%A_%a.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
             *conda_lines,
             "echo \"[assess][array] shard ${{SLURM_ARRAY_TASK_ID}}/{0}\"".format(effective_shard_mod),
