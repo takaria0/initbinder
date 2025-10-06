@@ -820,7 +820,7 @@ def build_pymol_gallery_from_rankings(
 ):
     import csv, shutil
 
-    tdir = ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / "targets" / pdb_id.upper()
     rankings_tsv = Path(rankings_tsv)
     assert rankings_tsv.exists(), f"rankings TSV not found: {rankings_tsv}"
 
