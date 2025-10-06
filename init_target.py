@@ -93,7 +93,7 @@ def init_target(
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     if force:
         print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
-    tdir = ROOT/pdb_id.upper()
+    tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
 
     for url, out in [
