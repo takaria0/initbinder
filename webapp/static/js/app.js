@@ -26,6 +26,7 @@ const state = {
   clusterRetryTimer: null,
   analysisResults: null,
   analysisRunning: false,
+  analysisContext: null,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -488,6 +489,7 @@ function setCurrentPdb(pdbId, options = {}) {
     el.pdbInput.value = upper;
   }
   state.activeRunLabel = '';
+  resetAnalysisPanel({ disableButton: true });
   updateActiveRunDisplay();
   syncActivePreset();
   renderCurrentSelection();
@@ -1006,6 +1008,9 @@ async function fetchRankings(options = {}) {
   }
 
   resetAnalysisPanel({ disableButton: true });
+  if (el.analysisRun) {
+    el.analysisRun.disabled = true;
+  }
 
   try {
     const res = await fetch(`/api/targets/${state.currentPdb}/rankings?${params.toString()}`);
@@ -1014,6 +1019,13 @@ async function fetchRankings(options = {}) {
       throw new Error(detail.detail || `Failed with ${res.status}`);
     }
     const payload = await res.json();
+    const newSignature = analysisSignature(
+      state.currentPdb,
+      payload.run_label || '',
+      payload.source_path || '',
+    );
+    const contextMatches =
+      state.analysisContext && state.analysisContext.signature === newSignature;
     state.rankings = payload.rows || [];
     state.rankingsResponse = payload;
     state.tableSort = { key: 'iptm', dir: 'desc' };
@@ -1026,6 +1038,9 @@ async function fetchRankings(options = {}) {
       el.resultsRunLabel.value = state.activeRunLabel;
     }
     el.binderDetail.hidden = true;
+    if (!contextMatches) {
+      resetAnalysisPanel();
+    }
     renderResults();
     if (!silent) {
       const label = state.activeRunLabel || 'latest';
@@ -1046,6 +1061,9 @@ async function fetchRankings(options = {}) {
   } finally {
     if (!silent && el.refreshResultsBtn) {
       el.refreshResultsBtn.disabled = false;
+    }
+    if (el.analysisRun && !state.analysisRunning) {
+      el.analysisRun.disabled = state.rankings.length === 0;
     }
     state.rankingsFetching = false;
   }
@@ -1142,7 +1160,7 @@ function renderScatter() {
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('Binder RMSD (Å)', (width - margin.right + margin.left) / 2, height - margin.bottom + 32);
+  ctx.fillText('RMSD Diego (Å)', (width - margin.right + margin.left) / 2, height - margin.bottom + 32);
   ctx.save();
   ctx.translate(20, (height - margin.bottom + margin.top) / 2);
   ctx.rotate(-Math.PI / 2);
@@ -1191,9 +1209,17 @@ function renderScatter() {
   });
 }
 
+function analysisSignature(pdbId, runLabel, sourcePath) {
+  return [pdbId || '', runLabel || '', sourcePath || ''].join('::');
+}
+
 function resetAnalysisPanel(options = {}) {
   const disableButton = Boolean(options.disableButton);
+  const preserveContext = Boolean(options.preserveContext);
   state.analysisResults = null;
+  if (!preserveContext) {
+    state.analysisContext = null;
+  }
   if (el.analysisPlots) el.analysisPlots.innerHTML = '';
   if (el.analysisMatrix) el.analysisMatrix.innerHTML = '';
   if (el.analysisLogs) el.analysisLogs.innerHTML = '';
@@ -1463,6 +1489,16 @@ async function runRankingsAnalysis() {
     }
     const data = await res.json();
     state.analysisResults = data;
+    state.analysisContext = {
+      pdbId: state.currentPdb,
+      runLabel: state.activeRunLabel || '',
+      sourcePath: state.rankingsResponse?.source_path || '',
+      signature: analysisSignature(
+        state.currentPdb,
+        state.activeRunLabel || '',
+        state.rankingsResponse?.source_path || '',
+      ),
+    };
     renderAnalysis();
     if (el.analysisStatus) {
       setBadge(el.analysisStatus, `Updated ${new Date().toLocaleString()}`, 'rgba(134, 239, 172, 0.25)');
