@@ -42,12 +42,14 @@ from __future__ import annotations
 import os
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
-import shlex
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+import yaml
 
 # We import ROOT and a few helpers from utils to locate files and parse residue keys.
 try:
@@ -92,7 +94,226 @@ def _keys_to_expr(prefix: str, keys: List[str]) -> str:
     return " or ".join(parts)
 
 
-def _write_hotspot_pml(struct_name: str, epitopes: dict[str, dict[str, list[str]]], pml_path: Path) -> None:
+_RANGE_TOKEN = re.compile(r"^\s*([A-Za-z]?-?\d+[A-Za-z]?)\s*[-\u2013]\s*([A-Za-z]?-?\d+[A-Za-z]?)\s*$")
+
+
+def _parse_range_labels(span: object) -> tuple[Optional[str], Optional[str]]:
+    if span is None:
+        return None, None
+    if isinstance(span, (list, tuple)) and len(span) >= 2:
+        start, end = span[0], span[1]
+    else:
+        text = str(span).strip()
+        if not text:
+            return None, None
+        text = text.replace("\u2013", "-")
+        match = _RANGE_TOKEN.match(text)
+        if match:
+            start, end = match.group(1), match.group(2)
+        else:
+            start = end = text
+    start_label = str(start).strip()
+    end_label = str(end).strip()
+    if not start_label or not end_label:
+        return None, None
+    return start_label, end_label
+
+
+def _is_simple_resi(label: str) -> bool:
+    return bool(re.fullmatch(r"-?\d+", label.strip()))
+
+
+def _find_residue_index(residues: Sequence[object], label: str) -> Optional[int]:
+    target = label.strip()
+    if not target:
+        return None
+    for idx, entry in enumerate(residues):
+        entry_str = str(entry).strip()
+        if entry_str == target:
+            return idx
+    digits = re.match(r"-?\d+", target)
+    if digits:
+        target_digits = digits.group(0)
+        for idx, entry in enumerate(residues):
+            entry_str = str(entry).strip()
+            entry_digits = re.match(r"-?\d+", entry_str)
+            if entry_digits and entry_digits.group(0) == target_digits:
+                return idx
+    return None
+
+
+def _format_numeric_run(run: Sequence[str]) -> str:
+    if not run:
+        return ""
+    if len(run) == 1:
+        return run[0]
+    if len(run) == 2:
+        return "+".join(run)
+    return f"{run[0]}-{run[-1]}"
+
+
+def _compress_residue_terms(residues: Sequence[str]) -> str:
+    cleaned = [str(r).strip() for r in residues if str(r).strip()]
+    if not cleaned:
+        return ""
+    if all(_is_simple_resi(r) for r in cleaned):
+        return f"{cleaned[0]}-{cleaned[-1]}"
+    parts: List[str] = []
+    run: List[str] = []
+    prev_val: Optional[int] = None
+    for label in cleaned:
+        if _is_simple_resi(label):
+            value = int(label)
+            if run and prev_val is not None and value == prev_val + 1:
+                run.append(label)
+            else:
+                if run:
+                    parts.append(_format_numeric_run(run))
+                run = [label]
+            prev_val = value
+        else:
+            if run:
+                parts.append(_format_numeric_run(run))
+                run = []
+                prev_val = None
+            parts.append(label)
+    if run:
+        parts.append(_format_numeric_run(run))
+    return "+".join(parts)
+
+
+def _selection_from_span(
+    chain_id: str,
+    start_label: str,
+    end_label: str,
+    residues: Optional[Sequence[object]],
+) -> tuple[Optional[str], str, str]:
+    chain_clean = str(chain_id).strip()
+    chain_upper = chain_clean.upper() or chain_clean
+    base_sel = f"target and chain {chain_upper}"
+    norm_start = start_label.strip()
+    norm_end = end_label.strip()
+
+    residue_list = [str(r).strip() for r in residues] if residues else None
+    if residue_list:
+        start_idx = _find_residue_index(residue_list, norm_start)
+        end_idx = _find_residue_index(residue_list, norm_end)
+        if start_idx is not None and end_idx is not None:
+            if end_idx < start_idx:
+                start_idx, end_idx = end_idx, start_idx
+                norm_start, norm_end = norm_end, norm_start
+            subset = residue_list[start_idx : end_idx + 1]
+            resi_expr = _compress_residue_terms(subset)
+            if resi_expr:
+                return f"({base_sel} and resi {resi_expr})", norm_start, norm_end
+
+    if _is_simple_resi(norm_start) and _is_simple_resi(norm_end):
+        start_val = int(norm_start)
+        end_val = int(norm_end)
+        if end_val < start_val:
+            start_val, end_val = end_val, start_val
+            norm_start, norm_end = str(start_val), str(end_val)
+        else:
+            norm_start, norm_end = str(start_val), str(end_val)
+        return f"({base_sel} and resi {start_val}-{end_val})", norm_start, norm_end
+
+    if norm_start and norm_start == norm_end:
+        return f"({base_sel} and resi {norm_start})", norm_start, norm_end
+
+    return None, start_label, end_label
+
+
+def _build_expression_region(
+    chain_id: str,
+    span: object,
+    residue_numbers: Mapping[str, Sequence[object]],
+) -> Optional[dict[str, str]]:
+    start_label, end_label = _parse_range_labels(span)
+    if not start_label or not end_label:
+        return None
+
+    residues: Optional[Sequence[object]] = None
+    for key in (chain_id, chain_id.upper(), chain_id.lower()):
+        if key in residue_numbers and residue_numbers[key]:
+            residues = residue_numbers[key]
+            break
+
+    selection, norm_start, norm_end = _selection_from_span(chain_id, start_label, end_label, residues)
+    if not selection:
+        return None
+
+    return {
+        "chain": str(chain_id).strip().upper() or str(chain_id).strip(),
+        "start": norm_start,
+        "end": norm_end,
+        "selection": selection,
+    }
+
+
+def _collect_expression_regions(pdb_id: str) -> tuple[Optional[str], List[dict[str, str]]]:
+    if ROOT is None:
+        return None, []
+    target_yaml = ROOT / "targets" / pdb_id.upper() / "target.yaml"
+    if not target_yaml.exists():
+        return None, []
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception as exc:
+        print(f"[pymol_utils] Warning: could not parse {target_yaml}: {exc}")
+        return None, []
+
+    sequences = data.get("sequences") or {}
+    residue_numbers_block = sequences.get("pdb_residue_numbers")
+    residue_numbers: Dict[str, Sequence[object]] = {}
+    if isinstance(residue_numbers_block, Mapping):
+        residue_numbers = {}
+        for key, value in residue_numbers_block.items():
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                residue_numbers[str(key)] = value
+
+    alignment_block = sequences.get("alignment")
+    if isinstance(alignment_block, list):
+        alignment_block = next((item for item in alignment_block if isinstance(item, dict)), {})
+    if not isinstance(alignment_block, dict):
+        alignment_block = {}
+
+    vendor_range: Optional[str] = None
+    for key in ("vendor_overlap_range", "vendor_aligned_range", "vendor_range"):
+        value = alignment_block.get(key)
+        if isinstance(value, str) and value.strip():
+            vendor_range = value.strip()
+            break
+
+    chain_ranges_raw = alignment_block.get("chain_ranges")
+    chain_ranges: Dict[str, object] = {}
+    if isinstance(chain_ranges_raw, dict):
+        chain_ranges = {str(k): v for k, v in chain_ranges_raw.items()}
+    elif isinstance(chain_ranges_raw, list):
+        for entry in chain_ranges_raw:
+            if not isinstance(entry, dict):
+                continue
+            chain = entry.get("chain") or entry.get("id") or entry.get("name")
+            span = entry.get("range") or entry.get("value") or entry.get("resi")
+            if chain and span:
+                chain_ranges[str(chain)] = span
+
+    expression_regions: List[dict[str, str]] = []
+    for chain_id, span in chain_ranges.items():
+        region = _build_expression_region(chain_id, span, residue_numbers)
+        if region:
+            expression_regions.append(region)
+
+    return vendor_range, expression_regions
+
+
+def _write_hotspot_pml(
+    struct_name: str,
+    epitopes: dict[str, dict[str, list[str]]],
+    pml_path: Path,
+    *,
+    expression_regions: Optional[List[dict[str, str]]] = None,
+    vendor_range: Optional[str] = None,
+) -> None:
     """
     struct_name: バンドル内に配置した prepared 構造のファイル名（例: prepared.pdb）
     epitopes: { epitope_name: { "mask":[keys], "A":[keys], "B":[keys], "C":[keys], ... } }
@@ -154,6 +375,35 @@ def _write_hotspot_pml(struct_name: str, epitopes: dict[str, dict[str, list[str]
     pml.append("set cartoon_oval_width, 0.2\n")
     pml.append("set auto_zoom, off\n\n")
 
+    if expression_regions:
+        pml.append("# Highlight recombinant expression overlap\n")
+        if vendor_range:
+            vendor_range_clean = str(vendor_range).replace("\n", " ").replace("\"", "")
+            pml.append(f"# Vendor expressed range (vendor numbering): {vendor_range_clean}\n")
+        pml.append("set_color vendor_expression, [0.960, 0.720, 0.240]\n")
+        pml.append("set cartoon_transparency, 0.65, target\n")
+        pml.append("set label_font_id, 7\n")
+        pml.append("set label_size, -0.6\n")
+        for idx, region in enumerate(expression_regions, start=1):
+            chain = _sanitize(region.get("chain", f"chain{idx}")) or f"chain{idx}"
+            sel_expr = region.get("selection")
+            start_label = region.get("start", "")
+            end_label = region.get("end", "")
+            if not sel_expr:
+                continue
+            obj_name = f"vendor_expr_{idx:02d}_{chain}"
+            pml.append(f"select {obj_name}, {sel_expr}\n")
+            pml.append(f"set cartoon_transparency, 0.05, {obj_name}\n")
+            pml.append(f"color vendor_expression, {obj_name}\n")
+            pml.append(f"group vendor_expression, {obj_name}\n")
+            pml.append(f"label first ({sel_expr} and name CA), \"{chain}:{start_label}\"\n")
+            pml.append(f"label last ({sel_expr} and name CA), \"{chain}:{end_label}\"\n")
+            pml.append(f"set label_color, vendor_expression, first ({sel_expr} and name CA)\n")
+            pml.append(f"set label_color, vendor_expression, last ({sel_expr} and name CA)\n")
+        if vendor_range:
+            pml.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_range_clean}\"\n")
+        pml.append("\n")
+
     for i, epi in enumerate(epi_names):
         epi_key = _sanitize(epi)
         base = base_palette[i % len(base_palette)]
@@ -196,7 +446,13 @@ def _write_hotspot_pml(struct_name: str, epitopes: dict[str, dict[str, list[str]
     pml_path.write_text("".join(pml))
 
 # --- NEW: Remote visualization sender for hotspots ---
-def _send_hotspots_to_remote(prepared_pdb_path: Path, epitopes: dict[str, dict[str, list[str]]]) -> bool:
+def _send_hotspots_to_remote(
+    prepared_pdb_path: Path,
+    epitopes: dict[str, dict[str, list[str]]],
+    *,
+    vendor_range: Optional[str] = None,
+    expression_regions: Optional[List[dict[str, str]]] = None,
+) -> bool:
     """Attempts to send hotspot visualization commands to a remote PyMOL."""
     try:
         from pymol_remote.client import PymolSession
@@ -214,16 +470,22 @@ def _send_hotspots_to_remote(prepared_pdb_path: Path, epitopes: dict[str, dict[s
         
         # This mirrors the logic from _write_hotspot_pml
         pml_path = Path(tempfile.mktemp(suffix=".pml"))
-        _write_hotspot_pml("target", epitopes, pml_path)
-        
+        _write_hotspot_pml(
+            "target",
+            epitopes,
+            pml_path,
+            expression_regions=expression_regions,
+            vendor_range=vendor_range,
+        )
+
         # Execute line-by-line
         pymol.do("reinitialize")
         # --- FIX: Use set_state instead of load_pdb ---
         pymol.set_state(pdb_content, object="target", format="pdb")
-        
+
         for line in pml_path.read_text().splitlines():
             line = line.strip()
-            if not line or line.startswith("load ") or line.startswith("reinitialize"):
+            if not line or line.startswith("#") or line.startswith("load ") or line.startswith("reinitialize"):
                 continue
             pymol.do(line)
         
@@ -290,15 +552,36 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
     if not epitopes:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
-    
+
+    vendor_range_label, expression_regions = _collect_expression_regions(pdb_id_u)
+    if expression_regions:
+        desc = ", ".join(
+            (
+                f"{region['chain']}:{region['start']}"
+                if region.get('start') == region.get('end')
+                else f"{region['chain']}:{region['start']}-{region['end']}"
+            )
+            for region in expression_regions
+        )
+        print(f"[pymol_utils] Vendor expression overlap mapped to PDB chains: {desc}")
+    elif vendor_range_label:
+        print(
+            f"[pymol_utils] Warning: vendor range {vendor_range_label} reported but could not be mapped to prepared structure for {pdb_id_u}."
+        )
+
     # --- NEW: Mode Toggle ---
     if RFA_PYMOL_MODE.lower() == 'remote':
-        success = _send_hotspots_to_remote(prepared_pdb, epitopes)
+        success = _send_hotspots_to_remote(
+            prepared_pdb,
+            epitopes,
+            vendor_range=vendor_range_label,
+            expression_regions=expression_regions,
+        )
         if success:
             return None # Success in remote mode, no bundle created.
         else:
             print("[info] Falling back to 'bundle' mode due to remote error.")
-    
+
     # --- Bundle Mode (Default or Fallback) ---
     bundle_dir = Path(tempfile.mkdtemp(prefix=f"{pdb_id_u}_prep_pymol_"))
     # Copy prepared structure with just its basename
@@ -306,7 +589,13 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
     shutil.copy(str(prepared_pdb), str(bundle_dir / dest_pdb_name))
     # Write PML script
     pml_path = bundle_dir / "hotspot_visualization.pml"
-    _write_hotspot_pml(dest_pdb_name, epitopes, pml_path)
+    _write_hotspot_pml(
+        dest_pdb_name,
+        epitopes,
+        pml_path,
+        expression_regions=expression_regions,
+        vendor_range=vendor_range_label,
+    )
     # Optionally copy to remote
     _maybe_scp_to_local(bundle_dir)
     return bundle_dir
