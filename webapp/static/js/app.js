@@ -24,6 +24,8 @@ const state = {
   pendingClusterSync: null,
   pendingClusterSyncTimer: null,
   clusterRetryTimer: null,
+  analysisResults: null,
+  analysisRunning: false,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -95,6 +97,12 @@ const el = {
   epitopeList: document.querySelector('#epitope-list'),
   chainList: document.querySelector('#chain-list'),
   antigenDetails: document.querySelector('#antigen-details'),
+  analysisPanel: document.querySelector('#analysis-panel'),
+  analysisStatus: document.querySelector('#analysis-status'),
+  analysisPlots: document.querySelector('#analysis-plots'),
+  analysisMatrix: document.querySelector('#analysis-matrix'),
+  analysisRun: document.querySelector('#analysis-run'),
+  analysisLogs: document.querySelector('#analysis-logs'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -192,7 +200,6 @@ function renderTargetInsights(status = state.targetStatus) {
   const antigen = target.antigen || {};
   el.antigenDetails.innerHTML = '';
   const detailEntries = [];
-  if (antigen.url) detailEntries.push({ key: 'URL', value: antigen.url, type: 'link' });
   if (antigen.accession) detailEntries.push({ key: 'Accession', value: antigen.accession });
   if (antigen.expressed_range) detailEntries.push({ key: 'Expressed range', value: antigen.expressed_range });
   if (antigen.expressed_length) detailEntries.push({ key: 'Expressed length', value: `${antigen.expressed_length} aa` });
@@ -998,6 +1005,8 @@ async function fetchRankings(options = {}) {
     el.resultsMeta.hidden = false;
   }
 
+  resetAnalysisPanel({ disableButton: true });
+
   try {
     const res = await fetch(`/api/targets/${state.currentPdb}/rankings?${params.toString()}`);
     if (!res.ok) {
@@ -1144,6 +1153,297 @@ function renderScatter() {
   });
 }
 
+function resetAnalysisPanel(options = {}) {
+  const disableButton = Boolean(options.disableButton);
+  state.analysisResults = null;
+  if (el.analysisPlots) el.analysisPlots.innerHTML = '';
+  if (el.analysisMatrix) el.analysisMatrix.innerHTML = '';
+  if (el.analysisLogs) el.analysisLogs.innerHTML = '';
+  if (el.analysisPanel) el.analysisPanel.hidden = true;
+  if (el.analysisStatus) setBadge(el.analysisStatus, null);
+  if (el.analysisRun) {
+    el.analysisRun.textContent = 'Analyze rankings';
+    if (disableButton) {
+      el.analysisRun.disabled = true;
+    } else {
+      el.analysisRun.disabled = state.rankings.length === 0 || state.analysisRunning;
+    }
+  }
+}
+
+function similarityColor(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '#e2e8f0';
+  }
+  const t = Math.min(1, Math.max(0, value));
+  const start = [37, 99, 235];
+  const end = [220, 38, 38];
+  const r = Math.round(start[0] + (end[0] - start[0]) * t);
+  const g = Math.round(start[1] + (end[1] - start[1]) * t);
+  const b = Math.round(start[2] + (end[2] - start[2]) * t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function renderSimilarityMatrix(data) {
+  if (!el.analysisMatrix) return false;
+  el.analysisMatrix.innerHTML = '';
+
+  if (!data || !Array.isArray(data.designs) || !Array.isArray(data.matrix) || !data.designs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'matrix-legend';
+    empty.textContent = 'Sequence similarity matrix unavailable for this run.';
+    el.analysisMatrix.appendChild(empty);
+    return false;
+  }
+
+  const designs = data.designs;
+  const matrix = data.matrix;
+  const sequences = Array.isArray(data.sequences) ? data.sequences : [];
+  const n = Math.min(designs.length, matrix.length);
+  if (!n) {
+    const empty = document.createElement('div');
+    empty.className = 'matrix-legend';
+    empty.textContent = 'Sequence similarity matrix unavailable for this run.';
+    el.analysisMatrix.appendChild(empty);
+    return false;
+  }
+
+  const cellSize = n <= 20 ? 24 : n <= 40 ? 16 : n <= 80 ? 12 : 8;
+  const marginLeft = Math.max(120, Math.min(200, cellSize * 5));
+  const marginTop = Math.max(110, Math.min(200, cellSize * 5));
+  const marginBottom = 60;
+  const marginRight = 40;
+  const width = marginLeft + marginRight + cellSize * n;
+  const height = marginTop + marginBottom + cellSize * n;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.translate(marginLeft, marginTop);
+  for (let i = 0; i < n; i += 1) {
+    const row = Array.isArray(matrix[i]) ? matrix[i] : [];
+    for (let j = 0; j < n; j += 1) {
+      const val = typeof row[j] === 'number' ? row[j] : Number.NaN;
+      ctx.fillStyle = similarityColor(val);
+      ctx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+      if (!Number.isNaN(val) && cellSize >= 18) {
+        const text = (val * 100).toFixed(0);
+        ctx.fillStyle = val >= 0.65 ? '#f8fafc' : '#0f172a';
+        ctx.font = `600 ${Math.max(10, Math.min(14, cellSize - 6))}px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, j * cellSize + cellSize / 2, i * cellSize + cellSize / 2);
+      }
+    }
+  }
+  ctx.restore();
+
+  ctx.fillStyle = '#0f172a';
+  ctx.font = `${Math.max(10, Math.min(12, cellSize - 2))}px Inter, sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i += 1) {
+    const label = designs[i] || `Design ${i + 1}`;
+    const trimmed = label.length > 22 ? `${label.slice(0, 19)}…` : label;
+    ctx.fillText(trimmed, marginLeft - 8, marginTop + i * cellSize + cellSize / 2);
+  }
+
+  ctx.save();
+  ctx.translate(marginLeft, marginTop);
+  for (let j = 0; j < n; j += 1) {
+    const label = designs[j] || `Design ${j + 1}`;
+    const trimmed = label.length > 22 ? `${label.slice(0, 19)}…` : label;
+    ctx.save();
+    ctx.translate(j * cellSize + cellSize / 2, -6);
+    ctx.rotate(-Math.PI / 3);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(trimmed, 0, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  ctx.font = '12px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Binder index', marginLeft + (cellSize * n) / 2, height - marginBottom / 2);
+  ctx.save();
+  ctx.translate(24, marginTop + (cellSize * n) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Binder index', 0, 0);
+  ctx.restore();
+
+  el.analysisMatrix.appendChild(canvas);
+
+  const legend = document.createElement('div');
+  legend.className = 'matrix-legend';
+  const metricLabel = data.metric ? data.metric.replace(/_/g, ' ') : 'sequence match ratio';
+  legend.textContent = `Sequence similarity across top ${n} binders (${metricLabel}). Values range from 0 (dissimilar) to 1 (identical).`;
+  el.analysisMatrix.appendChild(legend);
+
+  if (sequences.length) {
+    const details = document.createElement('details');
+    details.className = 'matrix-legend';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Show binder sequences';
+    details.appendChild(summary);
+    const list = document.createElement('ol');
+    list.className = 'analysis-sequence-list';
+    sequences.slice(0, n).forEach((seq, idx) => {
+      const item = document.createElement('li');
+      item.innerHTML = `<strong>${designs[idx] || `Design ${idx + 1}`}</strong>: ${seq}`;
+      list.appendChild(item);
+    });
+    details.appendChild(list);
+    el.analysisMatrix.appendChild(details);
+  }
+
+  return true;
+}
+
+function renderAnalysis() {
+  if (!el.analysisPanel) return;
+  if (!state.analysisResults) {
+    el.analysisPanel.hidden = true;
+    if (el.analysisPlots) el.analysisPlots.innerHTML = '';
+    if (el.analysisMatrix) el.analysisMatrix.innerHTML = '';
+    if (el.analysisLogs) el.analysisLogs.innerHTML = '';
+    return;
+  }
+
+  const { plots = [], similarity = null, logs = [] } = state.analysisResults;
+
+  if (el.analysisPlots) {
+    el.analysisPlots.innerHTML = '';
+    if (Array.isArray(plots) && plots.length) {
+      plots.forEach((plot) => {
+        if (!plot || !plot.image_data) return;
+        const figure = document.createElement('figure');
+        figure.className = 'analysis-plot-card';
+        const img = document.createElement('img');
+        img.src = `data:image/png;base64,${plot.image_data}`;
+        img.alt = plot.title || plot.name || 'Ranking diagnostic plot';
+        const caption = document.createElement('figcaption');
+        caption.textContent = plot.title || plot.name || 'Plot';
+        figure.appendChild(img);
+        figure.appendChild(caption);
+        el.analysisPlots.appendChild(figure);
+      });
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'matrix-legend';
+      empty.textContent = 'No plots generated yet. Run “Analyze rankings” to build diagnostics.';
+      el.analysisPlots.appendChild(empty);
+    }
+  }
+
+  let matrixVisible = false;
+  if (similarity) {
+    matrixVisible = renderSimilarityMatrix(similarity);
+  } else if (el.analysisMatrix) {
+    el.analysisMatrix.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'matrix-legend';
+    empty.textContent = 'Sequence similarity metrics were not generated (binder sequences missing).';
+    el.analysisMatrix.appendChild(empty);
+  }
+
+  if (el.analysisLogs) {
+    el.analysisLogs.innerHTML = '';
+    if (logs && logs.length) {
+      const heading = document.createElement('div');
+      heading.textContent = 'Recent analysis messages:';
+      el.analysisLogs.appendChild(heading);
+      const list = document.createElement('ul');
+      logs.forEach((line) => {
+        const li = document.createElement('li');
+        li.textContent = line;
+        list.appendChild(li);
+      });
+      el.analysisLogs.appendChild(list);
+    }
+  }
+
+  const hasPlots = Array.isArray(plots) && plots.length > 0;
+  el.analysisPanel.hidden = !(hasPlots || matrixVisible);
+}
+
+async function runRankingsAnalysis() {
+  if (!state.currentPdb) {
+    showAlert('Initialize and load rankings before running the analysis.');
+    return;
+  }
+  if (state.analysisRunning) return;
+  if (!state.rankings || state.rankings.length === 0) {
+    showAlert('Load rankings first.');
+    return;
+  }
+
+  state.analysisRunning = true;
+  if (el.analysisRun) {
+    el.analysisRun.disabled = true;
+    el.analysisRun.textContent = 'Analyzing…';
+  }
+  if (el.analysisPanel) {
+    el.analysisPanel.hidden = false;
+  }
+  if (el.analysisStatus) {
+    setBadge(el.analysisStatus, 'Generating diagnostics…');
+  }
+  if (el.analysisPlots) {
+    const loading = document.createElement('div');
+    loading.className = 'matrix-legend';
+    loading.textContent = 'Running plot_rankings.py…';
+    el.analysisPlots.innerHTML = '';
+    el.analysisPlots.appendChild(loading);
+  }
+  if (el.analysisMatrix) {
+    el.analysisMatrix.innerHTML = '';
+  }
+  if (el.analysisLogs) {
+    el.analysisLogs.innerHTML = '';
+  }
+
+  const runLabel = el.resultsRunLabel?.value.trim() || state.activeRunLabel || '';
+  const payload = runLabel ? { run_label: runLabel } : {};
+
+  try {
+    const res = await fetch(`/api/targets/${state.currentPdb}/rankings/analysis`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed with ${res.status}`);
+    }
+    const data = await res.json();
+    state.analysisResults = data;
+    renderAnalysis();
+    if (el.analysisStatus) {
+      setBadge(el.analysisStatus, `Updated ${new Date().toLocaleString()}`, 'rgba(134, 239, 172, 0.25)');
+    }
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    if (el.analysisStatus) {
+      setBadge(el.analysisStatus, `Analysis failed: ${message}`, 'rgba(248, 113, 113, 0.25)');
+    }
+    showAlert(message);
+  } finally {
+    state.analysisRunning = false;
+    if (el.analysisRun) {
+      el.analysisRun.textContent = 'Analyze rankings';
+      el.analysisRun.disabled = state.rankings.length === 0;
+    }
+  }
+}
+
 function renderResults() {
   sortRankings();
   renderResultsTable();
@@ -1167,6 +1467,14 @@ function renderResults() {
       : 'Load a gallery-enabled run to render a movie';
   }
   if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = false;
+  if (el.analysisRun) {
+    el.analysisRun.disabled = !hasRows || state.analysisRunning;
+  }
+  if (!hasRows) {
+    resetAnalysisPanel({ disableButton: true });
+  } else {
+    renderAnalysis();
+  }
 }
 
 function selectDesign(designName) {
@@ -1763,6 +2071,9 @@ function initEventHandlers() {
   el.exportButton.addEventListener('click', runExport);
   if (el.refreshResultsBtn) {
     el.refreshResultsBtn.addEventListener('click', () => fetchRankings({ silent: false }));
+  }
+  if (el.analysisRun) {
+    el.analysisRun.addEventListener('click', () => runRankingsAnalysis());
   }
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);

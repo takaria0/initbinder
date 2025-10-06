@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -51,6 +52,12 @@ def _normalize_header(name: str) -> str:
     return name.strip().lower().replace(" ", "_")
 
 
+def _normalize_lookup_key(name: str) -> str:
+    lowered = name.strip().lower()
+    lowered = re.sub(r"[^0-9a-z]+", "_", lowered)
+    return lowered.strip("_")
+
+
 def _coerce_float(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
@@ -65,8 +72,14 @@ def _coerce_float(value: Optional[str]) -> Optional[float]:
 
 def _lookup(row: Dict[str, str], candidates: Iterable[str]) -> Optional[str]:
     normalized = {k.lower(): v for k, v in row.items()}
+    normalized_fuzzy = {_normalize_lookup_key(k): v for k, v in row.items()}
     for key in candidates:
-        val = normalized.get(key.lower())
+        lower = key.lower()
+        val = normalized.get(lower)
+        if val is not None:
+            return val
+        fuzzy_key = _normalize_lookup_key(key)
+        val = normalized_fuzzy.get(fuzzy_key)
         if val is not None:
             return val
     return None
@@ -132,7 +145,19 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
             break
         design_name = _lookup(raw, ["design_name", "design", "name"]) or f"design_{idx}"
         iptm_val = _lookup(raw, ["iptm", "af3_iptm", "ip_tm", "iptm_score"])
-        rmsd_val = _lookup(raw, ["rmsd_diego", "binder_rmsd_diego", "binder_rmsd", "rmsd"])
+        rmsd_val = _lookup(
+            raw,
+            [
+                "rmsd_diego",
+                "binder_rmsd_diego",
+                "binder_rmsd",
+                "rmsd",
+                "rmsd_binder_target_aligned",
+                "rmsd_binder_prepared_frame",
+                "af3_rmsd_diego",
+                "af3_rmsd_binder_diego",
+            ],
+        )
         tm_val = _lookup(raw, ["tm_score", "binder_tm", "tm"])
 
         metadata = {k: v for k, v in raw.items() if k.lower() not in {

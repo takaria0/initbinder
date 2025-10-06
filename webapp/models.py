@@ -156,6 +156,29 @@ class RankingResponse(BaseModel):
     gallery_path: Optional[str] = None
 
 
+class RankingAnalysisRequest(BaseModel):
+    run_label: Optional[str] = None
+
+
+class RankingPlot(BaseModel):
+    name: str
+    title: str
+    image_data: str
+
+
+class SequenceSimilarityMatrix(BaseModel):
+    designs: List[str]
+    sequences: List[str]
+    matrix: List[List[Optional[float]]]
+    metric: str = "sequence_match_ratio"
+
+
+class RankingAnalysisResponse(BaseModel):
+    plots: List[RankingPlot] = Field(default_factory=list)
+    similarity: Optional[SequenceSimilarityMatrix] = None
+    logs: List[str] = Field(default_factory=list)
+
+
 class ExportRequest(BaseModel):
     pdb_id: str
     rankings_path: str

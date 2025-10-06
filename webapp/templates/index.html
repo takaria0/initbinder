@@ -157,11 +157,21 @@
         <div id="plot-container" style="margin-top: 16px;" hidden>
           <canvas id="scatter-plot" width="720" height="360"></canvas>
         </div>
+        <div id="analysis-panel" class="analysis-panel" hidden>
+          <div class="analysis-header">
+            <h3>Ranking Diagnostics</h3>
+            <span id="analysis-status" class="badge" hidden></span>
+          </div>
+          <div id="analysis-plots" class="analysis-plot-grid"></div>
+          <div id="analysis-matrix" class="analysis-matrix-wrapper"></div>
+          <div id="analysis-logs" class="analysis-logs"></div>
+        </div>
         <div class="table-scroll" style="margin-top: 16px;" hidden id="results-table-wrapper">
           <div class="table-toolbar">
             <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
             <button type="button" id="pymol-movie" disabled>Render PyMOL movie</button>
             <button type="button" id="export-open" disabled>Export…</button>
+            <button type="button" id="analysis-run" disabled>Analyze rankings</button>
           </div>
           <table id="results-table">
             <thead>

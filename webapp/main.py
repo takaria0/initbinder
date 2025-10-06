@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .alignment import AlignmentNotFoundError, compute_alignment
+from .analysis import AnalysisGenerationError, generate_rankings_analysis
 from .config import load_config
 from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
@@ -32,8 +33,12 @@ from .models import (
     PyMolHotspotResponse,
     PyMolTopBindersRequest,
     PyMolTopBindersResponse,
+    RankingAnalysisRequest,
+    RankingAnalysisResponse,
+    RankingPlot,
     RankingResponse,
     RankingRow,
+    SequenceSimilarityMatrix,
     ScatterPoint,
     TargetPresetListResponse,
     TargetPresetRequest,
@@ -238,6 +243,41 @@ async def api_rankings(
         source_path=str(payload.source_path),
         gallery_path=str(payload.gallery_path) if payload.gallery_path else None,
     )
+
+
+@app.post("/api/targets/{pdb_id}/rankings/analysis", response_model=RankingAnalysisResponse)
+async def api_rankings_analysis(
+    pdb_id: str, payload: RankingAnalysisRequest | None = None
+) -> RankingAnalysisResponse:
+    run_label = payload.run_label if payload else None
+    try:
+        rankings = load_rankings(pdb_id, run_label=run_label, limit=None)
+    except RankingsNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    rankings_path = rankings.source_path
+    if not rankings_path:
+        raise HTTPException(status_code=404, detail="Ranking TSV path unavailable")
+
+    try:
+        plots, similarity, logs = await run_in_threadpool(generate_rankings_analysis, rankings_path)
+    except AnalysisGenerationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    plot_models = [RankingPlot(name=plot.name, title=plot.title, image_data=plot.image_data) for plot in plots]
+
+    similarity_model = None
+    if similarity is not None:
+        similarity_model = SequenceSimilarityMatrix(
+            designs=similarity.designs,
+            sequences=similarity.sequences,
+            matrix=similarity.matrix,
+            metric=similarity.metric,
+        )
+
+    return RankingAnalysisResponse(plots=plot_models, similarity=similarity_model, logs=logs)
 
 
 @app.get("/api/targets/{pdb_id}/runs", response_model=list[AssessmentRunSummary])
