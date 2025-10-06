@@ -390,8 +390,30 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     binder_root = cluster.remote_root
     if binder_root is None:
         raise RuntimeError("Neither target_root nor remote_root configured on cluster; cannot run pipeline")
-    env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))}"
-    remote_cmd = f"{env_prefix} " + shlex.join(["python", "manage_rfa.py", "pipeline", *pipeline_args])
+
+    env_vars = {"INITBINDER_ROOT": Path(binder_root)}
+
+    target_base: Optional[Path] = None
+    if cluster.target_root:
+        target_base = Path(cluster.target_root)
+    elif cluster.remote_root:
+        target_base = Path(cluster.remote_root)
+
+    if target_base is not None:
+        # Normalise to the directory that actually contains target folders.
+        if target_base.name.lower() != "targets":
+            target_base = target_base / "targets"
+        env_vars["INITBINDER_TARGET_ROOT"] = target_base
+
+    env_prefix = " ".join(
+        f"{key}={shlex.quote(str(value))}" for key, value in env_vars.items()
+    )
+    remote_cmd = (f"{env_prefix} " if env_prefix else "") + shlex.join([
+        "python",
+        "manage_rfa.py",
+        "pipeline",
+        *pipeline_args,
+    ])
     job_store.update(job_id, message="Generating pipeline scripts on cluster")
     job_store.append_log(job_id, f"[cmd] {remote_cmd}")
     pipeline_result = cluster.run_in_srun(remote_cmd, use_conda=True)
