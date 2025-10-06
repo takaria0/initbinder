@@ -155,7 +155,10 @@ def init_decide_prep(
 
     if run_decide:
         job_store.update(job_id, message="Running decide-scope")
-        run_manage_rfa("decide-scope", [pdb_id], log=_log)
+        decide_args = [pdb_id]
+        if force:
+            decide_args.append("--force")
+        run_manage_rfa("decide-scope", decide_args, log=_log)
     if run_prep:
         job_store.update(job_id, message="Running prep-target")
         run_manage_rfa("prep-target", [pdb_id], log=_log)
