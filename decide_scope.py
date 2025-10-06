@@ -7,8 +7,18 @@ from jsonschema import validate
 from typing import Dict, List, Tuple, Optional, Set
 
 # ====== project utils/env ======
-from utils import _ensure_dir, ROOT, SCHEMA, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB, \
-                  UNIPROT_IDMAPPING_RUN_API, UNIPROT_IDMAPPING_STATUS_API, UNIPROT_API
+from utils import (
+    _ensure_dir,
+    ROOT,
+    TARGETS_ROOT,
+    SCHEMA,
+    RCSB_ENTRY,
+    RCSB_ASSEM,
+    RCSB_PDB,
+    UNIPROT_IDMAPPING_RUN_API,
+    UNIPROT_IDMAPPING_STATUS_API,
+    UNIPROT_API,
+)
 from env import GOOGLE_API_KEY, MODEL, USE_LLM
 
 # ====== HF cache (あなたの指定どおり。env.py に HF_ROOT があればそれを優先) ======
@@ -365,7 +375,7 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
         _llm_provider, _max_new = "gpt-oss-local", 1024
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
-    tdir = ROOT/"targets"/pdb_id.upper()
+    tdir = TARGETS_ROOT/pdb_id.upper()
     _ensure_dir(tdir/"reports")
 
     # Load target.yaml to check for pre-defined chains, target name, and allowed range

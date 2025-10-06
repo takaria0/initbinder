@@ -1,6 +1,16 @@
 import os, re, math, json, yaml, textwrap
 from pathlib import Path
-from utils import _ensure_dir, ROOT, SCHEMA, RFANTIBODY_REPO_PATH, SINGULARITY_IMAGE_PATH, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE
+from utils import (
+    _ensure_dir,
+    ROOT,
+    TARGETS_ROOT,
+    SCHEMA,
+    RFANTIBODY_REPO_PATH,
+    SINGULARITY_IMAGE_PATH,
+    SLURM_GPU_PARTITION,
+    SLURM_ACCOUNT,
+    SLURM_GPU_TYPE,
+)
 from jsonschema import validate
 from utils import crop_pdb_by_hotspots
 from scripts.pymol_utils import export_rfdiff_crop_bundle
@@ -19,7 +29,7 @@ def make_rfa_rfdiffusion_command(
     Quick & dirty fix: inner shell is double-quoted so $TASK_N etc. expand outside the container.
     """
     print(f"--- Generating RFAntibody-RFdiffusion Command for Epitope: {epitope} ---")
-    tdir = ROOT/"targets"/pdb_id.upper()
+    tdir = TARGETS_ROOT/pdb_id.upper()
     cfg = yaml.safe_load((tdir/"target.yaml").read_text()); validate(cfg, SCHEMA)
     prep_pdb = tdir/"prep"/"prepared.pdb"
     if not prep_pdb.exists(): raise FileNotFoundError(f"Run prep-target first. Missing: {prep_pdb}")
@@ -28,13 +38,13 @@ def make_rfa_rfdiffusion_command(
     num_array_tasks = max(1, math.ceil(num_designs / designs_per_task))
 
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
-    arm_dir = ROOT/"targets"/pdb_id.upper()/"designs"/name_sanitized/f"hs-{hotspot_variant}"
+    arm_dir = TARGETS_ROOT/pdb_id.upper()/"designs"/name_sanitized/f"hs-{hotspot_variant}"
     run_tag = run_tag or os.environ.get("RUN_TAG") or ""
     run_dir = (arm_dir/"rfa_rfdiff"/f"run_{run_tag}") if run_tag else (arm_dir/"rfa_rfdiff")
     _ensure_dir(run_dir)
 
     # Prefer variant hotspots → generic hotspots → legacy full mask
-    prep_dir = ROOT/"targets"/pdb_id.upper()/ "prep"
+    prep_dir = TARGETS_ROOT/pdb_id.upper()/ "prep"
     hp_var = prep_dir / f"epitope_{name_sanitized}_hotspots{hotspot_variant}.json"
     hp_def = prep_dir / f"epitope_{name_sanitized}_hotspots.json"
     mask    = prep_dir / f"epitope_{name_sanitized}.json"
@@ -44,7 +54,7 @@ def make_rfa_rfdiffusion_command(
         hotspots = json.load(open(hp_def))
     else:
         raw = json.load(open(mask))
-        k = int((yaml.safe_load((ROOT/'targets'/pdb_id.upper()/'target.yaml').read_text())
+        k = int((yaml.safe_load((TARGETS_ROOT/pdb_id.upper()/'target.yaml').read_text())
                  .get('hotspot_policy', {}).get('max_hotspots', 5)))
         hotspots = raw[:k]
     if not hotspots:

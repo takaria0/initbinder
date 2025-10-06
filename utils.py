@@ -89,7 +89,40 @@ if _ROOT_ENV:
     ROOT = Path(_ROOT_ENV).expanduser()
 else:
     ROOT = _ROOT_DEFAULT if _ROOT_DEFAULT.exists() else Path(__file__).resolve().parent
-print(f'[info] Running manage_rfa_eco.py from {ROOT}')
+
+_TARGET_ROOT_ENV = os.getenv("INITBINDER_TARGET_ROOT")
+
+
+def _resolve_targets_root() -> Path:
+    """Determine where target definitions live.
+
+    Preference order:
+      1. Explicit INITBINDER_TARGET_ROOT environment variable
+      2. `<ROOT>/targets` if it exists (works for developer clones)
+      3. `/pub/.../targets` shared repository if present
+      4. Fallback to `<ROOT>/targets` even if it does not yet exist (for creation)
+    """
+
+    candidates = []
+    if _TARGET_ROOT_ENV:
+        candidates.append(Path(_TARGET_ROOT_ENV).expanduser())
+
+    candidates.append(ROOT / "targets")
+    if _ROOT_DEFAULT.exists():
+        candidates.append(_ROOT_DEFAULT / "targets")
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    # Default to the first candidate (if INITBINDER_TARGET_ROOT provided) or ROOT/targets
+    return candidates[0] if candidates else ROOT / "targets"
+
+
+TARGETS_ROOT = _resolve_targets_root()
+
+print(f"[info] Running manage_rfa_eco.py from {ROOT}")
+print(f"[info] Using targets root: {TARGETS_ROOT}")
 SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 
 

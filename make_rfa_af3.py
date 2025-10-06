@@ -1,7 +1,18 @@
 import os, re, math, json, yaml, textwrap
 from pathlib import Path
 from typing import Sequence
-from utils import _ensure_dir, ROOT, SCHEMA, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE, AF3_DATABASES_DIR, AF3_MODEL_PARAMS_DIR, AF3_SINGULARITY_IMAGE
+from utils import (
+    _ensure_dir,
+    ROOT,
+    TARGETS_ROOT,
+    SCHEMA,
+    SLURM_GPU_PARTITION,
+    SLURM_ACCOUNT,
+    SLURM_GPU_TYPE,
+    AF3_DATABASES_DIR,
+    AF3_MODEL_PARAMS_DIR,
+    AF3_SINGULARITY_IMAGE,
+)
 from jsonschema import validate
 
 from pathlib import Path
@@ -167,7 +178,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
                          run_tag: str | None = None,
                          model_seeds: Sequence[int] | None = None):
     binder_chain_id = str(binder_chain_id).strip().upper() or "H"
-    tdir = ROOT/"targets"/pdb_id.upper()
+    tdir = TARGETS_ROOT/pdb_id.upper()
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
     arm_dir = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
 

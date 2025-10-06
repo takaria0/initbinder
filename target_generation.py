@@ -79,6 +79,7 @@ import requests
 import yaml
 from sequence_alignment import AlignmentMutation, biotite_local_alignments, extract_subsequence
 from bioseq_fetcher import fetch_sequence
+from utils import ROOT, TARGETS_ROOT, _ensure_dir
 
 # --- LLM Configuration (Google Gemini) ---
 USE_LLM = True
@@ -116,13 +117,12 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # -------------------- Paths & Caching --------------------
-ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / "cache" / "target_generation"
 CATALOG_DIR = ROOT / "targets_catalog"
-TARGETS_DIR = ROOT / "targets"
+TARGETS_DIR = TARGETS_ROOT
 LOG_DIR = CACHE_DIR / "logs"
 for p in (CACHE_DIR, CATALOG_DIR, TARGETS_DIR, LOG_DIR):
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(p)
 
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_TAG = f"run_{RUN_TS}"
