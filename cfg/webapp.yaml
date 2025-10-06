@@ -12,8 +12,8 @@ cluster:
   squeue_path: squeue
   sacct_path: sacct
   pymol_path: pymol
-  assess_partition: ccl_lab          # optional, match your CPU queue
-  assess_account: inagakit         # optional
+  assess_partition: standard          # optional, match your CPU queue
+  assess_account: ccl_lab         # optional
   assess_time_minutes: 600
   assess_mem_gb: 4
   assess_cpus: 1
