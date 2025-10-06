@@ -10,8 +10,9 @@ import textwrap
 import re, os
 from dataclasses import dataclass
 from datetime import datetime
+import time
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 from .config import ClusterConfig, load_config
 
@@ -22,16 +23,26 @@ class CommandResult:
     stdout: str
     stderr: str
     skipped: bool = False
+    command: str = ""
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    duration: Optional[float] = None
 
 
 class ClusterClient:
-    def __init__(self, cfg: Optional[ClusterConfig] = None) -> None:
+    def __init__(
+        self,
+        cfg: Optional[ClusterConfig] = None,
+        *,
+        log_hook: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.cfg = cfg or load_config().cluster
         app_cfg = load_config()
         self.local_root = app_cfg.paths.workspace_root or app_cfg.paths.project_root
         self._mock_root = app_cfg.paths.workspace_root / ".cluster-mock" if app_cfg.paths.workspace_root else Path(".cluster-mock")
         if self.cfg.mock:
             self._mock_root.mkdir(parents=True, exist_ok=True)
+        self._log_hook = log_hook
         target_alias = self.cfg.as_ssh_target() or "cluster"
         sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", target_alias)
         if self.cfg.control_path:
@@ -45,25 +56,50 @@ class ClusterClient:
         self.target_root = self.cfg.target_root or self.remote_root
         self.conda_activate = (self.cfg.conda_activate or "").strip() or None
         self._debug_enabled = self.cfg.debug
-        self._debug(
+        self._emit(
             f"[cluster] init -> local_root={self.local_root} remote_root={self.remote_root} target_root={self.target_root} mock={self.cfg.mock} control_path={self.control_path}"
         )
 
-    def _debug(self, message: str) -> None:
-        if self._debug_enabled:
+    def _emit(self, message: str, *, always_print: bool = False) -> None:
+        should_print = always_print or self._debug_enabled
+        if should_print:
             print(message, flush=True)
+        if self._log_hook:
+            try:
+                self._log_hook(message)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[cluster] log_hook error: {exc}", flush=True)
+
+    def _debug(self, message: str) -> None:
+        self._emit(message)
 
     def _run(self, cmd: Iterable[str], *, check: bool = True) -> CommandResult:
         cmd_list = list(cmd)
-        self._debug(f"[cluster] exec: {' '.join(cmd_list)}")
+        display_cmd = " ".join(shlex.quote(part) for part in cmd_list)
+        started = time.time()
+        self._emit(f"[cluster] exec.start -> {display_cmd}", always_print=True)
         process = subprocess.run(list(cmd), capture_output=True, text=True)
+        finished = time.time()
+        duration = finished - started
+        for line in (process.stdout or "").splitlines():
+            self._emit(f"[cluster] exec.stdout | {line}", always_print=True)
+        for line in (process.stderr or "").splitlines():
+            self._emit(f"[cluster] exec.stderr | {line}", always_print=True)
+        summary = f"[cluster] exec.exit -> code={process.returncode} duration={duration:.2f}s"
+        self._emit(summary, always_print=True)
         if check and process.returncode != 0:
-            raise RuntimeError(f"Command failed ({process.returncode}): {' '.join(cmd)}\n{process.stderr}")
-        if process.stdout:
-            self._debug(f"[cluster] stdout: {process.stdout.strip()}")
-        if process.stderr:
-            self._debug(f"[cluster] stderr: {process.stderr.strip()}")
-        return CommandResult(process.returncode, process.stdout, process.stderr)
+            error_msg = f"Command failed ({process.returncode}): {display_cmd}\n{process.stderr}"
+            self._emit(f"[cluster] exec.error -> {error_msg.strip()}", always_print=True)
+            raise RuntimeError(error_msg)
+        return CommandResult(
+            process.returncode,
+            process.stdout,
+            process.stderr,
+            command=display_cmd,
+            started_at=started,
+            finished_at=finished,
+            duration=duration,
+        )
 
     def _control_args(self, *, include_persist: bool = False) -> list[str]:
         if not self.control_path:
@@ -74,19 +110,27 @@ class ClusterClient:
         return args
 
     def _ensure_master(self) -> None:
-        return
         if self.cfg.mock or not self.ensure_master:
+            self._emit("[cluster] ensure_master skipped (mock or disabled)", always_print=True)
             return
         if self._master_checked:
             return
         self.control_path.parent.mkdir(parents=True, exist_ok=True)
         check_cmd = ["ssh", *self._control_args(include_persist=True), "-O", "check", self._ssh_target()]
+        display = " ".join(shlex.quote(part) for part in check_cmd)
+        self._emit(f"[cluster] ensure_master check -> {display}", always_print=True)
         result = subprocess.run(check_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             hint = "ssh " + " ".join(self._control_args(include_persist=True) + ["-MNf", self._ssh_target()])
-            raise RuntimeError(
-                "SSH control master not active. Run `" + hint + "` once in another terminal to establish the connection"
+            self._emit(
+                f"[cluster] ensure_master missing -> returncode={result.returncode} stderr={(result.stderr or '').strip()}",
+                always_print=True,
             )
+            self._emit(
+                f"[cluster] ensure_master hint -> Run `{hint}` in a separate terminal to establish the control master",
+                always_print=True,
+            )
+            return
         self._master_checked = True
         # Record the last probe time under a well-known file
         try:
@@ -94,6 +138,7 @@ class ClusterClient:
             (self.control_path.parent / "cluster_ready").write_text(datetime.utcnow().isoformat())
         except Exception:
             pass
+        self._emit("[cluster] ensure_master OK", always_print=True)
 
     # -- path helpers -----------------------------------------------------
     def _resolve_remote(self, relative: Path) -> Path:
@@ -137,7 +182,7 @@ class ClusterClient:
                 shutil.copytree(local, dest)
             else:
                 shutil.copy2(local, dest)
-            self._debug(f"[cluster] rsync_push (mock) {local} -> {dest}")
+            self._emit(f"[cluster] rsync_push (mock) {local} -> {dest}", always_print=True)
             return CommandResult(0, f"[mock] copied {local} -> {dest}", "")
 
         base = remote_base or self.remote_root
@@ -151,7 +196,7 @@ class ClusterClient:
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
-        self._debug(f"[cluster] rsync_push {local} -> {target} delete={delete}")
+        self._emit(f"[cluster] rsync_push {local} -> {target} delete={delete}", always_print=True)
         src = str(local) + ("/" if is_dir else "")
         dest = str(target) + ("/" if is_dir else "")
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, dest]
@@ -172,7 +217,7 @@ class ClusterClient:
                 shutil.copytree(src, local, dirs_exist_ok=True)
             else:
                 shutil.copytree(src, local)
-            self._debug(f"[cluster] rsync_pull (mock) {src} -> {local}")
+            self._emit(f"[cluster] rsync_pull (mock) {src} -> {local}", always_print=True)
             return CommandResult(0, f"[mock] copied {src} -> {local}", "")
 
         base = remote_base or self.remote_root
@@ -187,8 +232,9 @@ class ClusterClient:
         self._ensure_master()
         ssh_cmd = ["ssh", *self._control_args()]
         ssh_cmd_str = " ".join(shlex.quote(part) for part in ssh_cmd)
-        self._debug(
-            f"[cluster] rsync_pull {self._ssh_target()}:{remote_path} -> {local} delete={delete}"
+        self._emit(
+            f"[cluster] rsync_pull {self._ssh_target()}:{remote_path} -> {local} delete={delete}",
+            always_print=True,
         )
         args = [self.cfg.rsync_path, "-az", "-e", ssh_cmd_str, src, str(local) + "/"]
         return self._run(args)
@@ -196,7 +242,8 @@ class ClusterClient:
     def squeue(self, user: Optional[str] = None) -> CommandResult:
         """Fetch the current scheduler queue for the given user."""
         if self.cfg.mock:
-            return CommandResult(0, "[mock squeue]", "", skipped=True)
+            self._emit("[cluster] squeue (mock)", always_print=True)
+            return CommandResult(0, "[mock squeue]", "", skipped=True, command="squeue")
         queue_user = (
             user
             or self.cfg.user
@@ -210,17 +257,20 @@ class ClusterClient:
 
     def ssh(self, command: str, *, check: bool = True, use_login_shell: bool = False) -> CommandResult:
         if self.cfg.mock:
-            return CommandResult(0, f"[mock ssh] {command}", "")
+            self._emit(f"[cluster] ssh (mock) -> {command}", always_print=True)
+            return CommandResult(0, f"[mock ssh] {command}", "", command=command)
         if use_login_shell:
             command = f"bash -lc {shlex.quote(command)}"
         self._ensure_master()
         args = ["ssh", *self._control_args(), self._ssh_target(), command]
-        self._debug(f"[cluster] ssh -> {' '.join(args)}")
+        display = " ".join(shlex.quote(part) for part in args)
+        self._emit(f"[cluster] ssh.exec -> {display}", always_print=True)
         return self._run(args, check=check)
 
     def run(self, command: str, *, check: bool = True, use_conda: bool = False) -> CommandResult:
         if self.cfg.mock:
-            return CommandResult(0, f"[mock run] {command}", "")
+            self._emit(f"[cluster] run (mock) -> {command}", always_print=True)
+            return CommandResult(0, f"[mock run] {command}", "", command=command)
         if self.cfg.remote_root is None:
             raise RuntimeError("remote_root not configured; set cluster.remote_root in cfg/webapp.yaml")
         remote_root = shlex.quote(str(self.cfg.remote_root))
@@ -230,7 +280,7 @@ class ClusterClient:
         segments.append(command)
         full_cmd = " && ".join(segments)
         self._ensure_master()
-        self._debug(f"[cluster] run -> {full_cmd}")
+        self._emit(f"[cluster] run -> {full_cmd}", always_print=True)
         return self.ssh(full_cmd, check=check, use_login_shell=True)
 
     def run_in_srun(
@@ -243,7 +293,8 @@ class ClusterClient:
         partition: str = "free",
     ) -> CommandResult:
         if self.cfg.mock:
-            return CommandResult(0, f"[mock srun] {command}", "", skipped=True)
+            self._emit(f"[cluster] srun (mock) -> {command}", always_print=True)
+            return CommandResult(0, f"[mock srun] {command}", "", skipped=True, command=command)
         if self.cfg.remote_root is None:
             raise RuntimeError("remote_root not configured; cannot execute srun command")
         safe_cpus = max(1, int(cpus))
@@ -258,7 +309,7 @@ class ClusterClient:
             f"srun -c {safe_cpus} -p {shlex.quote(safe_partition)} --pty /bin/bash -lc {shlex.quote(inner)}"
         )
         self._ensure_master()
-        self._debug(f"[cluster] srun -> {srun_cmd}")
+        self._emit(f"[cluster] srun -> {srun_cmd}", always_print=True)
         return self.ssh(srun_cmd, check=check)
 
     # -- high-level helpers ----------------------------------------------
@@ -289,7 +340,10 @@ class ClusterClient:
                     copied = True
                 if copied:
                     backup_rel = Path("mock") / snapshot_dir.relative_to(self._mock_root)
-                    self._debug(f"[cluster] backup (mock) snapshot -> {backup_rel}")
+                    self._emit(
+                        f"[cluster] backup (mock) snapshot -> {backup_rel}",
+                        always_print=True,
+                    )
                 else:
                     shutil.rmtree(snapshot_dir, ignore_errors=True)
         else:
@@ -374,14 +428,16 @@ class ClusterClient:
             local_dest = (self.local_root / rel).resolve()
             if _has_rankings(local_dest):
                 msg = f"[skip] Assessment {run_label} already present at {local_dest}"
-                self._debug(f"[cluster] sync_assessments_back skip -> {msg}")
+                self._emit(f"[cluster] sync_assessments_back skip -> {msg}", always_print=True)
                 return CommandResult(0, msg, "", skipped=True)
-            self._debug(
-                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}"
+            self._emit(
+                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
+                always_print=True,
             )
             result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-            self._debug(
-                f"[cluster] sync_assessments_back completed with exit {result.exit_code}"
+            self._emit(
+                f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
+                always_print=True,
             )
             return result
 
@@ -409,17 +465,19 @@ class ClusterClient:
 
         if remote_entries and not missing_labels:
             msg = f"[skip] All assessments already synced for {pdb_id.upper()}"
-            self._debug(f"[cluster] sync_assessments_back skip -> {msg}")
+            self._emit(f"[cluster] sync_assessments_back skip -> {msg}", always_print=True)
             return CommandResult(0, msg, "", skipped=True)
 
         rel = base_rel
         local_dest = (self.local_root / rel).resolve()
-        self._debug(
-            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}"
+        self._emit(
+            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
+            always_print=True,
         )
         result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-        self._debug(
-            f"[cluster] sync_assessments_back completed with exit {result.exit_code}"
+        self._emit(
+            f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
+            always_print=True,
         )
         return result
 
@@ -604,7 +662,10 @@ PY
                 self._ssh_target(),
                 f"test -d {remote_root} && echo OK",
             ]
-            self._debug(f"[cluster] connection_status -> probe remote root: {' '.join(probe_cmd)}")
+            self._emit(
+                f"[cluster] connection_status -> probe remote root: {' '.join(probe_cmd)}",
+                always_print=True,
+            )
             try:
                 probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
             except subprocess.TimeoutExpired:
@@ -621,6 +682,10 @@ PY
                 self._ssh_target(),
                 f"test -d {target_root} && echo OK",
             ]
+            self._emit(
+                f"[cluster] connection_status -> probe target root: {' '.join(probe_cmd)}",
+                always_print=True,
+            )
             try:
                 probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=5)
             except subprocess.TimeoutExpired:
