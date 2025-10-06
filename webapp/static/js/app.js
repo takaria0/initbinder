@@ -20,7 +20,12 @@ const state = {
   galleryAvailable: false,
   targetStatus: null,
   targetDetails: null,
+  lastClusterSyncAt: 0,
+  pendingClusterSync: null,
+  pendingClusterSyncTimer: null,
 };
+
+const SYNC_RESULTS_MIN_INTERVAL_MS = 60000;
 
 const el = {
   targetForm: document.querySelector('#target-form'),
@@ -1489,6 +1494,7 @@ async function syncResultsFromCluster(options = {}) {
     silent = false,
     disableButton = true,
     useInputRunLabel = true,
+    force = false,
   } = options;
   if (!state.currentPdb) {
     if (!silent) showAlert('Initialize target first.');
@@ -1503,7 +1509,38 @@ async function syncResultsFromCluster(options = {}) {
   if (!runLabelInput && state.activeRunLabel) {
     runLabelInput = state.activeRunLabel.trim();
   }
+
+  const now = Date.now();
+  if (!force && state.lastClusterSyncAt) {
+    const elapsed = now - state.lastClusterSyncAt;
+    if (elapsed < SYNC_RESULTS_MIN_INTERVAL_MS) {
+      const remainingMs = SYNC_RESULTS_MIN_INTERVAL_MS - elapsed;
+      if (!silent) {
+        const remainingSeconds = Math.ceil(remainingMs / 1000);
+        showAlert(`Cluster sync is throttled. Try again in ${remainingSeconds}s.`);
+      }
+      if (state.pendingClusterSyncTimer) {
+        clearTimeout(state.pendingClusterSyncTimer);
+      }
+      state.pendingClusterSync = { ...options, force: true };
+      state.pendingClusterSyncTimer = setTimeout(() => {
+        state.pendingClusterSyncTimer = null;
+        const pending = state.pendingClusterSync;
+        state.pendingClusterSync = null;
+        if (pending) {
+          syncResultsFromCluster(pending);
+        }
+      }, remainingMs);
+      return null;
+    }
+  }
   const params = runLabelInput ? `?run_label=${encodeURIComponent(runLabelInput)}` : '';
+  if (state.pendingClusterSyncTimer) {
+    clearTimeout(state.pendingClusterSyncTimer);
+    state.pendingClusterSyncTimer = null;
+  }
+  state.pendingClusterSync = null;
+  state.lastClusterSyncAt = now;
   if (disableButton && el.syncResultsBtn) {
     el.syncResultsBtn.disabled = true;
   }

@@ -64,7 +64,9 @@ def _get_cluster_executor() -> ThreadPoolExecutor:
     global _cluster_executor
     if _cluster_executor is None:
         cfg = load_config()
-        workers = max(1, min(2, cfg.background_concurrency or 1))
+        total_capacity = max(1, cfg.background_concurrency or 1)
+        workers = max(1, total_capacity // 10)
+        workers = min(workers, total_capacity)
         _cluster_executor = ThreadPoolExecutor(max_workers=workers)
     return _cluster_executor
 
