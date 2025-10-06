@@ -641,9 +641,25 @@ PY
             include_kw,
             "--skip_pml",
         ]
-        binder_root = self.remote_root
-        env_prefix = f"INITBINDER_ROOT={shlex.quote(str(binder_root))} " if binder_root else ""
-        python_cmd = env_prefix + shlex.join(python_args)
+        env_vars: dict[str, Path] = {}
+        if self.remote_root:
+            env_vars["INITBINDER_ROOT"] = Path(self.remote_root)
+
+        target_base: Optional[Path] = None
+        if self.target_root:
+            target_base = Path(self.target_root)
+        elif self.remote_root:
+            target_base = Path(self.remote_root)
+
+        if target_base is not None:
+            if target_base.name.lower() != "targets":
+                target_base = target_base / "targets"
+            env_vars["INITBINDER_TARGET_ROOT"] = target_base
+
+        env_prefix = " ".join(
+            f"{key}={shlex.quote(str(value))}" for key, value in env_vars.items()
+        )
+        python_cmd = (f"{env_prefix} " if env_prefix else "") + shlex.join(python_args)
 
         lines = [
             f"{self.cfg.sbatch_path} {' '.join(sbatch_opts)} <<'EOF'",
