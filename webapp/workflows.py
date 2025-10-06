@@ -159,7 +159,7 @@ def submit_assessment_run(request: AssessmentRunRequest, *, job_store: JobStore 
         if include_keyword:
             args.extend(["--include_keyword", include_keyword])
 
-        client = ClusterClient()
+        client = ClusterClient(log_hook=lambda line: store.append_log(job.job_id, line))
         store.update(job.job_id, status=JobStatus.RUNNING, message="Submitting assessment jobs")
 
         try:
@@ -222,7 +222,7 @@ def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
     job = store.create_job("assessment_sync", label, details=details)
 
     def _run() -> None:
-        client = ClusterClient()
+        client = ClusterClient(log_hook=lambda line: store.append_log(job.job_id, line))
         store.update(job.job_id, status=JobStatus.RUNNING, message="Syncing assessments from cluster")
 
         base_rel = Path("targets") / pdb_id.upper() / "designs"

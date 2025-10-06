@@ -231,7 +231,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.append_log(job_id, f"[run_assess] {request.run_assess}")
     job_store.append_log(job_id, f"[assessment_shards] {assessment_shards}")
 
-    cluster = ClusterClient()
+    cluster = ClusterClient(log_hook=lambda line: job_store.append_log(job_id, line))
     local_target_dir = (workspace / "targets" / request.pdb_id.upper()).resolve()
     remote_base = cluster.target_root or cluster.remote_root
     remote_target_desc = (
