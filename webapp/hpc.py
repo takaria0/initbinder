@@ -290,7 +290,7 @@ class ClusterClient:
         check: bool = True,
         use_conda: bool = False,
         cpus: int = 4,
-        partition: str = "free",
+        partition: str = "standard",
     ) -> CommandResult:
         if self.cfg.mock:
             self._emit(f"[cluster] srun (mock) -> {command}", always_print=True)
@@ -298,7 +298,7 @@ class ClusterClient:
         if self.cfg.remote_root is None:
             raise RuntimeError("remote_root not configured; cannot execute srun command")
         safe_cpus = max(1, int(cpus))
-        safe_partition = (partition or "free").strip() or "free"
+        safe_partition = (partition or "standard").strip() or "standard"
         remote_root = shlex.quote(str(self.cfg.remote_root))
         segments = [f"cd {remote_root}"]
         if use_conda and self.conda_activate:
