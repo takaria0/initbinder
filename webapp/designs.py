@@ -197,6 +197,123 @@ def _start_squeue_monitor(
     threading.Thread(target=_poll, name=f"squeue-{job_id}", daemon=True).start()
 
 
+def _schedule_assessment_rescue(
+    cluster: ClusterClient,
+    job_store: JobStore,
+    job_id: str,
+    *,
+    stage2_ids: List[str],
+    pdb_id: str,
+    binder_chain: str,
+    run_label: str,
+) -> None:
+    """Submit an assessment job without dependencies if stage2 jobs are stuck.
+
+    The design pipeline launches several stage-2 jobs (AF3 + ProteinMPNN)
+    whose successful completion is required before the primary assessment job
+    will start.  When any of those stage-2 jobs fail the scheduler leaves the
+    downstream assessment job in the ``PD`` (pending) state with a dependency
+    related reason (``Dependency`` or ``DependencyNeverSatisfied``).  In that
+    situation users typically want to continue with assessment despite the
+    partial failure.  This helper polls the scheduler for the stage-2 jobs
+    associated with the run.  After three consecutive polls where every job
+    remains pending *only* because of dependency issues, it submits a fresh
+    assessment job without dependencies.
+
+    The new assessment submission is explicitly marked with
+    ``allow_empty_dependencies=True`` so that ``ClusterClient.submit_assessment``
+    permits running it even though the dependency list is empty.  All log
+    messages are appended to the ``job_store`` so the UI can surface the exact
+    decision path to the user.
+    """
+
+    if cluster.cfg.mock:
+        return
+    tracked = [jid for jid in dict.fromkeys(stage2_ids) if jid]
+    if not tracked:
+        return
+
+    allowed_reasons = {"Dependency", "DependencyNeverSatisfied"}
+
+    def _poll() -> None:
+        consecutive = 0
+        iterations = 0
+        max_checks = 30  # ~1 hour if using default interval
+        interval = 120
+
+        while True:
+            if iterations >= max_checks:
+                job_store.append_log(
+                    job_id,
+                    "[assessment_rescue] Stage2 dependency stall monitoring timed out.",
+                )
+                return
+
+            time.sleep(interval)
+            iterations += 1
+
+            try:
+                snapshot = cluster.describe_jobs(tracked)
+            except Exception as exc:  # pragma: no cover - defensive
+                job_store.append_log(job_id, f"[assessment_rescue][error] {exc}")
+                return
+
+            if not snapshot:
+                return
+
+            stalled = all(
+                info.get("reason") in allowed_reasons and info.get("state") == "PD"
+                for info in snapshot.values()
+            )
+            if stalled:
+                consecutive += 1
+            else:
+                consecutive = 0
+                continue
+
+            if consecutive < 3:
+                continue
+
+            job_store.append_log(
+                job_id,
+                (
+                    "[assessment_rescue] Stage2 jobs stalled with dependency issues; "
+                    "submitting assessment without dependencies."
+                ),
+            )
+
+            try:
+                rescue_id = cluster.submit_assessment(
+                    pdb_id=pdb_id,
+                    binder_chain=binder_chain,
+                    run_label=run_label,
+                    dependencies=[],
+                    include_keyword=run_label,
+                    allow_empty_dependencies=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                job_store.append_log(job_id, f"[assessment_rescue][error] {exc}")
+                return
+
+            if rescue_id:
+                job_store.append_log(
+                    job_id,
+                    f"[assessment_rescue] Submitted assessment sbatch job {rescue_id}",
+                )
+                job_store.update(
+                    job_id,
+                    details={"assessment_rescue_job_id": rescue_id},
+                )
+                _start_squeue_monitor(cluster, job_store, job_id, [rescue_id])
+            return
+
+    threading.Thread(
+        target=_poll,
+        name=f"assess-rescue-{job_id}",
+        daemon=True,
+    ).start()
+
+
 def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_id: str) -> None:
     job_store.update(job_id, status=JobStatus.RUNNING, message="Preparing pipeline configuration")
 
@@ -377,6 +494,20 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     if assessment_merge_job_id:
         tracked_for_monitor.append(assessment_merge_job_id)
     _start_squeue_monitor(cluster, job_store, job_id, tracked_for_monitor)
+
+    if request.run_assess and pipeline_assess_job and stage2_ids:
+        # If all stage-2 jobs stall on dependency reasons the rescue monitor
+        # will submit a fresh assessment job with no dependencies so users can
+        # still review partial results.
+        _schedule_assessment_rescue(
+            cluster,
+            job_store,
+            job_id,
+            stage2_ids=stage2_ids,
+            pdb_id=request.pdb_id,
+            binder_chain=binder_chain,
+            run_label=run_label,
+        )
 
     job_store.update(
         job_id,

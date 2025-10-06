@@ -546,6 +546,43 @@ PY
             raise RuntimeError(f"Failed to parse remote assessments listing: {exc}") from exc
         return entries
 
+    def describe_jobs(self, job_ids: Iterable[str]) -> dict[str, dict[str, str]]:
+        """Return lightweight scheduler information for the given job IDs."""
+
+        ids = [str(j).strip() for j in job_ids if str(j).strip()]
+        if not ids:
+            return {}
+
+        if self.cfg.mock:
+            return {
+                jid: {"state": "MOCK", "state_long": "MOCK", "reason": "mock"}
+                for jid in ids
+            }
+
+        fmt = "%i|%t|%T|%r"
+        joined = ",".join(ids)
+        cmd = f"{self.cfg.squeue_path} -j {joined} -o '{fmt}' -h"
+        result = self.run(cmd, check=False)
+        if result.exit_code != 0:
+            message = (result.stderr or result.stdout or "squeue failed").strip()
+            raise RuntimeError(message)
+
+        info: dict[str, dict[str, str]] = {}
+        for line in (result.stdout or "").splitlines():
+            parts = line.strip().split("|")
+            if len(parts) >= 4:
+                job_id, state, state_long, reason = parts[:4]
+                job_id = job_id.strip()
+                state = state.strip()
+                state_long = state_long.strip()
+                reason = reason.strip()
+                info[job_id] = {
+                    "state": state,
+                    "state_long": state_long,
+                    "reason": reason,
+                }
+        return info
+
     def submit_assessment(
         self,
         *,
@@ -554,9 +591,10 @@ PY
         run_label: str,
         dependencies: Iterable[str],
         include_keyword: Optional[str] = None,
+        allow_empty_dependencies: bool = False,
     ) -> Optional[str]:
         deps = [str(d).strip() for d in dependencies if str(d).strip()]
-        if not deps:
+        if not deps and not allow_empty_dependencies:
             return None
         dep_str = ":".join(deps)
 
@@ -566,7 +604,9 @@ PY
         if self.cfg.remote_root is None:
             raise RuntimeError("remote_root not configured; cannot schedule assessment job")
 
-        sbatch_opts = [f"--dependency=afterok:{dep_str}"]
+        sbatch_opts = []
+        if deps:
+            sbatch_opts.append(f"--dependency=afterok:{dep_str}")
         job_name = f"assess_{pdb_id.upper()}_{run_label}"
         sbatch_opts.append(f"--job-name={job_name[:40]}")
         if self.cfg.assess_partition:

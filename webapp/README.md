@@ -122,6 +122,25 @@ ssh hpc3.rcic.uci.edu -MNf
 - **Environment modules** – ensure the remote environment can execute `python manage_rfa.py ...` and `sbatch`. The assessment helper creates jobs under `slurm_logs/` within the remote repository.
 - **Automatic assessment** – after the RFdiffusion/MPNN/AF3 stage scripts are submitted, the UI schedules an additional `assess-rfa-all` sbatch job with dependencies on the final AF3 tasks. Configure the CPU partition/memory knobs above to match your cluster policies.
 
+#### Assessment rescue behaviour
+
+Occasionally a subset of stage-2 jobs (ProteinMPNN or AF3 batches) never exit
+cleanly, leaving the dependent assessment job stuck in the `PD` state with
+reasons such as `Dependency` or `DependencyNeverSatisfied`.  The design
+workflow now launches a background *rescue monitor* whenever assessment was
+requested:
+
+- Every two minutes it snapshots SLURM status for the stage-2 job IDs.
+- After three consecutive snapshots where **every** job remains pending solely
+  for dependency-related reasons, it submits a fresh assessment job without any
+  dependencies by calling `ClusterClient.submit_assessment(..., allow_empty_dependencies=True)`.
+- All decisions (including the newly created sbatch ID) are logged to the job
+  history so the UI timeline explains why assessment was resubmitted.
+
+This keeps assessment results flowing even when some upstream stage-2 batches
+fail or never launch, while preserving the normal dependency chain whenever
+everything succeeds.
+
 ## Running the Server
 
 ```bash
