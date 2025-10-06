@@ -173,9 +173,9 @@ def make_rfa_rfdiffusion_command(
         echo 'Hotspots: {hotspots_str}'
         echo 'CDR Loops: [H1:{cdr_h1},H2:{cdr_h2},H3:{cdr_h3}]'
 
+        poetry --version || true
         poetry env info || true
         poetry env list || true
-        poetry install
 
         poetry run python /home/src/rfantibody/rfdiffusion/rfdiffusion_inference.py \\
           --config-name antibody \\
