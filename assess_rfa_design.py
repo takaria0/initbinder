@@ -20,7 +20,7 @@ from Bio import pairwise2
 from jsonschema import validate
 from datetime import datetime
 
-from utils import _ensure_dir, ROOT, SCHEMA
+from utils import _ensure_dir, ROOT, SCHEMA, TARGETS_ROOT
 
 # =========================
 # Amino-acid mapping (3->1)
@@ -1211,7 +1211,7 @@ def assess_rfa_all(
         pass
 
     print(f"=== Assessing all designs for target {pdb_id} ===")
-    tdir = ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / "targets" / pdb_id.upper()
     cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
 
     prepared_pdb = tdir / "prep" / "prepared.pdb"
