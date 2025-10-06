@@ -594,7 +594,6 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{merge_name}_%j.out",
             f"#SBATCH --error=slurm_logs/{merge_name}_%j.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
             *conda_lines,
             "echo \"[assess][merge] start $(date)\"",
@@ -608,7 +607,6 @@ def _write_assess_rfa_all_sbatch(
         launch_script = launch_dir / f"launch_{job_base}_{ts}.sh"
         launch_lines = [
             "#!/bin/bash",
-            "set -euo pipefail",
             f'echo "[launch] sbatch {array_script.name}"',
             f"jid_array=$(sbatch {shlex.quote(str(array_script))} | awk '{{print $4}}')",
             'echo "[launch] submitted array job ${jid_array}"',
@@ -634,7 +632,6 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{job_name}_%j.out",
             f"#SBATCH --error=slurm_logs/{job_name}_%j.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
             *conda_lines,
             "echo \"[assess] host: $(hostname)\"",
@@ -649,7 +646,6 @@ def _write_assess_rfa_all_sbatch(
         launch_script = launch_dir / f"launch_{job_name}_{ts}.sh"
         launch_lines = [
             "#!/bin/bash",
-            "set -euo pipefail",
             f'echo "[launch] sbatch {job_script.name}"',
             f"jid=$(sbatch {shlex.quote(str(job_script))} | awk '{{print $4}}')",
             'echo "[launch] submitted job ${jid}"',
