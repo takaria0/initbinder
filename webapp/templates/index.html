@@ -134,12 +134,11 @@
         </div>
         <div class="assessment-advanced debug-only">
           <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
-          <button type="button" id="sync-results" class="debug-only">Download from cluster</button>
-          <p class="help-text">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
+          <p class="help-text">Use “Download assessments” in the Results panel to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
         </div>
       </section>
 
-        <section id="results-section">
+      <section id="results-section">
         <div class="results-header">
           <h2>Results</h2>
           <div class="results-controls">
@@ -148,6 +147,7 @@
               Row Limit
               <input type="number" id="results-limit" value="200" min="1">
             </label>
+            <button type="button" id="sync-results">Download assessments</button>
           </div>
         </div>
         <datalist id="run-label-options"></datalist>

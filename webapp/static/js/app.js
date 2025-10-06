@@ -1279,6 +1279,23 @@ function updateJobUI(job) {
       el.refreshResultsBtn.disabled = false;
       if (el.targetSubmit) el.targetSubmit.disabled = false;
       if (el.assessSubmit) el.assessSubmit.disabled = false;
+      const autoRunLabel = job.details?.assessment_run_label || '';
+      if (autoRunLabel) {
+        state.activeRunLabel = autoRunLabel;
+        if (el.resultsRunLabel) el.resultsRunLabel.value = autoRunLabel;
+        updateActiveRunDisplay();
+        highlightRunChip(autoRunLabel);
+      }
+      const shouldAutoSync = Boolean(job.details?.run_assess_requested) && autoRunLabel;
+      if (shouldAutoSync) {
+        syncResultsFromCluster({
+          runLabel: autoRunLabel,
+          disableButton: false,
+          useInputRunLabel: false,
+        }).catch((err) => {
+          console.error('Automatic cluster sync failed', err);
+        });
+      }
       stopJobPolling();
       refreshRunLabel(true);
       if (state.currentPdb) {
@@ -1329,6 +1346,9 @@ function updateJobUI(job) {
       showAlert(alertMsg, false);
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
+        if (state.activeRunLabel) {
+          fetchRankings({ silent: true });
+        }
       }
     } else {
       if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
@@ -1495,6 +1515,7 @@ async function syncResultsFromCluster(options = {}) {
     disableButton = true,
     useInputRunLabel = true,
     force = false,
+    allAssessments = false,
   } = options;
   if (!state.currentPdb) {
     if (!silent) showAlert('Initialize target first.');
@@ -1506,7 +1527,7 @@ async function syncResultsFromCluster(options = {}) {
   } else if (useInputRunLabel && el.resultsRunLabel) {
     runLabelInput = el.resultsRunLabel.value.trim();
   }
-  if (!runLabelInput && state.activeRunLabel) {
+  if (!allAssessments && !runLabelInput && state.activeRunLabel) {
     runLabelInput = state.activeRunLabel.trim();
   }
 
@@ -1634,7 +1655,9 @@ function initEventHandlers() {
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
   if (el.syncResultsBtn) {
-    el.syncResultsBtn.addEventListener('click', () => syncResultsFromCluster({ useInputRunLabel: false }));
+    el.syncResultsBtn.addEventListener('click', () =>
+      syncResultsFromCluster({ useInputRunLabel: false, allAssessments: true })
+    );
   }
   if (el.assessSubmit) {
     el.assessSubmit.addEventListener('click', queueAssessmentRun);
