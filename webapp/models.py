@@ -195,3 +195,23 @@ class PyMolTopBindersResponse(BaseModel):
     bundle_path: Optional[str]
     launched: bool
     message: str
+
+
+class PyMolGalleryMovieRequest(BaseModel):
+    run_label: Optional[str] = None
+    top_n: int = Field(96, ge=1, le=500)
+    fps: int = Field(10, ge=1, le=120)
+    interval_sec: float = Field(2.0, ge=0.1, le=60.0)
+    rotation_deg_per_sec: float = Field(30.0, ge=0.0, le=360.0)
+    rotation_axis: str = Field("y", pattern="^[xyzXYZ]$")
+    desired_states: int = Field(48, ge=1, le=400)
+
+
+class PyMolGalleryMovieResponse(BaseModel):
+    bundle_path: Optional[str]
+    movie_path: Optional[str]
+    frames_prefix: Optional[str]
+    frames_pattern: Optional[str]
+    script_path: Optional[str]
+    log_path: Optional[str]
+    message: str

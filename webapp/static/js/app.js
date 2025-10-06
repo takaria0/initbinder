@@ -80,6 +80,7 @@ const el = {
   resultsRunLabel: document.querySelector('#results-run-label'),
   resultsLimit: document.querySelector('#results-limit'),
   pymolTop: document.querySelector('#pymol-top'),
+  pymolMovie: document.querySelector('#pymol-movie'),
   syncResultsBtn: document.querySelector('#sync-results'),
   assessSubmit: document.querySelector('#assess-submit'),
   jobList: document.querySelector('#job-list'),
@@ -1158,6 +1159,13 @@ function renderResults() {
     el.pymolTop.disabled = !hasRows;
     el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
   }
+  if (el.pymolMovie) {
+    const canRenderMovie = state.galleryAvailable && hasRows;
+    el.pymolMovie.disabled = !canRenderMovie;
+    el.pymolMovie.title = canRenderMovie
+      ? 'Render headless PyMOL gallery movie (this may take a minute)'
+      : 'Load a gallery-enabled run to render a movie';
+  }
   if (el.refreshResultsBtn) el.refreshResultsBtn.disabled = false;
 }
 
@@ -1543,6 +1551,70 @@ async function launchTopBinders() {
   }
 }
 
+async function renderPymolMovie() {
+  if (!state.currentPdb || !state.rankingsResponse) {
+    showAlert('Load rankings before rendering a movie.');
+    return;
+  }
+  if (!state.galleryAvailable) {
+    showAlert('Gallery movie requires a run with PyMOL gallery outputs.');
+    return;
+  }
+
+  const button = el.pymolMovie;
+  const originalLabel = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Rendering movie…';
+  }
+
+  showAlert('Rendering PyMOL gallery movie… this may take a minute.', false);
+  appendLog('Rendering headless PyMOL gallery movie…');
+
+  const topN = Number(el.exportTopN?.value || 0) || 96;
+  const payload = {
+    run_label: state.rankingsResponse.run_label || null,
+    top_n: topN,
+    fps: 10,
+    interval_sec: 2.0,
+    rotation_deg_per_sec: 30,
+    rotation_axis: 'y',
+    desired_states: 48,
+  };
+
+  try {
+    const res = await fetch(`/api/targets/${state.currentPdb}/pymol/gallery-movie`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed with ${res.status}`);
+    }
+    const body = await res.json();
+    const moviePath = body.movie_path || 'cache directory';
+    showAlert(`PyMOL movie saved to ${moviePath}`, false);
+    if (body.frames_pattern) {
+      appendLog(`PyMOL movie frames: ${body.frames_pattern}`);
+    }
+    if (body.script_path) {
+      appendLog(`PyMOL movie script: ${body.script_path}`);
+    }
+    if (body.log_path) {
+      appendLog(`PyMOL movie log: ${body.log_path}`);
+    }
+  } catch (err) {
+    showAlert(err.message || String(err));
+    appendLog(`PyMOL movie render failed: ${err.message || err}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel || 'Render PyMOL movie';
+    }
+  }
+}
+
 async function syncResultsFromCluster(options = {}) {
   const {
     runLabel: explicitRunLabel,
@@ -1659,6 +1731,7 @@ function disableFutureSections() {
   if (el.exportOpen) el.exportOpen.disabled = true;
   el.pymolTop.disabled = true;
   el.pymolHotspots.disabled = true;
+  if (el.pymolMovie) el.pymolMovie.disabled = true;
   if (el.assessSubmit) el.assessSubmit.disabled = true;
   state.targetStatus = null;
   state.targetDetails = null;
@@ -1693,6 +1766,9 @@ function initEventHandlers() {
   }
   el.pymolHotspots.addEventListener('click', launchHotspots);
   el.pymolTop.addEventListener('click', launchTopBinders);
+  if (el.pymolMovie) {
+    el.pymolMovie.addEventListener('click', renderPymolMovie);
+  }
   if (el.syncResultsBtn) {
     el.syncResultsBtn.addEventListener('click', () =>
       syncResultsFromCluster({ useInputRunLabel: false, allAssessments: true })

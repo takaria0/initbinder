@@ -6,7 +6,9 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,6 +27,25 @@ else:
 
 class PyMolLaunchError(RuntimeError):
     pass
+
+
+GALLERY_OBJECTS = [
+    "target_af3_gallery",
+    "binder_gallery_af3",
+    "binder_gallery_rfdiff",
+    "epi_mask_gallery",
+    "epi_hot_gallery",
+]
+
+
+@dataclass
+class GalleryMovieResult:
+    bundle_path: Path
+    script_path: Path
+    movie_path: Path
+    frame_prefix: Path
+    frames_pattern: str
+    log_path: Path
 
 
 def _ensure_env() -> Path:
@@ -92,6 +113,43 @@ def _launch_pymol(script_path: Path) -> None:
         raise last_error
     raise PyMolLaunchError(
         "PyMOL executable not found. Install the command-line tool or set cluster.pymol_path"
+    )
+
+
+def _resolve_pymol_cli() -> list[str]:
+    cfg = load_config()
+    candidates: list[str] = []
+    configured_path = (cfg.cluster.pymol_path or "").strip()
+    if configured_path:
+        candidates.append(configured_path)
+    if sys.platform == "darwin":
+        candidates.append("/Applications/PyMOL.app")
+    candidates.append("pymol")
+
+    def _expand(candidate: str) -> list[str] | None:
+        if not candidate:
+            return None
+        cand_path = Path(candidate)
+        if cand_path.suffix.lower() == ".app" and cand_path.is_dir():
+            for rel in ("Contents/bin/pymol", "Contents/MacOS/PyMOL"):
+                cli_path = cand_path / rel
+                if cli_path.exists():
+                    return [str(cli_path)]
+            return None
+        if cand_path.exists():
+            return [str(cand_path)]
+        resolved = shutil.which(candidate)
+        if resolved:
+            return [resolved]
+        return None
+
+    for candidate in candidates:
+        expanded = _expand(candidate)
+        if expanded:
+            return expanded
+
+    raise PyMolLaunchError(
+        "PyMOL command-line interface not found. Install PyMOL or set cluster.pymol_path"
     )
 
 
@@ -220,8 +278,219 @@ def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str]
     return aggregate_path, launched
 
 
+def render_gallery_movie(
+    pdb_id: str,
+    *,
+    top_n: int = 96,
+    run_label: Optional[str] = None,
+    fps: int = 10,
+    interval_seconds: float = 2.0,
+    rotation_deg_per_sec: float = 30.0,
+    rotation_axis: str = "y",
+    desired_states: int = 48,
+) -> GalleryMovieResult:
+    _ensure_env()
+
+    if fps < 1:
+        raise PyMolLaunchError("movie_fps must be at least 1")
+    if interval_seconds <= 0:
+        raise PyMolLaunchError("interval_seconds must be positive")
+    if desired_states < 1:
+        raise PyMolLaunchError("desired_states must be at least 1")
+
+    axis = (rotation_axis or "y").lower()
+    if axis not in {"x", "y", "z"}:
+        raise PyMolLaunchError("rotation_axis must be one of x, y, or z")
+
+    try:
+        payload = load_rankings(pdb_id, run_label=run_label, limit=top_n)
+    except RankingsNotFoundError as exc:
+        raise PyMolLaunchError(str(exc)) from exc
+
+    gallery_path = payload.gallery_path
+    if gallery_path is None or not gallery_path.exists():
+        raise PyMolLaunchError(
+            "PyMOL gallery bundle not available for this run; rerun assessment with gallery export enabled."
+        )
+
+    dest_root = _cache_dir("pymol_gallery_movies")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_token = (payload.run_label or "latest").replace(" ", "_")
+    session_dir = dest_root / f"{pdb_id.upper()}_{run_token}_{timestamp}"
+    _copy_bundle(gallery_path.parent, session_dir)
+
+    gallery_script = session_dir / gallery_path.name
+    if not gallery_script.exists():
+        raise PyMolLaunchError("Gallery script missing after bundle copy; see assessment outputs and retry.")
+
+    movie_dir = session_dir / "movie"
+    movie_dir.mkdir(parents=True, exist_ok=True)
+
+    for png_file in movie_dir.glob("*.png"):
+        png_file.unlink()
+
+    movie_path = movie_dir / "pymol_gallery_prores.mov"
+    if movie_path.exists():
+        movie_path.unlink()
+
+    render_script = movie_dir / "render_gallery_movie.pml"
+    frame_prefix = movie_dir / "frame"
+    frame_prefix_rel = os.path.relpath(frame_prefix, start=session_dir)
+    source_script_rel = os.path.relpath(gallery_script, start=session_dir)
+    object_names_repr = repr(GALLERY_OBJECTS)
+
+    script_body = textwrap.dedent(
+        f"""
+        @{source_script_rel}
+        set movie_fps, {fps}
+        set scene_animation_mode, 0
+        mclear
+
+        python
+        from pymol import cmd
+
+        OBJECT_NAMES = {object_names_repr}
+        DESIRED_STATE_COUNT = {desired_states}
+        INTERVAL_SECONDS = {interval_seconds}
+        ROTATION_DEG_PER_SECOND = {rotation_deg_per_sec}
+        ROTATION_AXIS = "{axis}"
+        FRAME_PREFIX = r"{frame_prefix_rel}"
+
+        objects = [name for name in OBJECT_NAMES if cmd.count_states(name) > 0]
+        if not objects:
+            raise RuntimeError("No gallery objects found in the loaded script.")
+        fps = int(round(float(cmd.get("movie_fps"))))
+        if fps < 1:
+            fps = 1
+        max_states = min(DESIRED_STATE_COUNT, max(cmd.count_states(name) for name in objects))
+        if max_states < 1:
+            raise RuntimeError("Gallery objects contain no states.")
+        for name in objects:
+            cmd.disable(name)
+        singletons = {{}}
+        for name in objects:
+            entries = []
+            group_name = name + "_states"
+            for idx in range(1, max_states + 1):
+                singleton = "{{}}_s{{}}".format(name, idx)
+                cmd.create(singleton, name, idx, 1)
+                entries.append(singleton)
+                cmd.disable(singleton)
+            singletons[name] = entries
+            if entries:
+                cmd.group(group_name, " ".join(entries))
+        frames_per_state = max(1, int(round(fps * INTERVAL_SECONDS)))
+        total_frames = max_states * frames_per_state
+        cmd.mset("1 x %d" % total_frames)
+        rotation_per_frame = 0.0
+        if fps > 0:
+            rotation_per_frame = ROTATION_DEG_PER_SECOND / float(fps)
+        for frame in range(1, total_frames + 1):
+            state_index = ((frame - 1) // frames_per_state) + 1
+            if state_index > max_states:
+                state_index = max_states
+            commands = []
+            if (frame - 1) % frames_per_state == 0:
+                for entries in singletons.values():
+                    for entry in entries:
+                        commands.append("disable " + entry)
+                for name, entries in singletons.items():
+                    commands.append("enable " + entries[state_index - 1])
+            if rotation_per_frame:
+                commands.append("turn " + ROTATION_AXIS + ", " + str(rotation_per_frame))
+            if commands:
+                cmd.mdo(frame, "; ".join(commands))
+        cmd.mpng(FRAME_PREFIX, 1, total_frames, 1)
+        python end
+
+        quit
+        """
+    ).strip() + "\n"
+
+    render_script.write_text(script_body, encoding="utf-8")
+
+    pymol_cmd = _resolve_pymol_cli()
+    script_rel = os.path.relpath(render_script, start=session_dir)
+    command = [*pymol_cmd, "-cq", script_rel]
+
+    log_path = movie_dir / "render_gallery_movie.log"
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write("Running PyMOL gallery movie render\n")
+        log_file.write("Command: " + " ".join(command) + "\n\n")
+        log_file.flush()
+        try:
+            subprocess.run(
+                command,
+                cwd=session_dir,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise PyMolLaunchError(
+                f"PyMOL failed to render gallery movie; see log at {log_path}"
+            ) from exc
+
+    frame_files = sorted(movie_dir.glob(f"{frame_prefix.name}*.png"))
+    if not frame_files:
+        raise PyMolLaunchError(
+            f"PyMOL did not produce any frames; inspect {log_path} for details"
+        )
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise PyMolLaunchError("ffmpeg not found in PATH; install ffmpeg to assemble movie")
+
+    frame_pattern = f"{frame_prefix}%04d.png"
+    ffmpeg_cmd = [
+        ffmpeg_path,
+        "-y",
+        "-framerate",
+        str(fps),
+        "-start_number",
+        "1",
+        "-i",
+        frame_pattern,
+        "-vf",
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        "3",
+        "-pix_fmt",
+        "yuv422p10le",
+        str(movie_path),
+    ]
+
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write("Running ffmpeg to assemble movie\n")
+        log_file.write("Command: " + " ".join(ffmpeg_cmd) + "\n\n")
+        log_file.flush()
+        try:
+            subprocess.run(
+                ffmpeg_cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise PyMolLaunchError(
+                f"ffmpeg failed to assemble gallery movie; see log at {log_path}"
+            ) from exc
+
+    return GalleryMovieResult(
+        bundle_path=gallery_script,
+        script_path=render_script,
+        movie_path=movie_path,
+        frame_prefix=frame_prefix,
+        frames_pattern=frame_pattern,
+        log_path=log_path,
+    )
+
+
 __all__ = [
     "launch_hotspots",
     "launch_top_binders",
+    "render_gallery_movie",
     "PyMolLaunchError",
 ]

@@ -26,6 +26,8 @@ from .models import (
     ExportResponse,
     JobStatusResponse,
     JobSummary,
+    PyMolGalleryMovieRequest,
+    PyMolGalleryMovieResponse,
     PyMolHotspotRequest,
     PyMolHotspotResponse,
     PyMolTopBindersRequest,
@@ -40,7 +42,12 @@ from .models import (
     TargetInitResponse,
 )
 from .pipeline import get_target_status
-from .pymol import PyMolLaunchError, launch_hotspots, launch_top_binders
+from .pymol import (
+    PyMolLaunchError,
+    launch_hotspots,
+    launch_top_binders,
+    render_gallery_movie,
+)
 from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
 from .workflows import (
     submit_assessment_run,
@@ -311,6 +318,38 @@ async def api_pymol_top_binders(pdb_id: str, payload: PyMolTopBindersRequest) ->
         bundle_path=str(aggregate_path) if aggregate_path else None,
         launched=bool(launched),
         message="PyMOL aggregate script generated",
+    )
+
+
+@app.post("/api/targets/{pdb_id}/pymol/gallery-movie", response_model=PyMolGalleryMovieResponse)
+async def api_pymol_gallery_movie(
+    pdb_id: str, payload: PyMolGalleryMovieRequest
+) -> PyMolGalleryMovieResponse:
+    try:
+        result = await run_in_threadpool(
+            render_gallery_movie,
+            pdb_id,
+            run_label=payload.run_label,
+            top_n=payload.top_n,
+            fps=payload.fps,
+            interval_seconds=payload.interval_sec,
+            rotation_deg_per_sec=payload.rotation_deg_per_sec,
+            rotation_axis=payload.rotation_axis,
+            desired_states=payload.desired_states,
+        )
+    except PyMolLaunchError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return PyMolGalleryMovieResponse(
+        bundle_path=str(result.bundle_path) if result.bundle_path else None,
+        movie_path=str(result.movie_path) if result.movie_path else None,
+        frames_prefix=str(result.frame_prefix) if result.frame_prefix else None,
+        frames_pattern=str(result.frames_pattern) if result.frames_pattern else None,
+        script_path=str(result.script_path) if result.script_path else None,
+        log_path=str(result.log_path) if result.log_path else None,
+        message="PyMOL gallery movie rendered",
     )
 
 
