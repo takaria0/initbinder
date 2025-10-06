@@ -292,14 +292,24 @@ def _ensure_epitopes_within_target_chains(
     allowed_display = ", ".join(sorted(allowed_chains)) or "(none)"
 
     for field in ("chains", "target_chains"):
-        field_chains = set(_normalize_chain_ids(cfg.get(field)))
-        invalid = field_chains - allowed_chains
+        field_chains = _normalize_chain_ids(cfg.get(field))
+        if not field_chains:
+            continue
+
+        valid_chains = [cid for cid in field_chains if cid in allowed_chains]
+        invalid = [cid for cid in field_chains if cid not in allowed_chains]
+
         if invalid:
-            invalid_display = ", ".join(sorted(invalid))
-            raise ValueError(
-                f"LLM output sets '{field}' to include chain(s) [{invalid_display}] which are not in the validated "
-                f"antigen-supported set [{allowed_display}]. Please adjust the prompt or edit the YAML manually."
+            invalid_display = ", ".join(_unique_order(invalid))
+            print(
+                f"[warn] Removing chain(s) [{invalid_display}] from '{field}' because they are outside the validated "
+                f"antigen-supported set [{allowed_display}]."
             )
+            if valid_chains:
+                cfg[field] = _unique_order(valid_chains)
+            else:
+                cfg.pop(field, None)
+
 
     violations = []
     residue_gaps = []

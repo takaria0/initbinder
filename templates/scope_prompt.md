@@ -18,7 +18,8 @@ Propose a scope in the following YAML format:
 id: "PDB_ID_HERE"
 assembly_id: "1"
 target_name: "A descriptive name for the target protein"
-chains: ["A", "B"] # List the chains that make up the antigen target
+chains: ["A", "B"] # List the chains that make up the antigen target (validated against the commercial antigen)
+target_chains: ["A", "B"] # Must exactly match the validated antigen-supported chains
 epitopes:
   - name: "Epitope 1 Site"
     residues: ["A:50-65", "A:80-88"] # Residue ranges for the epitope
