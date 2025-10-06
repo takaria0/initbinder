@@ -34,7 +34,7 @@ class ClusterConfig:
     assess_mem_gb: int = 16
     assess_cpus: int = 4
     control_path: Optional[str] = None
-    control_persist: int | str = 600
+    control_persist: int | str = 600000
     ensure_master: bool = True
     conda_activate: Optional[str] = None
     debug: bool = False
