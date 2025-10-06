@@ -23,6 +23,7 @@ const state = {
   lastClusterSyncAt: 0,
   pendingClusterSync: null,
   pendingClusterSyncTimer: null,
+  clusterRetryTimer: null,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -972,6 +973,10 @@ async function fetchRankings(options = {}) {
     if (!silent) showAlert('Initialize target first.');
     return;
   }
+  if (state.clusterRetryTimer) {
+    clearTimeout(state.clusterRetryTimer);
+    state.clusterRetryTimer = null;
+  }
   if (state.rankingsFetching) return;
   state.rankingsFetching = true;
 
@@ -1336,13 +1341,43 @@ function updateJobUI(job) {
       setBadge(el.resultsMeta, job.status === 'running' ? 'Syncing…' : 'Queued…');
     } else if (job.status === 'success') {
       const skipped = Boolean(job.details?.skipped);
+      const skippedReason = (job.details?.skipped_reason || '').trim();
+      const skippedCode = (job.details?.skipped_code || '').trim();
       const localPath = job.details?.local_path ? String(job.details.local_path) : '';
-      const statusText = skipped ? 'Assessments already synced' : 'Assessments synced';
+      const baseStatus = skipped
+        ? skippedReason || 'Assessments already synced'
+        : 'Assessments synced';
       const suffix = localPath ? ` → ${localPath}` : '';
-      setBadge(el.resultsMeta, `${statusText}${suffix}`, 'rgba(134, 239, 172, 0.25)');
+      setBadge(el.resultsMeta, `${baseStatus}${suffix}`, 'rgba(134, 239, 172, 0.25)');
       if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
       stopJobPolling();
-      const alertMsg = localPath ? `${statusText}. Saved to ${localPath}` : statusText;
+      let alertMsg = localPath ? `${baseStatus}. Saved to ${localPath}` : baseStatus;
+      let scheduledRetry = false;
+      if (skipped && skippedCode === 'remote-missing') {
+        state.lastClusterSyncAt = 0;
+        if (state.clusterRetryTimer) {
+          clearTimeout(state.clusterRetryTimer);
+        }
+        const retryRunLabel = job.details?.run_label || state.activeRunLabel || '';
+        if (retryRunLabel) {
+          state.clusterRetryTimer = setTimeout(() => {
+            state.clusterRetryTimer = null;
+            syncResultsFromCluster({
+              runLabel: retryRunLabel,
+              disableButton: false,
+              useInputRunLabel: false,
+              silent: true,
+              force: true,
+            }).catch((err) => {
+              console.error('Retry cluster sync failed', err);
+            });
+          }, 60000);
+          scheduledRetry = true;
+        }
+      }
+      if (scheduledRetry) {
+        alertMsg = `${alertMsg} Retrying shortly…`;
+      }
       showAlert(alertMsg, false);
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
@@ -1520,6 +1555,10 @@ async function syncResultsFromCluster(options = {}) {
   if (!state.currentPdb) {
     if (!silent) showAlert('Initialize target first.');
     return;
+  }
+  if (state.clusterRetryTimer) {
+    clearTimeout(state.clusterRetryTimer);
+    state.clusterRetryTimer = null;
   }
   let runLabelInput = '';
   if (explicitRunLabel !== undefined) {

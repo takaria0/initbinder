@@ -27,6 +27,7 @@ class CommandResult:
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     duration: Optional[float] = None
+    metadata: Optional[dict[str, object]] = None
 
 
 class ClusterClient:
@@ -428,14 +429,93 @@ class ClusterClient:
             rel = assessments_rel / run_label
             local_dest = (self.local_root / rel).resolve()
             if _has_rankings(local_dest):
-                msg = f"[skip] Assessment {run_label} already present at {local_dest}"
-                self._emit(f"[cluster] sync_assessments_back skip -> {msg}", always_print=True)
-                return CommandResult(0, msg, "", skipped=True)
+                message = f"Assessment {run_label} already synced locally at {local_dest}"
+                self._emit(
+                    f"[cluster] sync_assessments_back skip -> {message}",
+                    always_print=True,
+                )
+                return CommandResult(
+                    0,
+                    message,
+                    "",
+                    skipped=True,
+                    metadata={
+                        "code": "local-present",
+                        "message": message,
+                        "run_label": run_label,
+                        "pdb_id": pdb_id.upper(),
+                        "local_path": str(local_dest),
+                    },
+                )
+
+            remote_has_label: Optional[bool] = None
+            try:
+                remote_entries = self.list_remote_assessments(pdb_id)
+            except Exception:
+                remote_has_label = None
+            else:
+                for entry in remote_entries:
+                    label = str(entry.get("run_label") or "").strip()
+                    if label == run_label:
+                        remote_has_label = True
+                        break
+                else:
+                    remote_has_label = False
+
+            if remote_has_label is False:
+                message = (
+                    f"Assessment {run_label} not found on cluster yet for {pdb_id.upper()}."
+                    " It may still be running."
+                )
+                self._emit(
+                    f"[cluster] sync_assessments_back skip -> {message}",
+                    always_print=True,
+                )
+                return CommandResult(
+                    0,
+                    message,
+                    "",
+                    skipped=True,
+                    metadata={
+                        "code": "remote-missing",
+                        "message": message,
+                        "run_label": run_label,
+                        "pdb_id": pdb_id.upper(),
+                        "remote_path": str(remote_base / rel),
+                    },
+                )
+
             self._emit(
                 f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
                 always_print=True,
             )
-            result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
+            try:
+                result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
+            except RuntimeError as exc:
+                message_text = str(exc)
+                if "No such file or directory" in message_text or "change_dir" in message_text:
+                    message = (
+                        f"Assessment {run_label} not found on cluster yet for {pdb_id.upper()}."
+                        " It may still be running."
+                    )
+                    self._emit(
+                        f"[cluster] sync_assessments_back skip -> {message}",
+                        always_print=True,
+                    )
+                    return CommandResult(
+                        0,
+                        message,
+                        "",
+                        skipped=True,
+                        metadata={
+                            "code": "remote-missing",
+                            "message": message,
+                            "run_label": run_label,
+                            "pdb_id": pdb_id.upper(),
+                            "remote_path": str(remote_base / rel),
+                        },
+                    )
+                raise
             self._emit(
                 f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
                 always_print=True,
@@ -465,9 +545,23 @@ class ClusterClient:
                 missing_labels.append(label)
 
         if remote_entries and not missing_labels:
-            msg = f"[skip] All assessments already synced for {pdb_id.upper()}"
-            self._emit(f"[cluster] sync_assessments_back skip -> {msg}", always_print=True)
-            return CommandResult(0, msg, "", skipped=True)
+            message = f"All assessments already synced for {pdb_id.upper()}"
+            self._emit(
+                f"[cluster] sync_assessments_back skip -> {message}",
+                always_print=True,
+            )
+            return CommandResult(
+                0,
+                message,
+                "",
+                skipped=True,
+                metadata={
+                    "code": "up-to-date",
+                    "message": message,
+                    "pdb_id": pdb_id.upper(),
+                    "local_path": str(local_assessments),
+                },
+            )
 
         rel = base_rel
         local_dest = (self.local_root / rel).resolve()

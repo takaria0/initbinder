@@ -246,7 +246,16 @@ def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
                 for line in result.stderr.splitlines():
                     store.append_log(job.job_id, line)
 
-            message = "Assessments already synced" if result.skipped else "Assessments synced"
+            skipped_reason = ""
+            skipped_code = ""
+            if result.metadata:
+                skipped_reason = str(result.metadata.get("message") or "").strip()
+                skipped_code = str(result.metadata.get("code") or "").strip()
+
+            message = "Assessments synced"
+            if result.skipped:
+                message = skipped_reason or "Assessments already synced"
+
             store.update(
                 job.job_id,
                 status=JobStatus.SUCCESS,
@@ -257,6 +266,8 @@ def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
                     "local_path": str(local_path),
                     "remote_path": str(remote_path) if remote_path else None,
                     "skipped": result.skipped,
+                    "skipped_reason": skipped_reason or None,
+                    "skipped_code": skipped_code or None,
                 },
             )
         except Exception as exc:  # pragma: no cover - defensive
