@@ -415,7 +415,7 @@ from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
 # from Projects.initbinder.utils.make_rfa_rf2 import make_rfa_rf2_command
 from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
 from assess_rfa_design import assess_rfa_all
-from decide_scope import llm_scope, submit_llm_scope_job
+from decide_scope import llm_scope
 from target_generation import run_target_generation
 from utils import (
     DEFAULT_NANOBODY_FRAMEWORK,
@@ -431,6 +431,12 @@ from collections import defaultdict
 import numpy as np
 
 import subprocess, shlex, time
+
+
+ASSESS_CONDA_ACTIVATE = os.environ.get(
+    "ASSESS_RFA_CONDA_ACTIVATE",
+    "source ~/.bashrc && conda activate takashi",
+).strip()
 
 def _sbatch(path: Path, extra_env: dict[str,str] = None, dep: str | None = None) -> str:
     env_export = ""
@@ -538,6 +544,13 @@ def _write_assess_rfa_all_sbatch(
 
     scripts: dict[str, Path | None] = {"launch": None, "primary": None, "merge": None}
 
+    conda_lines: list[str] = []
+    if ASSESS_CONDA_ACTIVATE:
+        conda_lines = [
+            "echo \"[assess] activating conda environment\"",
+            ASSESS_CONDA_ACTIVATE,
+        ]
+
     if use_array:
         array_name = f"{job_base}_array"
         array_script = job_dir / f"submit_{array_name}_{ts}.sh"
@@ -554,8 +567,8 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{array_name}_%A_%a.out",
             f"#SBATCH --error=slurm_logs/{array_name}_%A_%a.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess][array] shard ${{SLURM_ARRAY_TASK_ID}}/{0}\"".format(effective_shard_mod),
             run_cmd,
             "echo \"[assess][array] done $(date)\"",
@@ -581,8 +594,8 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{merge_name}_%j.out",
             f"#SBATCH --error=slurm_logs/{merge_name}_%j.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess][merge] start $(date)\"",
             merge_cmd,
             "echo \"[assess][merge] done $(date)\"",
@@ -594,7 +607,6 @@ def _write_assess_rfa_all_sbatch(
         launch_script = launch_dir / f"launch_{job_base}_{ts}.sh"
         launch_lines = [
             "#!/bin/bash",
-            "set -euo pipefail",
             f'echo "[launch] sbatch {array_script.name}"',
             f"jid_array=$(sbatch {shlex.quote(str(array_script))} | awk '{{print $4}}')",
             'echo "[launch] submitted array job ${jid_array}"',
@@ -620,8 +632,8 @@ def _write_assess_rfa_all_sbatch(
             f"#SBATCH --output=slurm_logs/{job_name}_%j.out",
             f"#SBATCH --error=slurm_logs/{job_name}_%j.err",
             "",
-            "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess] host: $(hostname)\"",
             "echo \"[assess] start: $(date)\"",
             run_cmd,
@@ -634,7 +646,6 @@ def _write_assess_rfa_all_sbatch(
         launch_script = launch_dir / f"launch_{job_name}_{ts}.sh"
         launch_lines = [
             "#!/bin/bash",
-            "set -euo pipefail",
             f'echo "[launch] sbatch {job_script.name}"',
             f"jid=$(sbatch {shlex.quote(str(job_script))} | awk '{{print $4}}')",
             'echo "[launch] submitted job ${jid}"',
@@ -689,6 +700,8 @@ def main():
     p_init.add_argument("--chain", help="Optional: Specify a target chain ID to focus on (e.g., 'A').")
     p_init.add_argument("--target_name", help="Optional: Specify the exact name of the target protein.")
     p_init.add_argument("--antigen_url", help="Optional: URL to a Sino Biological antigen page for verification.")
+    p_init.add_argument("--force", action="store_true",
+                        help="Reinitialize target even if files already exist (overwrites metadata).")
 
     p_scope = sub.add_parser("decide-scope", help="Use an LLM to help define the project scope.")
     p_scope.add_argument("pdb", help="Target PDB ID.")
@@ -814,6 +827,8 @@ def main():
         help="If set, keep glycans when cropping.")
     p_pipe.add_argument("--run_tag", default=os.environ.get("RUN_TAG"),
                     help="Run label to isolate outputs, e.g. 20250828a")
+    p_pipe.add_argument("--run_assess", action="store_true",
+                        help="If set, schedule assess-rfa-all after AF3 jobs finish.")
 
     p_follow = sub.add_parser("followup", help="Pick top arms from latest AF3 TSV and rerun RFdiffusion→MPNN→AF3.")
     p_follow.add_argument("pdb"); p_follow.add_argument("--total", type=int, default=1000)
@@ -855,15 +870,21 @@ def main():
                     init_target(c.chosen_pdb)
 
     elif args.cmd == "init-target":
-        init_target(args.pdb, chain_id=args.chain, target_name=args.target_name, antigen_url=args.antigen_url)
+        init_target(
+            args.pdb,
+            chain_id=args.chain,
+            target_name=args.target_name,
+            antigen_url=args.antigen_url,
+            force=getattr(args, "force", False),
+        )
 
     elif args.cmd == "decide-scope":
         if getattr(args, "submit", False):
             print("[info] dispatching LLM scope to GPU via sbatch …")
-            submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb,
-                                 expected_epitopes=args.expected_epitopes,
-                                 max_llm_retries=args.max_llm_retries,
-                                 force=args.force)
+            # submit_llm_scope_job(args.pdb, time_h=args.time_h, mem_gb=args.mem_gb,
+            #                      expected_epitopes=args.expected_epitopes,
+            #                      max_llm_retries=args.max_llm_retries,
+            #                      force=args.force)
         else:
             llm_scope(args.pdb, expected_epitopes=args.expected_epitopes,
                       max_llm_retries=args.max_llm_retries,
@@ -1179,6 +1200,46 @@ def main():
         model_seeds = args.model_seeds or list(range(1, 11))
         print("[plan] pipeline:", ", ".join(f"{e}@{v}={n}" for (e,v),n in zip(arms,allocs)))
 
+        total_designs = sum(allocs)
+
+        assess_job_info = None
+        assess_job_script: Path | None = None
+        assess_merge_script: Path | None = None
+        assess_job_id: str | None = None
+        assess_merge_job_id: str | None = None
+        assess_run_label: str | None = None
+        assess_shards = 1
+        stage2_job_ids: list[str] = []
+        if args.run_assess:
+            assess_run_label = args.run_tag or time.strftime("pipeline_%Y%m%d_%H%M%S")
+            assess_include_kw = args.run_tag or assess_run_label
+            assess_shards = max(1, math.ceil(total_designs / 1000))
+            assess_job_info = _write_assess_rfa_all_sbatch(
+                args.pdb,
+                binder_chain_id=args.binder_chain_id,
+                run_label=assess_run_label,
+                include_keyword=assess_include_kw,
+                seed=None,
+                sample_idx=None,
+                rank_by="ranking_score",
+                skip_pml=True,
+                skip_seq=False,
+                time_h=24,
+                mem_gb=8,
+                cpus=2,
+                shard_mod=assess_shards,
+                shard_idx=None,
+                array_size=assess_shards,
+            )
+            assess_job_script = assess_job_info.get("primary") if assess_job_info else None
+            assess_merge_script = assess_job_info.get("merge") if assess_job_info else None
+            if assess_job_script is None:
+                raise RuntimeError("Failed to prepare assess-rfa-all sbatch script")
+            print(
+                f"[plan] assess-rfa-all will run after AF3 (run_label={assess_run_label}, "
+                f"shards={assess_shards}, total_designs={total_designs})"
+            )
+
         rfd_scripts, mpnn_scripts, af3_scripts = {}, {}, {}
         for (ep, var), n in zip(arms, allocs):
             rfd = make_rfa_rfdiffusion_command(
@@ -1214,6 +1275,7 @@ def main():
                 extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
                 dep=f"afterok:{jid_mpnn}:{seed_jid}"
             )
+            stage2_job_ids.append(jid_af3s2)
             job_table.append((first_arm, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
 
             for arm_key in [k for k in rfd_scripts.keys() if k != first_arm]:
@@ -1224,15 +1286,47 @@ def main():
                     extra_env={"DESIGNS_PER_TASK": str(args.designs_per_task)},
                     dep=f"afterok:{jid_mpnn}:{seed_jid}"
                 )
+                stage2_job_ids.append(jid_af3s2)
                 job_table.append((arm_key, jid_rfd, jid_mpnn, seed_jid, jid_af3s2))
+
+            if args.run_assess and assess_job_script:
+                if stage2_job_ids:
+                    dep_str = ":".join(stage2_job_ids)
+                    assess_job_id = _sbatch(assess_job_script, dep=f"afterok:{dep_str}")
+                    print(
+                        f"[submit] assess-rfa-all array -> job {assess_job_id} "
+                        f"(shards={assess_shards}, deps={len(stage2_job_ids)})"
+                    )
+                    if assess_merge_script and assess_shards > 1:
+                        assess_merge_job_id = _sbatch(
+                            assess_merge_script,
+                            dep=f"afterok:{assess_job_id}",
+                        )
+                        print(
+                            f"[submit] assess-rfa-all merge -> job {assess_merge_job_id} (dep={assess_job_id})"
+                        )
+                else:
+                    print("[warn] No AF3 Stage2 jobs recorded; skipping assess-rfa-all submission.")
 
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
             ts = time.strftime("%Y%m%d_%H%M%S")
             tsv = led/f"jobs_{args.pdb}_{ts}.tsv"
             with tsv.open("w") as f:
-                f.write("arm\trfd_jid\tmpnn_jid\taf3_stage1_jid\taf3_stage2_jid\n")
-                for row in job_table:
-                    f.write("\t".join(map(str, row)) + "\n")
+                headers = ["arm","rfd_jid","mpnn_jid","af3_stage1_jid","af3_stage2_jid"]
+                if args.run_assess:
+                    headers.append("assess_array_jid")
+                    if assess_merge_job_id:
+                        headers.append("assess_merge_jid")
+                    headers.append("assess_shards")
+                f.write("\t".join(headers) + "\n")
+                for idx, row in enumerate(job_table):
+                    values = list(map(str, row))
+                    if args.run_assess:
+                        values.append(assess_job_id if idx == 0 and assess_job_id else "")
+                        if assess_merge_job_id:
+                            values.append(assess_merge_job_id if idx == 0 else "")
+                        values.append(str(assess_shards) if idx == 0 else "")
+                    f.write("\t".join(values) + "\n")
             print(f"[ok] Submitted pipeline; job ledger at {tsv}")
         else:
             led = ROOT/"tools"/"launchers"; _ensure_dir(led)
@@ -1240,20 +1334,61 @@ def main():
             launch = led/f"launch_pipeline_{args.pdb}_{ts}.sh"
             lines = ["#!/bin/bash", "set -euo pipefail"]
             first_arm = next(iter(rfd_scripts))
+            first_rfd_name = rfd_scripts[first_arm]["script"].name
+            first_mpnn_name = mpnn_scripts[first_arm]["script"].name
+            first_af3_stage1_name = af3_scripts[first_arm]["script_stage1"].name
+            first_af3_stage2_name = af3_scripts[first_arm]["script_stage2"].name
             lines.extend([
                 f'echo "[LAUNCH] {first_arm} (with shared AF3 seed)"',
                 f'jid_rfd_0=$(sbatch {rfd_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_rfd_name} -> ${{jid_rfd_0}}"',
+                'echo "Submitted batch job ${jid_rfd_0}"',
                 f'jid_mpnn_0=$(sbatch --dependency=afterok:${{jid_rfd_0}} {mpnn_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_mpnn_name} -> ${{jid_mpnn_0}}"',
+                'echo "Submitted batch job ${jid_mpnn_0}"',
                 f'jid_seed=$(sbatch --dependency=afterok:${{jid_mpnn_0}} {af3_scripts[first_arm]["script_stage1"]} | awk \'{{print $4}}\')',
-                f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')'
+                f'echo "[launch] {first_af3_stage1_name} -> ${{jid_seed}}"',
+                'echo "Submitted batch job ${jid_seed}"',
+                f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')',
+                f'echo "[launch] {first_af3_stage2_name} -> ${{jid_af3s2_0}}"',
+                'echo "Submitted batch job ${jid_af3s2_0}"'
             ])
+            if args.run_assess:
+                lines.append('deps_assess="${jid_af3s2_0}"')
             for idx, arm_key in enumerate([k for k in rfd_scripts.keys() if k != first_arm], start=1):
+                rfd_name = rfd_scripts[arm_key]["script"].name
+                mpnn_name = mpnn_scripts[arm_key]["script"].name
+                af3_stage2_name = af3_scripts[arm_key]["script_stage2"].name
                 lines.extend([
                     f'echo "[LAUNCH] {arm_key} (reuse shared AF3 seed)"',
                     f'jid_rfd_{idx}=$(sbatch {rfd_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+                    f'echo "[launch] {rfd_name} -> ${{jid_rfd_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_rfd_{idx}}}"',
                     f'jid_mpnn_{idx}=$(sbatch --dependency=afterok:${{jid_rfd_{idx}}} {mpnn_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
-                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')'
+                    f'echo "[launch] {mpnn_name} -> ${{jid_mpnn_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_mpnn_{idx}}}"',
+                    f'DESIGNS_PER_TASK={args.designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')',
+                    f'echo "[launch] {af3_stage2_name} -> ${{jid_af3s2_{idx}}}"',
+                    f'echo "Submitted batch job ${{jid_af3s2_{idx}}}"'
                 ])
+                if args.run_assess:
+                    lines.append(f'deps_assess="${{deps_assess}}:${{jid_af3s2_{idx}}}"')
+            if args.run_assess and assess_job_script:
+                assess_path = shlex.quote(str(assess_job_script))
+                assess_merge_path = shlex.quote(str(assess_merge_script)) if assess_merge_script else None
+                lines.extend([
+                    'if [ -z "${deps_assess:-}" ]; then',
+                    '  echo "[launch] No AF3 Stage2 job IDs recorded; skipping assess-rfa-all submission."',
+                    'else',
+                    f'  jid_assess=$(sbatch --dependency=afterok:${{deps_assess}} {assess_path} | awk \'{{print $4}}\')',
+                    f'  echo "[launch] assess-rfa-all ({assess_run_label}, shards={assess_shards}) -> ${{jid_assess}}"',
+                ])
+                if assess_merge_path and assess_shards > 1:
+                    lines.extend([
+                        f'  jid_assess_merge=$(sbatch --dependency=afterok:${{jid_assess}} {assess_merge_path} | awk \'{{print $4}}\')',
+                        '  echo "[launch] assess-rfa-all merge -> ${jid_assess_merge}"'
+                    ])
+                lines.append('fi')
             Path(launch).write_text("\n".join(lines) + "\n"); os.chmod(launch, 0o755)
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")
 

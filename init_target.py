@@ -1,4 +1,4 @@
-from utils import _ensure_dir, ROOT, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
+from utils import _ensure_dir, ROOT, TARGETS_ROOT_LOCAL, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
 import requests
 import yaml
 from Bio.PDB import PDBIO, PDBParser
@@ -9,7 +9,15 @@ from Bio.PDB.Polypeptide import three_to_index, index_to_one
 from playwright.sync_api import sync_playwright
 from typing import Iterable, Optional
 
-from sequence_alignment import AlignmentResult, align_vendor_to_chains
+from sequence_alignment import AlignmentResult, biotite_local_alignments, extract_subsequence
+from bioseq_fetcher import fetch_sequence
+from target_generation import (
+    fetch_product_html,
+    analyze_product_page_with_llm,
+    MAX_BODY_CHARS_PER_PAGE,
+    _extract_body_text,
+    USE_LLM,
+)
 
 
 def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
@@ -64,7 +72,13 @@ def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
 
     return mapping
 
-def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | None = None, antigen_url: str = ""):
+def init_target(
+    pdb_id: str,
+    chain_id: str | None = None,
+    target_name: str | None = None,
+    antigen_url: str = "",
+    force: bool = False,
+):
     """Downloads PDB data and creates the initial directory structure.
 
     Required:
@@ -77,7 +91,9 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
 
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
-    tdir = ROOT/"targets"/pdb_id.upper()
+    if force:
+        print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
+    tdir = ROOT/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
 
     for url, out in [
@@ -158,7 +174,8 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
 
     # Vendor-specific verification (Sino Biological)
     chosen_chains: list[str] = []
-    accession_id, accession_seq = "", ""
+    accession_id, accession_seq, expressed_seq = "", "", ""
+    vendor_range: Optional[tuple[int, int]] = None
     alignment_summary: Optional[AlignmentResult] = None
 
     if "sinobiological.com" in antigen_url:
@@ -168,6 +185,7 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
             accession_id = verification_result.get("accession", "") or ""
             accession_seq = verification_result.get("full_sequence", "") or ""
             vendor_range = verification_result.get("vendor_range")
+            expressed_seq = verification_result.get("expressed_sequence", "") or ""
             if alignment_summary:
                 chosen_chains = list(alignment_summary.chain_ids)
                 overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
@@ -183,8 +201,24 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
         config["sequences"]["accession"]["id"] = accession_id
     if accession_seq:
         config["sequences"]["accession"]["aa"] = accession_seq
+    accession_block = config["sequences"]["accession"]
+    if vendor_range:
+        accession_block["expressed_range"] = f"{vendor_range[0]}-{vendor_range[1]}"
+    else:
+        accession_block.pop("expressed_range", None)
+    if expressed_seq:
+        accession_block["expressed_aa"] = expressed_seq
+    else:
+        accession_block.pop("expressed_aa", None)
     if alignment_summary:
         config["sequences"]["alignment"] = _alignment_result_to_yaml(alignment_summary)
+
+    if verification_result:
+        vendor_meta: dict = config.setdefault("vendor_metadata", {})
+        if verification_result.get("expression_host"):
+            vendor_meta["expression_host"] = verification_result["expression_host"]
+        if verification_result.get("tags"):
+            vendor_meta["tags"] = verification_result["tags"]
 
     normalized_chosen = _normalize_chain_ids(chosen_chains)
 
@@ -203,21 +237,8 @@ def init_target(pdb_id: str, chain_id: str | None = None, target_name: str | Non
     # Save updated YAML
     with yml_path.open('w') as f:
         yaml.safe_dump(config, f, sort_keys=False)
-    print(f"[ok] Updated {yml_path.name} with antigen_catalog_url, sequences.*, and target_chains.")
+    print(f"[ok] Updated {yml_path} with antigen_catalog_url, sequences.*, and target_chains.")
 
-
-def _get_ncbi_sequence(accession: str) -> str:
-    """Fetches a protein sequence from NCBI given a RefSeq accession."""
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    params = {"db": "protein", "id": accession, "rettype": "fasta", "retmode": "text"}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        lines = r.text.strip().split('\n')
-        return "".join(line.strip() for line in lines if not line.startswith('>'))
-    except requests.RequestException as e:
-        print(f"Error fetching sequence for {accession} from NCBI: {e}")
-        return ""
 
 
 def _alignment_result_to_yaml(aln: AlignmentResult) -> dict:
@@ -295,46 +316,102 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> tuple[dict[str, str], dict[str, 
         break
     return sequences, residue_numbers
 
-def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
-    """Return verification details with multi-chain alignment against the vendor construct."""
-    print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
 
-    # 1. Parse Sino page (get accession + vendor residue range)
-    print(f"[1/5] Parsing vendor page with headless browser: {antigen_url}")
+def _analyze_sino_product(url: str, gene_hint: Optional[str] = None, protein_name: Optional[str] = None):
+    if not url:
+        return None
+    html_path = fetch_product_html(url)
+    if not html_path:
+        return None
+    try:
+        html_text = Path(html_path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    body_text = _extract_body_text(html_text, max_chars=MAX_BODY_CHARS_PER_PAGE)
+    if not USE_LLM:
+        return None
+    return analyze_product_page_with_llm(body_text, gene_hint or "", protein_name or "")
+
+
+def _legacy_parse_sino_page(antigen_url: str) -> Optional[tuple[str, tuple[int, int]]]:
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
-            page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            page = browser.new_page(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/114.0.0.0 Safari/537.36"
+                )
+            )
             page.goto(antigen_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
             html_content = page.content()
             browser.close()
         soup = BeautifulSoup(html_content, "lxml")
         pc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Protein Construction\s*'))
-        if not pc_header:
-            raise ValueError("Could not find 'Protein Construction' section.")
-        pc_text = pc_header.find_next_sibling('div').text.strip()
         acc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Accession#\s*'))
-        if not acc_header:
-            raise ValueError("Could not find 'Accession#' section.")
-        accession = acc_header.find_next_sibling('div').text.strip()
-        match = re.search(r'\((?:[A-Za-z]{3})?(\d+)-([A-Za-z]{3})?(\d+)\)', pc_text)
+        if not pc_header or not acc_header:
+            return None
+        pc_text = pc_header.find_next_sibling('div').get_text(strip=True)
+        accession = acc_header.find_next_sibling('div').get_text(strip=True)
+        match = re.search(r'(\d+)\s*-\s*(\d+)', pc_text)
         if not match:
-            raise ValueError("Could not parse residue boundaries from 'Protein Construction' text.")
-        groups = [g for g in match.groups() if g and g.isdigit()]
-        v_start, v_end = int(groups[0]), int(groups[1])
-        vendor_range = (v_start, v_end)
-        print(f"[ok] Found Accession: {accession}, Vendor Range: {v_start}-{v_end}")
-    except Exception as e:
-        print(f"[fail] Could not process vendor page: {e}")
+            return None
+        v_start, v_end = int(match.group(1)), int(match.group(2))
+        return accession, (v_start, v_end)
+    except Exception:
         return None
+
+
+def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
+    """Return verification details with multi-chain alignment against the vendor construct."""
+    print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
+
+    # 1. Parse Sino page with shared analysis helper (fallback to legacy parsing)
+    print(f"[1/5] Parsing vendor page with LLM helper: {antigen_url}")
+    analysis = _analyze_sino_product(antigen_url)
+    if analysis and getattr(analysis, "error", None):
+        print(f"[warn] LLM analysis message: {analysis.error}")
+    accession = (getattr(analysis, "accession", "") or "").strip() if analysis else ""
+    vendor_range = None
+    if analysis and isinstance(getattr(analysis, "aa_start", None), int) and isinstance(getattr(analysis, "aa_end", None), int):
+        vendor_range = (int(analysis.aa_start), int(analysis.aa_end))
+    expressed_seq = ((analysis.expressed_sequence or "") if analysis and getattr(analysis, "expressed_sequence", None) else "").replace("\n", "").strip().upper()
+    expression_host = getattr(analysis, "expression_host", None) if analysis else None
+    tags = getattr(analysis, "tags", None) if analysis else None
+
+    if not accession or not (vendor_range or expressed_seq):
+        print("[warn] LLM analysis missing accession or range; trying legacy parser.")
+        legacy = _legacy_parse_sino_page(antigen_url)
+        if not legacy:
+            print("[fail] Could not extract accession/range from vendor page.")
+            return None
+        accession, vendor_range = legacy
+        if analysis:
+            analysis.accession = accession
+            analysis.aa_start, analysis.aa_end = vendor_range
+            analysis.expressed_sequence = None
+        print(f"[ok] Legacy parser recovered accession {accession} and range {vendor_range[0]}-{vendor_range[1]}")
+    else:
+        rng_desc = f"{vendor_range[0]}-{vendor_range[1]}" if vendor_range else "LLM expressed sequence"
+        print(f"[ok] LLM analysis accession={accession}, range={rng_desc}")
+
+    if not expression_host and analysis:
+        expression_host = getattr(analysis, "expression_host", None)
+    if not tags and analysis:
+        tags = getattr(analysis, "tags", None)
 
     # 2. Fetch NCBI sequence
     print(f"[2/5] Fetching sequence for {accession} from NCBI...")
     try:
-        full_ncbi_seq = _get_ncbi_sequence(accession)
+        full_ncbi_seq = fetch_sequence(accession) or ""
         if not full_ncbi_seq:
-            raise ValueError("Got empty sequence from NCBI.")
-        print(f"[ok] Fetched NCBI sequence (length {len(full_ncbi_seq)}).")
+            raise ValueError("Got empty sequence from fetcher.")
+        print(f"[ok] Fetched sequence (length {len(full_ncbi_seq)}).")
     except Exception as e:
         print(f"[fail] Could not fetch NCBI sequence: {e}")
         return None
@@ -360,31 +437,45 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
             print(f"[info] User-specified chains in target.yaml: {user_chains}")
     print(f"[debug] Available PDB chains: {list(pdb_sequences.keys())}")
 
-    # 4. Run mismatch-tolerant, multi-chain alignments
-    print("[4/5] Running global alignments across chain combinations (allowing mismatches)...")
-    alignments = align_vendor_to_chains(
-        full_ncbi_seq,
-        pdb_sequences,
-        vendor_range=vendor_range,
-        max_chain_combo=3,
-        min_alignment_length=10,
-        chain_residue_numbers=pdb_residue_numbers,
-    )
+    if not expressed_seq:
+        expressed_seq = extract_subsequence(full_ncbi_seq, vendor_range) if vendor_range else full_ncbi_seq
+    expressed_len = len(expressed_seq)
+    if not expressed_seq:
+        if vendor_range:
+            print(f"[fail] Expressed sequence slice {vendor_range[0]}-{vendor_range[1]} is empty; cannot continue.")
+        else:
+            print("[fail] Vendor sequence is empty; cannot continue.")
+        return None
+    if vendor_range:
+        print(f"[info] Vendor expressed sequence length {expressed_len} (positions {vendor_range[0]}-{vendor_range[1]}).")
+    else:
+        print(f"[info] Vendor expressed sequence length {expressed_len} (full accession range).")
+
+    # 4. Locate alignments for the expressed sequence
+    print("[4/5] Searching for alignments between expressed sequence and PDB chains...")
+    try:
+        alignments = biotite_local_alignments(
+            expressed_seq,
+            pdb_sequences,
+            vendor_range=vendor_range,
+            chain_residue_numbers=pdb_residue_numbers,
+        )
+    except ImportError as exc:
+        print(f"[fail] {exc}")
+        return None
+    except ValueError as exc:
+        print(f"[fail] {exc}")
+        return None
     if not alignments:
-        print("[fail] No chain combination aligned to the vendor construct with sufficient coverage.")
+        print("[fail] No suitable alignment found between expressed sequence and any PDB chain.")
         return None
 
-    best_alignment = alignments[0]
+    preferred = [aln for aln in alignments if any(cid in user_chains for cid in aln.chain_ids)] if user_chains else []
+    best_alignment = preferred[0] if preferred else alignments[0]
     chain_label = ",".join(best_alignment.chain_ids)
-    print(f"[ok] Best alignment uses chain(s) {chain_label} with identity {best_alignment.identity:.2%} and coverage {best_alignment.coverage:.2%}.")
-    top_preview = min(3, len(alignments))
-    if top_preview > 1:
-        print("    Top alignment candidates:")
-        for idx, cand in enumerate(alignments[:top_preview], start=1):
-            print(
-                f"      {idx}) chains={','.join(cand.chain_ids)} identity={cand.identity:.2%} "
-                f"coverage={cand.coverage:.2%} aligned={cand.aligned_length} mismatches={cand.mismatches}"
-            )
+    print(f"[ok] Found alignment on chain(s) {chain_label}.")
+    if len(alignments) > 1:
+        print(f"    Additional alignments: {len(alignments) - 1}")
 
     # 5. Summarize overlap against vendor construct
     print("[5/5] Summarizing vendor/PDB overlap...")
@@ -407,7 +498,11 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
     print("\n--- Verification Summary ---")
     print(f"  - Selected Chains:                  {chain_label}")
     print(f"  - Identity / Coverage:              {best_alignment.identity:.2%} / {best_alignment.coverage:.2%}")
-    print(f"  - Vendor Product Range:             {v_start}-{v_end}")
+    if vendor_range:
+        v_start, v_end = vendor_range
+        print(f"  - Vendor Product Range:             {v_start}-{v_end}")
+    else:
+        print("  - Vendor Product Range:             (not specified)")
     if overlap_range:
         print(f"  - Vendor Overlap Range:             {overlap_range[0]}-{overlap_range[1]} (len {overlap_len})")
     elif best_alignment.vendor_aligned_range:
@@ -421,5 +516,8 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         "alignment": best_alignment,
         "accession": accession,
         "full_sequence": full_ncbi_seq,
+        "expressed_sequence": expressed_seq,
         "vendor_range": vendor_range,
+        "expression_host": expression_host,
+        "tags": tags,
     }

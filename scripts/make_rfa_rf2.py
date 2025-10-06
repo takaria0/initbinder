@@ -1,6 +1,15 @@
 import os, re, math, json, yaml, textwrap
 from pathlib import Path
-from utils import _ensure_dir, ROOT, RFANTIBODY_REPO_PATH, SINGULARITY_IMAGE_PATH, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE
+from utils import (
+    _ensure_dir,
+    ROOT,
+    TARGETS_ROOT,
+    RFANTIBODY_REPO_PATH,
+    SINGULARITY_IMAGE_PATH,
+    SLURM_GPU_PARTITION,
+    SLURM_ACCOUNT,
+    SLURM_GPU_TYPE,
+)
 
 
 
@@ -8,7 +17,7 @@ from utils import _ensure_dir, ROOT, RFANTIBODY_REPO_PATH, SINGULARITY_IMAGE_PAT
 def make_rfa_rf2_command(pdb_id: str, epitope: str):
     """Generates a SLURM script to run RFAntibody's RF2 prediction for filtering."""
     print(f"--- Generating RFAntibody-RF2 Command for Epitope: {epitope} ---")
-    tdir = ROOT/"targets"/pdb_id.upper()
+    tdir = TARGETS_ROOT/pdb_id.upper()
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
 
     mpnn_dir = tdir/"designs"/name_sanitized/"rfa_mpnn"

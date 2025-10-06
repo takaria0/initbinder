@@ -20,7 +20,7 @@ from Bio import pairwise2
 from jsonschema import validate
 from datetime import datetime
 
-from utils import _ensure_dir, ROOT, SCHEMA
+from utils import _ensure_dir, ROOT, SCHEMA, TARGETS_ROOT
 
 # =========================
 # Amino-acid mapping (3->1)
@@ -820,7 +820,7 @@ def build_pymol_gallery_from_rankings(
 ):
     import csv, shutil
 
-    tdir = ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / pdb_id.upper()
     rankings_tsv = Path(rankings_tsv)
     assert rankings_tsv.exists(), f"rankings TSV not found: {rankings_tsv}"
 
@@ -828,11 +828,13 @@ def build_pymol_gallery_from_rankings(
     if not prepared_pdb.exists():
         raise FileNotFoundError(f"Missing prepared target: {prepared_pdb}")
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    bundle_dir = tdir / "designs" / "_assessments" / f"gallery_{stamp}"
-    models_dir = bundle_dir / "models"; _ensure_dir(models_dir)
-    pml_path   = bundle_dir / "gallery.pml"
-    readme     = bundle_dir / "README.txt"
+    bundle_dir = rankings_tsv.parent / "gallery"
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    models_dir = bundle_dir / "models"
+    _ensure_dir(models_dir)
+    pml_path = bundle_dir / "gallery.pml"
+    readme = bundle_dir / "README.txt"
     _ensure_dir(bundle_dir)
 
     rows = []
@@ -1209,7 +1211,7 @@ def assess_rfa_all(
         pass
 
     print(f"=== Assessing all designs for target {pdb_id} ===")
-    tdir = ROOT / "targets" / pdb_id.upper()
+    tdir = TARGETS_ROOT / pdb_id.upper()
     cfg = yaml.safe_load((tdir / "target.yaml").read_text()); validate(cfg, SCHEMA)
 
     prepared_pdb = tdir / "prep" / "prepared.pdb"

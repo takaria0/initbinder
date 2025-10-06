@@ -1,12 +1,21 @@
 import os, re, math, json, yaml, textwrap
 from pathlib import Path
-from utils import _ensure_dir, ROOT, RFANTIBODY_REPO_PATH, SINGULARITY_IMAGE_PATH, SLURM_GPU_PARTITION, SLURM_ACCOUNT, SLURM_GPU_TYPE
+from utils import (
+    _ensure_dir,
+    ROOT,
+    TARGETS_ROOT,
+    RFANTIBODY_REPO_PATH,
+    SINGULARITY_IMAGE_PATH,
+    SLURM_GPU_PARTITION,
+    SLURM_ACCOUNT,
+    SLURM_GPU_TYPE,
+)
 
 
 def make_rfa_proteinmpnn_command(pdb_id: str, epitope: str, num_seq: int, temp: float,
                                  hotspot_variant: str = "A", defer_inputs: bool = True, run_tag: str | None = None):
     print(f"--- Generating RFAntibody-ProteinMPNN Command for Epitope: {epitope} ---")
-    tdir = ROOT/"targets"/pdb_id.upper()
+    tdir = TARGETS_ROOT/pdb_id.upper()
     name_sanitized = epitope.replace(" ", "_").replace("/", "_")
     arm_dir   = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
     # rfdiff_dir = arm_dir/"rfa_rfdiff"

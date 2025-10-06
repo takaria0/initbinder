@@ -77,7 +77,9 @@ from pprint import pformat
 from bs4 import BeautifulSoup
 import requests
 import yaml
-from sequence_alignment import AlignmentMutation, align_vendor_to_chains
+from sequence_alignment import AlignmentMutation, biotite_local_alignments, extract_subsequence
+from bioseq_fetcher import fetch_sequence
+from utils import ROOT, _ensure_dir, TARGETS_ROOT_LOCAL
 
 # --- LLM Configuration (Google Gemini) ---
 USE_LLM = True
@@ -115,13 +117,12 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # -------------------- Paths & Caching --------------------
-ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / "cache" / "target_generation"
 CATALOG_DIR = ROOT / "targets_catalog"
-TARGETS_DIR = ROOT / "targets"
+TARGETS_DIR = TARGETS_ROOT_LOCAL
 LOG_DIR = CACHE_DIR / "logs"
 for p in (CACHE_DIR, CATALOG_DIR, TARGETS_DIR, LOG_DIR):
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(p)
 
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_TAG = f"run_{RUN_TS}"
@@ -148,9 +149,6 @@ MIN_IDENTITY_SOFT = 0.95
 UNIPROT_GET = "https://rest.uniprot.org/uniprotkb/{acc}"
 UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
 RCSB_ENTRY = "https://data.rcsb.org/rest/v1/core/entry/{pdb}"
-NCBI_REQUEST_DELAY = 1.0  # Delay in seconds to avoid hitting NCBI rate limits (3 requests/sec)
-
-
 # -------------------- Helpers --------------------
 def _cache_key(url: str, params: Optional[dict] = None) -> Path:
     h = hashlib.sha256()
@@ -590,19 +588,12 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
 
 # -------------------- PDB helpers --------------------
 def _get_ncbi_sequence(accession: str) -> str:
-    time.sleep(NCBI_REQUEST_DELAY)  # <-- ADDED: Throttle requests to NCBI
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    params = {"db": "protein", "id": accession, "rettype": "fasta", "retmode": "text"}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        lines = r.text.strip().split('\n')
-        seq = "".join(line.strip() for line in lines if not line.startswith('>'))
+    seq = fetch_sequence(accession) or ""
+    if seq:
         log_debug(f"[ncbi] fetched {accession}, len={len(seq)}")
-        return seq
-    except requests.RequestException as e:
-        log_info(f"[warn] NCBI fetch failed for {accession}: {e}")
-        return ""
+    else:
+        log_info(f"[warn] Unable to resolve sequence for {accession}")
+    return seq
 
 def _entity_ids(entry_json: dict) -> List[str]:
     return (entry_json.get("rcsb_entry_container_identifiers") or {}).get("polymer_entity_ids", []) or []
@@ -759,12 +750,14 @@ def _compute_matches_for_antigen(pdb_ids: List[str], antigen: AntigenOption) -> 
         if not chain_sequences:
             continue
 
-        alignments = align_vendor_to_chains(
-            ncbi_seq,
+        partial_seq = extract_subsequence(ncbi_seq, vendor_range) if vendor_range else ncbi_seq
+
+        alignments = biotite_local_alignments(
+            partial_seq,
             chain_sequences,
             vendor_range=vendor_range,
-            max_chain_combo=3,
-            min_alignment_length=10,
+            min_identity=MIN_IDENTITY_SOFT,
+            min_aligned_length=10,
         )
 
         for alignment in alignments:

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>InitBinder Pipeline UI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="main-content">
+        <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
+        <header class="page-header">
+          <div>
+            <h1>InitBinder Pipeline Control Center</h1>
+            <p>End-to-end orchestration of target preparation, design submission, and assessment with visual QA.</p>
+          </div>
+          <label class="debug-toggle">
+            <input type="checkbox" id="debug-toggle">
+            <span>Enable debug controls</span>
+          </label>
+        </header>
+
+        <section id="target-setup">
+        <h2>Target Setup</h2>
+        <div class="preset-strip">
+          <div class="preset-strip-header">
+            <span>Saved target pairs</span>
+            <button type="button" id="presets-refresh" class="debug-only">Refresh</button>
+          </div>
+          <div id="preset-list" class="chip-row" role="list"></div>
+        </div>
+        <form id="target-form">
+          <input type="hidden" id="preset-id">
+          <div class="form-row">
+            <label for="pdb-id">PDB ID
+              <input id="pdb-id" name="pdb_id" type="text" maxlength="4" required placeholder="e.g. 6M17" autocomplete="off">
+            </label>
+            <label for="antigen-url">Antigen URL
+              <input id="antigen-url" name="antigen_url" type="text" placeholder="https://vendor/product">
+            </label>
+          </div>
+          <div class="form-row">
+            <label for="target-name">Preset name
+              <input id="target-name" type="text" placeholder="e.g. RBD">
+            </label>
+            <label for="target-epitopes">Number of epitopes
+              <input id="target-epitopes" type="number" min="1" max="32" value="3" autocomplete="off">
+            </label>
+          </div>
+          <div class="flex-row advanced-row debug-only">
+            <label><input type="checkbox" id="force-refresh"> Force refresh</label>
+            <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>
+            <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
+          </div>
+          <div class="flex-row" style="margin-top: 16px;">
+            <button type="submit" id="target-submit">Run again</button>
+            <span class="badge" id="target-status-badge" hidden>Idle</span>
+          </div>
+        </form>
+      </section>
+
+        <section id="target-insights">
+        <div class="insights-header">
+          <h2>Epitope &amp; Target Insights</h2>
+          <button type="button" id="pymol-hotspots" disabled>Visualize hotspots in PyMOL</button>
+        </div>
+        <div class="insights-grid">
+          <div class="insights-column">
+            <h3>Epitopes</h3>
+            <ul id="epitope-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>PDB Chains</h3>
+            <ul id="chain-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>Antigen Details</h3>
+            <dl id="antigen-details" class="insight-details"></dl>
+          </div>
+        </div>
+      </section>
+
+        <section id="alignment-section">
+        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
+          <h2>Vendor antigen and PDB sequence alignment</h2>
+          <button type="button" id="refresh-alignment">Refresh alignment</button>
+        </div>
+        <div id="alignment-meta" class="badge" hidden></div>
+        <div id="alignment-view" class="alignments" hidden></div>
+      </section>
+
+        <section id="design-config">
+        <h2>Design Run Configuration</h2>
+        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Arms and hotspot variants are detected automatically from the prepared target.</p>
+        <form id="design-form">
+          <div class="form-row">
+            <label>Total designs
+              <input type="number" id="design-total" value="90" min="1">
+            </label>
+            <label>Sequences per backbone
+              <input type="number" id="design-num-seq" value="1" min="1">
+            </label>
+            <label>Temperature
+              <input type="number" id="design-temp" value="0.1" min="0" max="1" step="0.05">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Run label
+              <input type="text" id="design-run-label" placeholder="optional tag">
+            </label>
+            <label class="debug-only">Binder chain ID
+              <input type="text" id="design-binder-chain" value="H" maxlength="1">
+            </label>
+            <label>AlphaFold 3 seed
+              <input type="number" id="design-af3-seed" value="1" min="0">
+            </label>
+          </div>
+          <div class="flex-row" style="margin-top: 8px;">
+            <button type="button" id="design-submit" disabled>Submit to cluster</button>
+            <span class="badge" id="design-status" hidden>Coming soon</span>
+          </div>
+        </form>
+      </section>
+
+        <section id="assessment-section">
+        <h2>Assessment</h2>
+        <div class="assessment-controls">
+          <label>
+            Run label
+            <input type="text" id="results-run-label" placeholder="latest" list="run-label-options">
+          </label>
+          <button type="button" id="assess-submit">Submit assess-all</button>
+        </div>
+        <div class="assessment-advanced debug-only">
+          <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
+          <button type="button" id="sync-results" class="debug-only">Download from cluster</button>
+          <p class="help-text">Use “Download from cluster” to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
+        </div>
+      </section>
+
+        <section id="results-section">
+        <div class="results-header">
+          <h2>Results</h2>
+          <div class="results-controls">
+            <span class="run-pill">Run <strong id="active-run-name">—</strong></span>
+            <label>
+              Row Limit
+              <input type="number" id="results-limit" value="200" min="1">
+            </label>
+          </div>
+        </div>
+        <datalist id="run-label-options"></datalist>
+        <div id="run-history" class="run-history"></div>
+        <div id="results-meta" class="badge" hidden></div>
+        <div id="binder-detail" class="alert success" hidden></div>
+        <div id="plot-container" style="margin-top: 16px;" hidden>
+          <canvas id="scatter-plot" width="720" height="360"></canvas>
+        </div>
+        <div class="table-scroll" style="margin-top: 16px;" hidden id="results-table-wrapper">
+          <div class="table-toolbar">
+            <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
+            <button type="button" id="export-open" disabled>Export…</button>
+          </div>
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th data-key="design_name">Design</th>
+                <th data-key="iptm" data-type="number">ipTM</th>
+                <th data-key="rmsd_diego" data-type="number">RMSD</th>
+                <th data-key="tm_score" data-type="number">TM-score</th>
+                <th data-key="metadata">Metadata</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      </div>
+
+      <aside id="jobs-sidebar">
+        <section class="sidebar-card selection-card" id="current-selection-card">
+          <h2>Current Target</h2>
+          <div class="selection-pill" id="current-selection-pdb">—</div>
+          <div class="selection-meta" id="current-selection-name">Preset: —</div>
+          <div class="selection-meta" id="current-selection-antigen">Antigen URL: —</div>
+        </section>
+        <section class="sidebar-card">
+          <div class="sidebar-header">
+            <h2>Job Activity</h2>
+            <button type="button" id="refresh-jobs">Refresh</button>
+          </div>
+          <div id="job-alert" class="alert" hidden></div>
+          <div class="status-log" id="job-log">Waiting for commands...</div>
+        </section>
+        <section class="sidebar-card" id="recent-jobs-card">
+          <h3>Recent Jobs</h3>
+          <ul id="job-list"></ul>
+        </section>
+      </aside>
+    </main>
+
+    <div id="export-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="export"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Export Options</h3>
+          <button type="button" id="export-close" class="ghost">Close</button>
+        </div>
+        <form id="export-form">
+          <div class="form-row">
+            <label>Top N designs
+              <input type="number" id="export-topn" value="48" min="1">
+            </label>
+            <label>Codon host
+              <select id="export-codon-host">
+                <option value="yeast" selected>Yeast</option>
+                <option value="ecoli">E. coli</option>
+                <option value="human">Human</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>GC target
+              <input type="number" id="export-gc" value="0.45" min="0" max="1" step="0.05">
+            </label>
+            <label>GC window
+              <input type="number" id="export-gc-window" value="100" min="1">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Prefix overhang
+              <input type="text" id="export-prefix" placeholder="optional">
+            </label>
+            <label>Suffix overhang
+              <input type="text" id="export-suffix" placeholder="optional">
+            </label>
+          </div>
+          <div class="modal-actions">
+            <label class="checkbox-inline"><input type="checkbox" id="export-dnachisel" checked> Codon optimize with DNA Chisel</label>
+            <button type="button" id="export-run" disabled>Generate exports</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>
