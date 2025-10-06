@@ -1007,8 +1007,17 @@ async function fetchRankings(options = {}) {
     el.resultsMeta.hidden = false;
   }
 
-  resetAnalysisPanel({ disableButton: true });
-  if (el.analysisRun) {
+  const requestedSignature = analysisSignature(
+    state.currentPdb,
+    runLabel || '',
+    state.rankingsResponse?.source_path || '',
+  );
+  const shouldPreserveAnalysis =
+    state.analysisContext && state.analysisContext.signature === requestedSignature;
+
+  if (!shouldPreserveAnalysis) {
+    resetAnalysisPanel({ disableButton: true });
+  } else if (el.analysisRun) {
     el.analysisRun.disabled = true;
   }
 
