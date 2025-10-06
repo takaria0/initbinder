@@ -1094,20 +1094,23 @@ function computeScatterLayout(points) {
     state.scatterLayout = [];
     return;
   }
-  const margin = { left: 48, right: 12, top: 12, bottom: 40 };
+  const margin = { left: 56, right: 16, top: 16, bottom: 48 };
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
-  const xs = filtered.map((p) => p.iptm);
-  const ys = filtered.map((p) => p.rmsd_diego);
+  const xs = filtered.map((p) => p.rmsd_diego);
+  const ys = filtered.map((p) => p.iptm);
   const xMin = Math.min(0, ...xs);
-  const xMax = Math.max(1, ...xs);
+  const xMax = Math.max(5, ...xs);
   const yMin = Math.min(0, ...ys);
-  const yMax = Math.max(...ys, 5);
+  const yMax = Math.max(1, ...ys);
+
+  const xRange = xMax - xMin || 1;
+  const yRange = yMax - yMin || 1;
 
   state.scatterLayout = filtered.map((p) => {
-    const x = margin.left + ((p.iptm - xMin) / (xMax - xMin || 1)) * (width - margin.left - margin.right);
-    const y = height - margin.bottom - ((p.rmsd_diego - yMin) / (yMax - yMin || 1)) * (height - margin.top - margin.bottom);
-    return { ...p, x, y, xMin, xMax, yMin, yMax, margin };
+    const x = margin.left + ((p.rmsd_diego - xMin) / xRange) * (width - margin.left - margin.right);
+    const y = height - margin.bottom - ((p.iptm - yMin) / yRange) * (height - margin.top - margin.bottom);
+    return { ...p, x, y, xMin, xMax, yMin, yMax, xRange, yRange, margin };
   });
 }
 
@@ -1121,7 +1124,9 @@ function renderScatter() {
   }
 
   const sample = state.scatterLayout[0];
-  const { xMin, xMax, yMin, yMax, margin } = sample;
+  const {
+    xMin, xMax, yMin, yMax, xRange, yRange, margin,
+  } = sample;
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
 
@@ -1135,19 +1140,52 @@ function renderScatter() {
 
   ctx.fillStyle = '#0f172a';
   ctx.font = '12px sans-serif';
-  ctx.fillText('ipTM', width / 2, height - 8);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Binder RMSD (Å)', (width - margin.right + margin.left) / 2, height - margin.bottom + 32);
   ctx.save();
-  ctx.translate(16, height / 2);
+  ctx.translate(20, (height - margin.bottom + margin.top) / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.fillText('RMSD (Å)', 0, 0);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('ipTM', 0, 0);
   ctx.restore();
 
-  state.scatterLayout.forEach((point) => {
-    const selected = point.design_name === state.selectedDesign;
+  ctx.strokeStyle = '#cbd5f5';
+  ctx.fillStyle = '#0f172a';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xTicks = 5;
+  for (let i = 0; i < xTicks; i += 1) {
+    const t = xTicks === 1 ? 0 : i / (xTicks - 1);
+    const value = xMin + t * xRange;
+    const x = margin.left + t * (width - margin.left - margin.right);
     ctx.beginPath();
-    ctx.fillStyle = selected ? '#1e3a8a' : '#2563eb';
-    ctx.globalAlpha = selected ? 0.95 : 0.8;
-    ctx.arc(point.x, point.y, selected ? 6 : 4, 0, Math.PI * 2);
+    ctx.moveTo(x, height - margin.bottom);
+    ctx.lineTo(x, height - margin.bottom + 6);
+    ctx.stroke();
+    ctx.fillText(value.toFixed(1), x, height - margin.bottom + 10);
+  }
+
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const yTicks = 5;
+  for (let i = 0; i < yTicks; i += 1) {
+    const t = yTicks === 1 ? 0 : i / (yTicks - 1);
+    const value = yMin + t * yRange;
+    const y = height - margin.bottom - t * (height - margin.top - margin.bottom);
+    ctx.beginPath();
+    ctx.moveTo(margin.left - 6, y);
+    ctx.lineTo(margin.left, y);
+    ctx.stroke();
+    ctx.fillText(value.toFixed(2), margin.left - 8, y);
+  }
+
+  state.scatterLayout.forEach((point) => {
+    ctx.beginPath();
+    ctx.fillStyle = '#2563eb';
+    ctx.globalAlpha = 0.8;
+    ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   });
@@ -1497,7 +1535,6 @@ function selectDesign(designName) {
   ].filter(Boolean);
   el.binderDetail.innerHTML = info.join('<br>');
   el.binderDetail.hidden = false;
-  renderScatter();
 }
 
 function handleTableHeaderClicks() {
@@ -2018,15 +2055,7 @@ async function syncResultsFromCluster(options = {}) {
 function registerScatterClick() {
   el.scatterCanvas.addEventListener('click', (event) => {
     if (state.scatterLayout.length === 0) return;
-    const rect = el.scatterCanvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    const hit = state.scatterLayout.find((point) => {
-      const dx = point.x - x;
-      const dy = point.y - y;
-      return Math.sqrt(dx * dx + dy * dy) <= 6;
-    });
-    if (hit) selectDesign(hit.design_name);
+    event.preventDefault();
   });
 }
 
