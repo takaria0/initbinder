@@ -432,6 +432,12 @@ import numpy as np
 
 import subprocess, shlex, time
 
+
+ASSESS_CONDA_ACTIVATE = os.environ.get(
+    "ASSESS_RFA_CONDA_ACTIVATE",
+    "source ~/.bashrc && conda activate takashi",
+).strip()
+
 def _sbatch(path: Path, extra_env: dict[str,str] = None, dep: str | None = None) -> str:
     env_export = ""
     if extra_env:
@@ -538,6 +544,13 @@ def _write_assess_rfa_all_sbatch(
 
     scripts: dict[str, Path | None] = {"launch": None, "primary": None, "merge": None}
 
+    conda_lines: list[str] = []
+    if ASSESS_CONDA_ACTIVATE:
+        conda_lines = [
+            "echo \"[assess] activating conda environment\"",
+            ASSESS_CONDA_ACTIVATE,
+        ]
+
     if use_array:
         array_name = f"{job_base}_array"
         array_script = job_dir / f"submit_{array_name}_{ts}.sh"
@@ -556,6 +569,7 @@ def _write_assess_rfa_all_sbatch(
             "",
             "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess][array] shard ${{SLURM_ARRAY_TASK_ID}}/{0}\"".format(effective_shard_mod),
             run_cmd,
             "echo \"[assess][array] done $(date)\"",
@@ -583,6 +597,7 @@ def _write_assess_rfa_all_sbatch(
             "",
             "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess][merge] start $(date)\"",
             merge_cmd,
             "echo \"[assess][merge] done $(date)\"",
@@ -622,6 +637,7 @@ def _write_assess_rfa_all_sbatch(
             "",
             "set -euo pipefail",
             f"cd {shlex.quote(str(ROOT))}",
+            *conda_lines,
             "echo \"[assess] host: $(hostname)\"",
             "echo \"[assess] start: $(date)\"",
             run_cmd,
