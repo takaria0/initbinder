@@ -154,8 +154,23 @@
         <div id="run-history" class="run-history"></div>
         <div id="results-meta" class="badge" hidden></div>
         <div id="binder-detail" class="alert success" hidden></div>
-        <div id="plot-container" style="margin-top: 16px;" hidden>
-          <canvas id="scatter-plot" width="720" height="360"></canvas>
+        <div id="plot-container" class="scatter-panel" hidden>
+          <div class="scatter-controls">
+            <label>
+              RMSD threshold (Å)
+              <input type="number" id="scatter-threshold-rmsd" step="0.1" value="3.7" min="0">
+            </label>
+            <label>
+              ipTM threshold
+              <input type="number" id="scatter-threshold-iptm" step="0.01" value="0.8" min="0" max="1">
+            </label>
+            <div class="scatter-threshold-count" id="scatter-threshold-count" aria-live="polite"></div>
+          </div>
+          <div class="scatter-grid">
+            <canvas id="scatter-hist-x" width="600" height="120" aria-hidden="true"></canvas>
+            <canvas id="scatter-plot" width="600" height="600"></canvas>
+            <canvas id="scatter-hist-y" width="120" height="600" aria-hidden="true"></canvas>
+          </div>
         </div>
         <div id="analysis-panel" class="analysis-panel" hidden>
           <div class="analysis-header">
