@@ -321,6 +321,61 @@ def _collect_expression_regions(
 
     target_chains = _normalize_chain_list(data.get("chains"))
     supporting_chains = _normalize_chain_list(data.get("supporting_chains"))
+
+    covered = {
+        str(region.get("chain", "")).strip().upper()
+        for region in expression_regions
+        if region.get("chain")
+    }
+
+    def _build_full_chain_region(chain_id: str) -> Optional[dict[str, str]]:
+        chain_clean = str(chain_id).strip()
+        if not chain_clean:
+            return None
+        residues = None
+        for key in (chain_clean, chain_clean.upper(), chain_clean.lower()):
+            if key in residue_numbers and residue_numbers[key]:
+                residues = residue_numbers[key]
+                break
+
+        selection: Optional[str]
+        start_label = end_label = "?"
+        if residues:
+            start_label = str(residues[0]).strip() or "?"
+            end_label = str(residues[-1]).strip() or "?"
+            selection, norm_start, norm_end = _selection_from_span(chain_clean, start_label, end_label, residues)
+            if selection:
+                start_label, end_label = norm_start, norm_end
+            else:
+                selection = f"(target and chain {chain_clean.upper()})"
+        else:
+            selection = f"(target and chain {chain_clean.upper()})"
+
+        if not selection:
+            return None
+        return {
+            "chain": chain_clean.upper(),
+            "start": start_label,
+            "end": end_label,
+            "selection": selection,
+        }
+
+    if vendor_range or expression_regions:
+        candidate_chains: List[str] = []
+        if target_chains:
+            candidate_chains.extend(target_chains)
+        if supporting_chains:
+            candidate_chains.extend(supporting_chains)
+
+        for chain in candidate_chains:
+            chain_norm = str(chain).strip().upper()
+            if not chain_norm or chain_norm in covered:
+                continue
+            region = _build_full_chain_region(chain_norm)
+            if region:
+                expression_regions.append(region)
+                covered.add(chain_norm)
+
     return vendor_range, expression_regions, {
         "target": target_chains,
         "supporting": supporting_chains,
