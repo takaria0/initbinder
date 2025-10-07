@@ -162,12 +162,28 @@
         <div id="plot-container" class="scatter-panel" hidden>
           <div class="scatter-controls">
             <label>
-              RMSD threshold (Å)
-              <input type="number" id="scatter-threshold-rmsd" step="0.1" value="3.7" min="0">
+              X axis
+              <select id="scatter-axis-x">
+                <option value="rmsd_diego">Binder RMSD (Å)</option>
+                <option value="iptm">ipTM</option>
+                <option value="ipsae_min">ipSAE_min</option>
+              </select>
             </label>
             <label>
-              ipTM threshold
-              <input type="number" id="scatter-threshold-iptm" step="0.01" value="0.8" min="0" max="1">
+              Y axis
+              <select id="scatter-axis-y">
+                <option value="iptm">ipTM</option>
+                <option value="rmsd_diego">Binder RMSD (Å)</option>
+                <option value="ipsae_min">ipSAE_min</option>
+              </select>
+            </label>
+            <label>
+              <span id="scatter-threshold-x-label">X threshold</span>
+              <input type="number" id="scatter-threshold-x" step="0.1" min="0" value="3.7">
+            </label>
+            <label>
+              <span id="scatter-threshold-y-label">Y threshold</span>
+              <input type="number" id="scatter-threshold-y" step="0.01" min="0" max="1" value="0.8">
             </label>
             <div class="scatter-threshold-count" id="scatter-threshold-count" aria-live="polite"></div>
           </div>
@@ -199,7 +215,7 @@
                 <th data-key="design_name">Design</th>
                 <th data-key="iptm" data-type="number">ipTM</th>
                 <th data-key="rmsd_diego" data-type="number">RMSD</th>
-                <th data-key="tm_score" data-type="number">TM-score</th>
+                <th data-key="ipsae_min" data-type="number">ipSAE<sub>min</sub></th>
                 <th data-key="metadata">Metadata</th>
               </tr>
             </thead>

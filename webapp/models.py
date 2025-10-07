@@ -142,6 +142,7 @@ class RankingRow(BaseModel):
     iptm: Optional[float]
     rmsd_diego: Optional[float]
     tm_score: Optional[float]
+    ipsae_min: Optional[float]
     metadata: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -149,6 +150,7 @@ class ScatterPoint(BaseModel):
     design_name: str
     iptm: Optional[float]
     rmsd_diego: Optional[float]
+    ipsae_min: Optional[float]
     metadata: Dict[str, object] = Field(default_factory=dict)
 
 

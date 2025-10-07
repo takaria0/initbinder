@@ -272,6 +272,7 @@ async def api_rankings(
             iptm=row.iptm,
             rmsd_diego=row.rmsd_diego,
             tm_score=row.tm_score,
+            ipsae_min=row.ipsae_min,
             metadata=row.metadata,
         )
         for row in payload.rows
@@ -281,6 +282,7 @@ async def api_rankings(
             design_name=point["design_name"],
             iptm=point.get("iptm"),
             rmsd_diego=point.get("rmsd_diego"),
+            ipsae_min=point.get("ipsae_min"),
             metadata=point.get("metadata", {}),
         )
         for point in payload.scatter_points()

@@ -10,6 +10,45 @@ const SCATTER_COLOR_PALETTE = [
   '#facc15',
 ];
 
+const SCATTER_FIELDS = {
+  rmsd_diego: {
+    label: 'Binder RMSD (Å)',
+    shortLabel: 'RMSD',
+    defaultMin: 0,
+    defaultMax: 5,
+    tickDecimals: 1,
+    valueDecimals: 3,
+    threshold: { direction: 'max', default: 3.7, min: 0, max: null, step: 0.1, decimals: 2 },
+  },
+  iptm: {
+    label: 'ipTM',
+    shortLabel: 'ipTM',
+    defaultMin: 0,
+    defaultMax: 1,
+    tickDecimals: 2,
+    valueDecimals: 3,
+    threshold: { direction: 'min', default: 0.8, min: 0, max: 1, step: 0.01, decimals: 2 },
+  },
+  ipsae_min: {
+    label: 'ipSAE_min',
+    shortLabel: 'ipSAE_min',
+    defaultMin: 0,
+    defaultMax: 1,
+    tickDecimals: 2,
+    valueDecimals: 3,
+    threshold: { direction: 'min', default: null, min: 0, max: 1, step: 0.01, decimals: 2 },
+  },
+};
+
+const DEFAULT_SCATTER_THRESHOLDS = Object.fromEntries(
+  Object.entries(SCATTER_FIELDS).map(([key, config]) => {
+    const defaultValue = config.threshold && Number.isFinite(config.threshold.default)
+      ? config.threshold.default
+      : null;
+    return [key, Number.isFinite(defaultValue) ? defaultValue : null];
+  }),
+);
+
 const state = {
   currentPdb: null,
   jobPoller: null,
@@ -19,7 +58,8 @@ const state = {
   tableSort: { ...DEFAULT_TABLE_SORT },
   scatterLayout: [],
   scatterPoints: [],
-  scatterThresholds: { rmsd: 3.7, iptm: 0.8 },
+  scatterAxes: { x: 'rmsd_diego', y: 'iptm' },
+  scatterThresholds: { ...DEFAULT_SCATTER_THRESHOLDS },
   scatterStats: null,
   scatterColorMap: new Map(),
   selectedDesign: null,
@@ -98,8 +138,12 @@ const el = {
   scatterCanvas: document.querySelector('#scatter-plot'),
   scatterHistX: document.querySelector('#scatter-hist-x'),
   scatterHistY: document.querySelector('#scatter-hist-y'),
-  scatterThresholdRmsd: document.querySelector('#scatter-threshold-rmsd'),
-  scatterThresholdIptm: document.querySelector('#scatter-threshold-iptm'),
+  scatterXAxis: document.querySelector('#scatter-axis-x'),
+  scatterYAxis: document.querySelector('#scatter-axis-y'),
+  scatterThresholdX: document.querySelector('#scatter-threshold-x'),
+  scatterThresholdY: document.querySelector('#scatter-threshold-y'),
+  scatterThresholdXLabel: document.querySelector('#scatter-threshold-x-label'),
+  scatterThresholdYLabel: document.querySelector('#scatter-threshold-y-label'),
   scatterThresholdCount: document.querySelector('#scatter-threshold-count'),
   plotContainer: document.querySelector('#plot-container'),
   exportOpen: document.querySelector('#export-open'),
@@ -194,6 +238,143 @@ function ensureValidTableSort(rows) {
   if (firstRow && !Object.prototype.hasOwnProperty.call(firstRow, state.tableSort.key)) {
     state.tableSort = { ...DEFAULT_TABLE_SORT };
   }
+}
+
+function getScatterFieldConfig(key) {
+  if (!key) return null;
+  return Object.prototype.hasOwnProperty.call(SCATTER_FIELDS, key) ? SCATTER_FIELDS[key] : null;
+}
+
+function getActiveScatterAxes() {
+  const axes = state.scatterAxes || {};
+  const x = getScatterFieldConfig(axes.x) ? axes.x : 'rmsd_diego';
+  const y = getScatterFieldConfig(axes.y) ? axes.y : 'iptm';
+  return { x, y };
+}
+
+function getScatterFieldValue(row, key) {
+  if (!row || !key) return Number.NaN;
+  const value = row[key];
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+  return Number.NaN;
+}
+
+function formatScatterValue(fieldKey, value, fallbackDecimals = 2) {
+  if (!Number.isFinite(value)) return 'NA';
+  const config = getScatterFieldConfig(fieldKey);
+  if (config && Number.isInteger(config.valueDecimals)) {
+    return value.toFixed(config.valueDecimals);
+  }
+  return value.toFixed(fallbackDecimals);
+}
+
+function formatScatterThreshold(fieldKey, value) {
+  if (!Number.isFinite(value)) return 'NA';
+  const config = getScatterFieldConfig(fieldKey);
+  if (config && config.threshold && Number.isInteger(config.threshold.decimals)) {
+    return value.toFixed(config.threshold.decimals);
+  }
+  if (config && Number.isInteger(config.tickDecimals)) {
+    return value.toFixed(config.tickDecimals);
+  }
+  return value.toFixed(2);
+}
+
+function clampScatterThreshold(fieldKey, value) {
+  const config = getScatterFieldConfig(fieldKey);
+  if (!config || !config.threshold) return value;
+  let result = value;
+  const { min, max, decimals } = config.threshold;
+  if (Number.isFinite(min)) result = Math.max(min, result);
+  if (Number.isFinite(max)) result = Math.min(max, result);
+  if (Number.isInteger(decimals)) {
+    result = Number.parseFloat(result.toFixed(decimals));
+  }
+  return result;
+}
+
+function updateScatterControls() {
+  const axes = getActiveScatterAxes();
+  state.scatterAxes = axes;
+  if (el.scatterXAxis && el.scatterXAxis.value !== axes.x) {
+    el.scatterXAxis.value = axes.x;
+  }
+  if (el.scatterYAxis && el.scatterYAxis.value !== axes.y) {
+    el.scatterYAxis.value = axes.y;
+  }
+  updateScatterThresholdInputs();
+}
+
+function updateScatterThresholdInputs() {
+  updateSingleScatterThresholdInput('x');
+  updateSingleScatterThresholdInput('y');
+}
+
+function updateSingleScatterThresholdInput(axis) {
+  const axes = state.scatterAxes || {};
+  const fieldKey = axis === 'y' ? axes.y : axes.x;
+  const config = getScatterFieldConfig(fieldKey);
+  const input = axis === 'y' ? el.scatterThresholdY : el.scatterThresholdX;
+  const label = axis === 'y' ? el.scatterThresholdYLabel : el.scatterThresholdXLabel;
+  if (!input || !label) return;
+
+  if (!config) {
+    label.textContent = axis === 'y' ? 'Y threshold' : 'X threshold';
+    input.value = '';
+    input.disabled = true;
+    input.placeholder = 'N/A';
+    input.removeAttribute('min');
+    input.removeAttribute('max');
+    input.removeAttribute('step');
+    return;
+  }
+
+  const thresholdConfig = config.threshold;
+  if (thresholdConfig) {
+    const directionSymbol = thresholdConfig.direction === 'max' ? '≤'
+      : thresholdConfig.direction === 'min' ? '≥'
+        : '';
+    label.textContent = `${config.label} threshold${directionSymbol ? ` (${directionSymbol})` : ''}`;
+    input.disabled = false;
+    if (Number.isFinite(thresholdConfig.min)) input.min = thresholdConfig.min;
+    else input.removeAttribute('min');
+    if (Number.isFinite(thresholdConfig.max)) input.max = thresholdConfig.max;
+    else input.removeAttribute('max');
+    if (Number.isFinite(thresholdConfig.step)) input.step = thresholdConfig.step;
+    else input.removeAttribute('step');
+    const current = state.scatterThresholds?.[fieldKey];
+    if (Number.isFinite(current)) {
+      input.value = current;
+    } else {
+      input.value = '';
+    }
+    input.placeholder = '';
+  } else {
+    label.textContent = `${config.label} threshold`;
+    input.disabled = true;
+    input.value = '';
+    input.placeholder = 'N/A';
+    input.removeAttribute('min');
+    input.removeAttribute('max');
+    input.removeAttribute('step');
+  }
+}
+
+function handleScatterAxisChange(axis, fieldKey) {
+  if (!axis) return;
+  if (!getScatterFieldConfig(fieldKey)) {
+    updateScatterControls();
+    return;
+  }
+  const nextAxes = { ...getActiveScatterAxes(), [axis]: fieldKey };
+  state.scatterAxes = nextAxes;
+  updateScatterControls();
+  computeScatterLayout(state.scatterPoints || []);
+  renderScatter();
 }
 
 function timestampString() {
@@ -1254,7 +1435,7 @@ function renderResultsTable() {
       <td>${row.design_name}</td>
       <td>${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : '—'}</td>
       <td>${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : '—'}</td>
-      <td>${row.tm_score !== null && row.tm_score !== undefined ? row.tm_score.toFixed(3) : '—'}</td>
+      <td>${row.ipsae_min !== null && row.ipsae_min !== undefined ? row.ipsae_min.toFixed(3) : '—'}</td>
       <td>${escapeHtml(epitopeLabel)}</td>
     `;
     tr.addEventListener('click', () => selectDesign(row.design_name));
@@ -1269,18 +1450,77 @@ function computeScatterLayout(points) {
     state.scatterColorMap = new Map();
     return;
   }
-  const filtered = points
-    .filter((p) => typeof p.iptm === 'number' && typeof p.rmsd_diego === 'number')
-    .map((p) => ({
-      ...p,
-      epitopeLabel: getEpitopeLabel(p),
-    }));
-  if (filtered.length === 0) {
+  const axes = getActiveScatterAxes();
+  const xConfig = getScatterFieldConfig(axes.x);
+  const yConfig = getScatterFieldConfig(axes.y);
+  if (!xConfig || !yConfig) {
     state.scatterLayout = [];
-    state.scatterStats = null;
+    state.scatterStats = {
+      xBins: [],
+      yBins: [],
+      total: 0,
+      passingCount: 0,
+      thresholds: { x: null, y: null },
+      fields: { x: axes.x, y: axes.y },
+      axis: {
+        xMin: 0,
+        xMax: 1,
+        yMin: 0,
+        yMax: 1,
+        xRange: 1,
+        yRange: 1,
+        margin: { left: 72, right: 32, top: 48, bottom: 72 },
+      },
+    };
     state.scatterColorMap = new Map();
     return;
   }
+
+  const source = Array.isArray(points) ? points : [];
+  const filtered = source
+    .map((p) => {
+      const xValue = getScatterFieldValue(p, axes.x);
+      const yValue = getScatterFieldValue(p, axes.y);
+      return {
+        ...p,
+        xValue,
+        yValue,
+        epitopeLabel: getEpitopeLabel(p),
+      };
+    })
+    .filter((p) => Number.isFinite(p.xValue) && Number.isFinite(p.yValue));
+
+  const thresholdsRaw = state.scatterThresholds || {};
+  const thresholds = {
+    x: Number.isFinite(thresholdsRaw[axes.x]) ? thresholdsRaw[axes.x] : null,
+    y: Number.isFinite(thresholdsRaw[axes.y]) ? thresholdsRaw[axes.y] : null,
+  };
+
+  const margin = { left: 72, right: 32, top: 48, bottom: 72 };
+
+  if (filtered.length === 0) {
+    state.scatterLayout = [];
+    state.scatterStats = {
+      xBins: [],
+      yBins: [],
+      total: 0,
+      passingCount: 0,
+      thresholds,
+      fields: { x: axes.x, y: axes.y },
+      axis: {
+        xMin: 0,
+        xMax: 1,
+        yMin: 0,
+        yMax: 1,
+        xRange: 1,
+        yRange: 1,
+        margin,
+      },
+    };
+    state.scatterColorMap = new Map();
+    return;
+  }
+
   const epitopeKeys = filtered.map((p) => (p.epitopeLabel ? p.epitopeLabel : '__default__'));
   const uniqueKeys = Array.from(new Set(epitopeKeys));
   uniqueKeys.sort((a, b) => {
@@ -1294,40 +1534,60 @@ function computeScatterLayout(points) {
     colorMap.set(key, color);
   });
   state.scatterColorMap = colorMap;
-  const margin = { left: 72, right: 32, top: 48, bottom: 72 };
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
-  const xs = filtered.map((p) => p.rmsd_diego);
-  const ys = filtered.map((p) => p.iptm);
-  const xMin = Math.min(0, ...xs);
-  const xMax = Math.max(5, ...xs);
-  const yMin = Math.min(0, ...ys);
-  const yMax = Math.max(1, ...ys);
-
+  const plotWidth = Math.max(1, width - margin.left - margin.right);
+  const plotHeight = Math.max(1, height - margin.top - margin.bottom);
+  const xs = filtered.map((p) => p.xValue);
+  const ys = filtered.map((p) => p.yValue);
+  let xMin = Math.min(...xs);
+  let xMax = Math.max(...xs);
+  let yMin = Math.min(...ys);
+  let yMax = Math.max(...ys);
+  if (Number.isFinite(xConfig.defaultMin)) xMin = Math.min(xMin, xConfig.defaultMin);
+  if (Number.isFinite(xConfig.defaultMax)) xMax = Math.max(xMax, xConfig.defaultMax);
+  if (Number.isFinite(yConfig.defaultMin)) yMin = Math.min(yMin, yConfig.defaultMin);
+  if (Number.isFinite(yConfig.defaultMax)) yMax = Math.max(yMax, yConfig.defaultMax);
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) {
+    xMin = 0;
+    xMax = 1;
+  }
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    yMin = 0;
+    yMax = 1;
+  }
+  if (xMin === xMax) {
+    const delta = Math.abs(xMin) * 0.1 || 1;
+    xMin -= delta;
+    xMax += delta;
+  }
+  if (yMin === yMax) {
+    const delta = Math.abs(yMin) * 0.1 || 1;
+    yMin -= delta;
+    yMax += delta;
+  }
   const xRange = xMax - xMin || 1;
   const yRange = yMax - yMin || 1;
-  const thresholds = {
-    rmsd: Number.isFinite(state.scatterThresholds?.rmsd) ? state.scatterThresholds.rmsd : 3.7,
-    iptm: Number.isFinite(state.scatterThresholds?.iptm) ? state.scatterThresholds.iptm : 0.8,
-  };
   const xBinCount = 24;
   const yBinCount = 24;
   const xBins = Array.from({ length: xBinCount }, () => 0);
   const yBins = Array.from({ length: yBinCount }, () => 0);
+  const activeThresholds = [];
+  if (Number.isFinite(thresholds.x) && xConfig.threshold) {
+    activeThresholds.push({ axis: 'x', value: thresholds.x, direction: xConfig.threshold.direction });
+  }
+  if (Number.isFinite(thresholds.y) && yConfig.threshold) {
+    activeThresholds.push({ axis: 'y', value: thresholds.y, direction: yConfig.threshold.direction });
+  }
   let passingCount = 0;
 
   state.scatterLayout = filtered.map((p) => {
-    const normalizedX = (p.rmsd_diego - xMin) / xRange;
-    const normalizedY = (p.iptm - yMin) / yRange;
-    const x = margin.left + normalizedX * (width - margin.left - margin.right);
-    const y = height - margin.bottom - normalizedY * (height - margin.top - margin.bottom);
+    const normalizedX = (p.xValue - xMin) / xRange;
+    const normalizedY = (p.yValue - yMin) / yRange;
+    const x = margin.left + normalizedX * plotWidth;
+    const y = height - margin.bottom - normalizedY * plotHeight;
     const colorKey = p.epitopeLabel ? p.epitopeLabel : '__default__';
     const color = colorMap.get(colorKey) || SCATTER_COLOR_PALETTE[0];
-    if (Number.isFinite(thresholds.rmsd) && Number.isFinite(thresholds.iptm)) {
-      if (p.rmsd_diego <= thresholds.rmsd && p.iptm >= thresholds.iptm) {
-        passingCount += 1;
-      }
-    }
     if (Number.isFinite(normalizedX)) {
       const binX = Math.min(xBinCount - 1, Math.max(0, Math.floor(normalizedX * xBinCount)));
       xBins[binX] += 1;
@@ -1336,11 +1596,23 @@ function computeScatterLayout(points) {
       const binY = Math.min(yBinCount - 1, Math.max(0, Math.floor(normalizedY * yBinCount)));
       yBins[binY] += 1;
     }
+    const meetsThresholds = activeThresholds.length === 0 || activeThresholds.every((rule) => {
+      const value = rule.axis === 'x' ? p.xValue : p.yValue;
+      if (!Number.isFinite(value)) return false;
+      if (rule.direction === 'max') return value <= rule.value;
+      if (rule.direction === 'min') return value >= rule.value;
+      return true;
+    });
+    if (meetsThresholds) {
+      passingCount += 1;
+    }
     return {
       ...p,
       x,
       y,
       color,
+      xField: axes.x,
+      yField: axes.y,
       xMin,
       xMax,
       yMin,
@@ -1351,12 +1623,17 @@ function computeScatterLayout(points) {
     };
   });
 
+  if (activeThresholds.length === 0) {
+    passingCount = filtered.length;
+  }
+
   state.scatterStats = {
     xBins,
     yBins,
     total: filtered.length,
     passingCount,
     thresholds,
+    fields: { x: axes.x, y: axes.y },
     axis: {
       xMin,
       xMax,
@@ -1394,6 +1671,24 @@ function renderScatter() {
   const plotHeight = height - margin.top - margin.bottom;
   const stats = state.scatterStats || {};
   const thresholds = stats.thresholds || {};
+  const fields = stats.fields || {};
+  const axes = getActiveScatterAxes();
+  const xField = fields.x || sample.xField || axes.x;
+  const yField = fields.y || sample.yField || axes.y;
+  const xConfig = getScatterFieldConfig(xField) || { label: xField };
+  const yConfig = getScatterFieldConfig(yField) || { label: yField };
+  const xLabel = xConfig.label || xField;
+  const yLabel = yConfig.label || yField;
+  const formatXTicks = (value) => {
+    if (!Number.isFinite(value)) return '';
+    const decimals = Number.isInteger(xConfig.tickDecimals) ? xConfig.tickDecimals : 2;
+    return value.toFixed(decimals);
+  };
+  const formatYTicks = (value) => {
+    if (!Number.isFinite(value)) return '';
+    const decimals = Number.isInteger(yConfig.tickDecimals) ? yConfig.tickDecimals : 2;
+    return value.toFixed(decimals);
+  };
 
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
@@ -1408,13 +1703,13 @@ function renderScatter() {
   ctx.fillStyle = '#0f172a';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('Binder RMSD (Å)', margin.left + plotWidth / 2, height - margin.bottom + 36);
+  ctx.fillText(xLabel, margin.left + plotWidth / 2, height - margin.bottom + 36);
   ctx.save();
   ctx.translate(margin.left - 56, margin.top + plotHeight / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('ipTM', 0, 0);
+  ctx.fillText(yLabel, 0, 0);
   ctx.restore();
 
   ctx.strokeStyle = '#e2e8f0';
@@ -1431,7 +1726,7 @@ function renderScatter() {
     ctx.stroke();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(value.toFixed(1), x, height - margin.bottom + 10);
+    ctx.fillText(formatXTicks(value), x, height - margin.bottom + 10);
   }
 
   const yTicks = 6;
@@ -1445,13 +1740,13 @@ function renderScatter() {
     ctx.stroke();
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(value.toFixed(2), margin.left - 10, y);
+    ctx.fillText(formatYTicks(value), margin.left - 10, y);
   }
 
-  const hasRmsdThreshold = Number.isFinite(thresholds.rmsd);
-  const hasIptmThreshold = Number.isFinite(thresholds.iptm);
-  if (hasRmsdThreshold && thresholds.rmsd >= xMin && thresholds.rmsd <= xMax) {
-    const t = (thresholds.rmsd - xMin) / xRange;
+  const hasXThreshold = Number.isFinite(thresholds.x) && xConfig.threshold;
+  const hasYThreshold = Number.isFinite(thresholds.y) && yConfig.threshold;
+  if (hasXThreshold && thresholds.x >= xMin && thresholds.x <= xMax) {
+    const t = (thresholds.x - xMin) / xRange;
     const x = margin.left + t * plotWidth;
     ctx.save();
     ctx.setLineDash([6, 4]);
@@ -1465,11 +1760,16 @@ function renderScatter() {
     ctx.fillStyle = '#f97316';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(`RMSD ≤ ${thresholds.rmsd.toFixed(2)} Å`, Math.min(x + 8, width - margin.right), margin.top + 18);
+    const directionSymbol = xConfig.threshold.direction === 'max' ? '≤' : '≥';
+    ctx.fillText(
+      `${xLabel} ${directionSymbol} ${formatScatterThreshold(xField, thresholds.x)}`,
+      Math.min(x + 8, width - margin.right),
+      margin.top + 18,
+    );
   }
 
-  if (hasIptmThreshold && thresholds.iptm >= yMin && thresholds.iptm <= yMax) {
-    const t = (thresholds.iptm - yMin) / yRange;
+  if (hasYThreshold && thresholds.y >= yMin && thresholds.y <= yMax) {
+    const t = (thresholds.y - yMin) / yRange;
     const y = height - margin.bottom - t * plotHeight;
     ctx.save();
     ctx.setLineDash([6, 4]);
@@ -1483,7 +1783,12 @@ function renderScatter() {
     ctx.fillStyle = '#0f172a';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(`ipTM ≥ ${thresholds.iptm.toFixed(2)}`, margin.left + 8, Math.max(margin.top + 8, y - 18));
+    const directionSymbol = yConfig.threshold.direction === 'max' ? '≤' : '≥';
+    ctx.fillText(
+      `${yLabel} ${directionSymbol} ${formatScatterThreshold(yField, thresholds.y)}`,
+      margin.left + 8,
+      Math.max(margin.top + 8, y - 18),
+    );
   }
 
   state.scatterLayout.forEach((point) => {
@@ -1519,7 +1824,14 @@ function renderScatterHistograms(sample) {
   const {
     margin, xRange, yRange, xMin, yMin,
   } = sample;
-  const { thresholds = {}, xBins = [], yBins = [] } = state.scatterStats;
+  const { thresholds = {}, xBins = [], yBins = [], fields = {} } = state.scatterStats;
+  const axes = getActiveScatterAxes();
+  const xField = fields.x || sample.xField || axes.x;
+  const yField = fields.y || sample.yField || axes.y;
+  const xConfig = getScatterFieldConfig(xField);
+  const yConfig = getScatterFieldConfig(yField);
+  const xThreshold = Number.isFinite(thresholds.x) && xConfig && xConfig.threshold ? thresholds.x : null;
+  const yThreshold = Number.isFinite(thresholds.y) && yConfig && yConfig.threshold ? thresholds.y : null;
 
   if (topCanvas) {
     const ctx = topCanvas.getContext('2d');
@@ -1545,8 +1857,8 @@ function renderScatterHistograms(sample) {
       const y = topCanvas.height - marginTop.bottom - barHeight;
       ctx.fillRect(x + 0.5, y, Math.max(1, barWidth - 2), barHeight);
     });
-    if (Number.isFinite(thresholds.rmsd) && thresholds.rmsd >= xMin && thresholds.rmsd <= xMin + xRange) {
-      const t = (thresholds.rmsd - xMin) / xRange;
+    if (Number.isFinite(xThreshold) && xThreshold >= xMin && xThreshold <= xMin + xRange) {
+      const t = (xThreshold - xMin) / xRange;
       const x = marginTop.left + t * plotWidth;
       ctx.save();
       ctx.setLineDash([6, 4]);
@@ -1583,8 +1895,8 @@ function renderScatterHistograms(sample) {
       const y = marginRight.top + (yBins.length - 1 - idx) * barHeight;
       ctx.fillRect(marginRight.left, y + 0.5, barWidth, Math.max(1, barHeight - 2));
     });
-    if (Number.isFinite(thresholds.iptm) && thresholds.iptm >= yMin && thresholds.iptm <= yMin + yRange) {
-      const t = (thresholds.iptm - yMin) / yRange;
+    if (Number.isFinite(yThreshold) && yThreshold >= yMin && yThreshold <= yMin + yRange) {
+      const t = (yThreshold - yMin) / yRange;
       const y = rightCanvas.height - marginRight.bottom - t * plotHeight;
       ctx.save();
       ctx.setLineDash([6, 4]);
@@ -1606,38 +1918,48 @@ function updateScatterThresholdSummary() {
     el.scatterThresholdCount.textContent = '';
     return;
   }
-  const { thresholds, passingCount, total } = stats;
-  if (!thresholds || !Number.isFinite(thresholds.rmsd) || !Number.isFinite(thresholds.iptm)) {
-    el.scatterThresholdCount.textContent = '';
+  const { thresholds = {}, passingCount, total, fields = {} } = stats;
+  const axes = getActiveScatterAxes();
+  const xField = fields.x || axes.x;
+  const yField = fields.y || axes.y;
+  const xConfig = getScatterFieldConfig(xField);
+  const yConfig = getScatterFieldConfig(yField);
+  const clauses = [];
+  if (Number.isFinite(thresholds.x) && xConfig && xConfig.threshold) {
+    const directionSymbol = xConfig.threshold.direction === 'max' ? '≤' : '≥';
+    clauses.push(`${xConfig.label} ${directionSymbol} ${formatScatterThreshold(xField, thresholds.x)}`);
+  }
+  if (Number.isFinite(thresholds.y) && yConfig && yConfig.threshold) {
+    const directionSymbol = yConfig.threshold.direction === 'max' ? '≤' : '≥';
+    clauses.push(`${yConfig.label} ${directionSymbol} ${formatScatterThreshold(yField, thresholds.y)}`);
+  }
+  if (!clauses.length) {
+    el.scatterThresholdCount.textContent = `${total} designs plotted.`;
     return;
   }
   const percent = total === 0 ? 0 : ((passingCount / total) * 100);
-  const formatted = `${passingCount} / ${total} designs (${percent.toFixed(1)}%) meet RMSD ≤ ${thresholds.rmsd.toFixed(2)} Å and ipTM ≥ ${thresholds.iptm.toFixed(2)}`;
+  const formatted = `${passingCount} / ${total} designs (${percent.toFixed(1)}%) meet ${clauses.join(' and ')}`;
   el.scatterThresholdCount.textContent = formatted;
 }
 
-function handleScatterThresholdChange(key, rawValue) {
-  if (!Number.isFinite(rawValue)) return;
-  const thresholds = {
-    rmsd: Number.isFinite(state.scatterThresholds?.rmsd) ? state.scatterThresholds.rmsd : 3.7,
-    iptm: Number.isFinite(state.scatterThresholds?.iptm) ? state.scatterThresholds.iptm : 0.8,
+function handleScatterThresholdChange(axis, rawValue) {
+  if (!axis) return;
+  const axes = getActiveScatterAxes();
+  const fieldKey = axis === 'y' ? axes.y : axes.x;
+  const config = getScatterFieldConfig(fieldKey);
+  if (!config || !config.threshold) {
+    updateScatterControls();
+    return;
+  }
+  let value = Number.isFinite(rawValue) ? rawValue : null;
+  if (value !== null) {
+    value = clampScatterThreshold(fieldKey, value);
+  }
+  state.scatterThresholds = {
+    ...state.scatterThresholds,
+    [fieldKey]: value,
   };
-  let value = rawValue;
-  if (key === 'rmsd') {
-    value = Math.max(0, value);
-  }
-  if (key === 'iptm') {
-    value = Math.min(1, Math.max(0, value));
-  }
-  if (!Number.isFinite(value)) return;
-  const updated = { ...thresholds, [key]: value };
-  state.scatterThresholds = updated;
-  if (key === 'rmsd' && el.scatterThresholdRmsd) {
-    el.scatterThresholdRmsd.value = value;
-  }
-  if (key === 'iptm' && el.scatterThresholdIptm) {
-    el.scatterThresholdIptm.value = value;
-  }
+  updateScatterThresholdInputs();
   computeScatterLayout(state.scatterPoints || []);
   renderScatter();
 }
@@ -1980,13 +2302,7 @@ function renderResults() {
   renderResultsTable();
   const scatterPoints = state.rankingsResponse?.scatter || [];
   state.scatterPoints = scatterPoints;
-  const thresholds = state.scatterThresholds || {};
-  if (el.scatterThresholdRmsd && Number.isFinite(thresholds.rmsd)) {
-    el.scatterThresholdRmsd.value = thresholds.rmsd;
-  }
-  if (el.scatterThresholdIptm && Number.isFinite(thresholds.iptm)) {
-    el.scatterThresholdIptm.value = thresholds.iptm;
-  }
+  updateScatterControls();
   computeScatterLayout(scatterPoints);
   renderScatter();
   const hasRows = state.rankings.length > 0;
@@ -2342,6 +2658,7 @@ function selectDesign(designName) {
     `<strong>${row.design_name}</strong>`,
     `ipTM: ${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : 'NA'}`,
     `Binder RMSD: ${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : 'NA'}`,
+    `ipSAE_min: ${row.ipsae_min !== null && row.ipsae_min !== undefined ? row.ipsae_min.toFixed(3) : 'NA'}`,
     metadata.arm ? `Arm: ${metadata.arm}` : '',
     (() => {
       const epitopeLabel = getEpitopeLabel(row);
@@ -2903,6 +3220,7 @@ async function syncResultsFromCluster(options = {}) {
 }
 
 function registerScatterClick() {
+  if (!el.scatterCanvas) return;
   el.scatterCanvas.addEventListener('click', (event) => {
     if (state.scatterLayout.length === 0) return;
     event.preventDefault();
@@ -3012,25 +3330,45 @@ function initEventHandlers() {
       fetchJobList();
     });
   }
-  if (el.scatterThresholdRmsd) {
-    const handler = (event) => {
-      const value = Number.parseFloat(event.target.value);
-      if (Number.isFinite(value)) {
-        handleScatterThresholdChange('rmsd', value);
-      }
-    };
-    el.scatterThresholdRmsd.addEventListener('change', handler);
-    el.scatterThresholdRmsd.addEventListener('input', handler);
+  if (el.scatterXAxis) {
+    el.scatterXAxis.addEventListener('change', (event) => {
+      handleScatterAxisChange('x', event.target.value);
+    });
   }
-  if (el.scatterThresholdIptm) {
+  if (el.scatterYAxis) {
+    el.scatterYAxis.addEventListener('change', (event) => {
+      handleScatterAxisChange('y', event.target.value);
+    });
+  }
+  if (el.scatterThresholdX) {
     const handler = (event) => {
-      const value = Number.parseFloat(event.target.value);
-      if (Number.isFinite(value)) {
-        handleScatterThresholdChange('iptm', value);
+      const text = event.target.value != null ? String(event.target.value).trim() : '';
+      if (text === '') {
+        handleScatterThresholdChange('x', Number.NaN);
+        return;
+      }
+      const value = Number.parseFloat(text);
+      if (!Number.isNaN(value)) {
+        handleScatterThresholdChange('x', value);
       }
     };
-    el.scatterThresholdIptm.addEventListener('change', handler);
-    el.scatterThresholdIptm.addEventListener('input', handler);
+    el.scatterThresholdX.addEventListener('change', handler);
+    el.scatterThresholdX.addEventListener('input', handler);
+  }
+  if (el.scatterThresholdY) {
+    const handler = (event) => {
+      const text = event.target.value != null ? String(event.target.value).trim() : '';
+      if (text === '') {
+        handleScatterThresholdChange('y', Number.NaN);
+        return;
+      }
+      const value = Number.parseFloat(text);
+      if (!Number.isNaN(value)) {
+        handleScatterThresholdChange('y', value);
+      }
+    };
+    el.scatterThresholdY.addEventListener('change', handler);
+    el.scatterThresholdY.addEventListener('input', handler);
   }
   registerScatterClick();
   handleTableHeaderClicks();
@@ -3039,6 +3377,7 @@ function initEventHandlers() {
 
 function init() {
   initEventHandlers();
+  updateScatterControls();
   updateActiveRunDisplay();
   renderPresets();
   loadPresets();

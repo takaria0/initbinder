@@ -23,6 +23,7 @@ class RankingRowData:
     iptm: Optional[float]
     rmsd_diego: Optional[float]
     tm_score: Optional[float]
+    ipsae_min: Optional[float]
     metadata: Dict[str, object]
 
 
@@ -37,12 +38,17 @@ class RankingPayload:
     def scatter_points(self) -> List[Dict[str, object]]:
         points: List[Dict[str, object]] = []
         for row in self.rows:
-            if row.iptm is None and row.rmsd_diego is None:
+            if (
+                row.iptm is None
+                and row.rmsd_diego is None
+                and row.ipsae_min is None
+            ):
                 continue
             points.append({
                 "design_name": row.design_name,
                 "iptm": row.iptm,
                 "rmsd_diego": row.rmsd_diego,
+                "ipsae_min": row.ipsae_min,
                 "metadata": row.metadata,
             })
         return points
@@ -159,11 +165,13 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
             ],
         )
         tm_val = _lookup(raw, ["tm_score", "binder_tm", "tm"])
+        ipsae_val = _lookup(raw, ["ipsae_min", "ipsae_minimum", "ipSAE_min", "ipsae"])
 
         metadata = {k: v for k, v in raw.items() if k.lower() not in {
             "design_name", "design", "name", "iptm", "af3_iptm", "ip_tm", "iptm_score",
             "rmsd_diego", "binder_rmsd_diego", "binder_rmsd", "rmsd",
             "tm_score", "binder_tm", "tm",
+            "ipsae_min", "ipsae_minimum", "ipsae",
         }}
 
         parsed.append(RankingRowData(
@@ -172,6 +180,7 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
             iptm=_coerce_float(iptm_val),
             rmsd_diego=_coerce_float(rmsd_val),
             tm_score=_coerce_float(tm_val),
+            ipsae_min=_coerce_float(ipsae_val),
             metadata=metadata,
         ))
 
