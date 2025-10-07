@@ -563,7 +563,7 @@ class ClusterClient:
                 },
             )
 
-        rel = base_rel
+        rel = assessments_rel
         local_dest = (self.local_root / rel).resolve()
         self._emit(
             f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
