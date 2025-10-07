@@ -54,6 +54,7 @@ const el = {
   antigenInput: document.querySelector('#antigen-url'),
   targetName: document.querySelector('#target-name'),
   targetEpitopes: document.querySelector('#target-epitopes'),
+  targetDecidePrompt: document.querySelector('#decide-scope-prompt'),
   presetIdInput: document.querySelector('#preset-id'),
   presetList: document.querySelector('#preset-list'),
   presetRefresh: document.querySelector('#presets-refresh'),
@@ -846,6 +847,11 @@ async function queueTargetInit(event) {
       const parsed = Number(raw);
       if (!Number.isFinite(parsed) || parsed <= 0) return null;
       return Math.round(parsed);
+    })(),
+    decide_scope_prompt: (() => {
+      const value = el.targetDecidePrompt?.value || '';
+      const trimmed = value.trim();
+      return trimmed ? trimmed : null;
     })(),
     force_refresh: el.forceCheckbox.checked,
     run_decide_scope: el.decideCheckbox.checked,

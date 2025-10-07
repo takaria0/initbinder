@@ -39,6 +39,11 @@ class TargetInitRequest(BaseModel):
     antigen_url: Optional[str] = Field(None, description="Vendor product URL")
     preset_name: Optional[str] = Field(None, max_length=120, description="Friendly name for saved target preset")
     num_epitopes: Optional[int] = Field(None, ge=1, le=32, description="Desired number of epitopes to surface")
+    decide_scope_prompt: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Optional natural language guidance for decide-scope epitope selection",
+    )
     force_refresh: bool = Field(False, description="Redo init even if target folder exists")
     run_decide_scope: bool = Field(True, description="Also run decide-scope after initialization")
     run_prep: bool = Field(True, description="Also run prep-target after decide-scope")

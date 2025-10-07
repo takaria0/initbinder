@@ -101,6 +101,7 @@ def submit_target_initialization(request: TargetInitRequest, *,
                 run_prep=request.run_prep,
                 force=request.force_refresh,
                 num_epitopes=request.num_epitopes,
+                decide_scope_prompt=request.decide_scope_prompt,
             )
             try:
                 preferences.record_target_usage(

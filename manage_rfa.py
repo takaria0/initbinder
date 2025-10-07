@@ -715,6 +715,11 @@ def main():
                         help="Maximum times to re-prompt the LLM when validation fails (default: 1).")
     p_scope.add_argument("--force", action="store_true",
                         help="Override existing epitopes in target.yaml. Default: skip if epitopes already exist.")
+    p_scope.add_argument(
+        "--epitope_prompt",
+        default=None,
+        help="Optional natural language guidance for how the LLM should select epitopes.",
+    )
 
     p_prep = sub.add_parser("prep-target", help="Clean target PDB and create epitope masks.")
     p_prep.add_argument("pdb", help="Target PDB ID.")
@@ -888,7 +893,8 @@ def main():
         else:
             llm_scope(args.pdb, expected_epitopes=args.expected_epitopes,
                       max_llm_retries=args.max_llm_retries,
-                      force=args.force)
+                      force=args.force,
+                      user_guidance=args.epitope_prompt)
 
     elif args.cmd == "prep-target":
         prep_target(args.pdb, args.sasa_cutoff)

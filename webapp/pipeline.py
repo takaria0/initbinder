@@ -137,6 +137,7 @@ def init_decide_prep(
     run_prep: bool = True,
     force: bool = False,
     num_epitopes: Optional[int] = None,
+    decide_scope_prompt: Optional[str] = None,
 ) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
@@ -158,6 +159,10 @@ def init_decide_prep(
         decide_args = [pdb_id]
         if force:
             decide_args.append("--force")
+        prompt_text = (decide_scope_prompt or "").strip()
+        if prompt_text:
+            decide_args.extend(["--epitope_prompt", prompt_text])
+            job_store.append_log(job_id, "[decide-scope] using custom epitope guidance prompt")
         run_manage_rfa("decide-scope", decide_args, log=_log)
     if run_prep:
         job_store.update(job_id, message="Running prep-target")

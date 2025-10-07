@@ -48,6 +48,11 @@
               <input id="target-epitopes" type="number" min="1" max="32" value="3" autocomplete="off">
             </label>
           </div>
+          <div class="form-row">
+            <label for="decide-scope-prompt">Epitope guidance (optional)
+              <textarea id="decide-scope-prompt" name="decide_scope_prompt" rows="3" placeholder="Add hints for decide-scope, e.g. focus on receptor binding loop."></textarea>
+            </label>
+          </div>
           <div class="flex-row advanced-row debug-only">
             <label><input type="checkbox" id="force-refresh"> Force refresh</label>
             <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>

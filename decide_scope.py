@@ -369,10 +369,19 @@ def _ensure_epitopes_within_target_chains(
 # Core: LLM scope (multi-UniProt + extracellular filter)
 # =============================================================================
 
-def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int = 20,
-              prefer_human: bool = True, prefer_reviewed: bool = True,
-              enforce_epitope_constraints: bool = True, expected_epitopes: int = 3,
-              max_llm_retries: int = 1, force: bool = False):
+def llm_scope(
+    pdb_id: str,
+    *,
+    target: Optional[str] = None,
+    max_accessions: int = 20,
+    prefer_human: bool = True,
+    prefer_reviewed: bool = True,
+    enforce_epitope_constraints: bool = True,
+    expected_epitopes: int = 3,
+    user_guidance: Optional[str] = None,
+    max_llm_retries: int = 1,
+    force: bool = False,
+):
     if not USE_LLM:
         print("[skip] LLM disabled. Please edit target.yaml manually.")
         return
@@ -519,7 +528,26 @@ def llm_scope(pdb_id: str, *, target: Optional[str] = None, max_accessions: int 
 
     prompt_template = (ROOT/"templates"/"scope_prompt.md").read_text()
 
-    base_prompt_prefix = f"{target_focus_prompt}\n\n{range_constraint_prompt}\n\n{numbering_prompt}".strip()
+    guidance_block = ""
+    if user_guidance:
+        cleaned_guidance = textwrap.dedent(str(user_guidance)).strip()
+        if cleaned_guidance:
+            guidance_block = "\n".join(
+                [
+                    "--- USER EPITOPE GUIDANCE ---",
+                    cleaned_guidance,
+                    "--- END USER EPITOPE GUIDANCE ---",
+                ]
+            )
+
+    prompt_sections: List[str] = []
+    for block in (target_focus_prompt, range_constraint_prompt, guidance_block, numbering_prompt):
+        if block:
+            text = str(block).strip()
+            if text:
+                prompt_sections.append(text)
+
+    base_prompt_prefix = "\n\n".join(prompt_sections)
 
     def _compose_prompt(extra_block: str) -> str:
         prefix = base_prompt_prefix
