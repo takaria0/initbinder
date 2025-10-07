@@ -127,6 +127,23 @@ def init_target(
             print(f"[warn] CIF fallback failed: {e}")
 
     yml_path = tdir/"target.yaml"
+    
+    # remove target.yaml if --force
+    if force and yml_path.exists():
+        yml_path.unlink()
+        print(f"[info] Removed existing {yml_path} due to --force flag.")
+        
+    # remove prep dir if --force
+    prep_dir = tdir / "prep"
+    if force and prep_dir.exists():
+        for item in prep_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                import shutil
+                shutil.rmtree(item)
+        print(f"[info] Cleared existing {prep_dir} contents due to --force flag.")
+
     if not yml_path.exists():
         skel = {
             "id": pdb_id.upper(),
