@@ -1,14 +1,27 @@
+const DEFAULT_TABLE_SORT = { key: 'iptm', dir: 'desc' };
+const SCATTER_COLOR_PALETTE = [
+  '#2563eb',
+  '#f97316',
+  '#22c55e',
+  '#a855f7',
+  '#ef4444',
+  '#0ea5e9',
+  '#14b8a6',
+  '#facc15',
+];
+
 const state = {
   currentPdb: null,
   jobPoller: null,
   jobContext: null,
   rankings: [],
   rankingsResponse: null,
-  tableSort: { key: 'iptm', dir: 'desc' },
+  tableSort: { ...DEFAULT_TABLE_SORT },
   scatterLayout: [],
   scatterPoints: [],
   scatterThresholds: { rmsd: 3.7, iptm: 0.8 },
   scatterStats: null,
+  scatterColorMap: new Map(),
   selectedDesign: null,
   jobs: [],
   selectedJobId: null,
@@ -152,6 +165,35 @@ function setBadge(badge, text, color = null) {
   badge.textContent = text;
   badge.style.background = color || 'rgba(37, 99, 235, 0.12)';
   badge.style.color = color ? '#0f172a' : 'var(--color-accent)';
+}
+
+function getEpitopeLabel(row) {
+  if (!row || typeof row !== 'object') return '';
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const value =
+    metadata.epitope ||
+    metadata.epitope_name ||
+    metadata.epitopeName ||
+    metadata.arm ||
+    metadata.target_epitope ||
+    '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function ensureValidTableSort(rows) {
+  if (!state.tableSort || !state.tableSort.key) {
+    state.tableSort = { ...DEFAULT_TABLE_SORT };
+    return;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return;
+  }
+  const firstRow = rows[0];
+  if (firstRow && !Object.prototype.hasOwnProperty.call(firstRow, state.tableSort.key)) {
+    state.tableSort = { ...DEFAULT_TABLE_SORT };
+  }
 }
 
 function timestampString() {
@@ -1141,7 +1183,7 @@ async function fetchRankings(options = {}) {
     if (!keepSummary) {
       state.librarySummary = null;
     }
-    state.tableSort = { key: 'iptm', dir: 'desc' };
+    ensureValidTableSort(state.rankings);
     state.scatterLayout = [];
     state.selectedDesign = null;
     state.activeRunLabel = payload.run_label || '';
@@ -1207,12 +1249,13 @@ function renderResultsTable() {
   state.rankings.forEach((row) => {
     const tr = document.createElement('tr');
     tr.dataset.design = row.design_name;
+    const epitopeLabel = getEpitopeLabel(row);
     tr.innerHTML = `
       <td>${row.design_name}</td>
       <td>${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : '—'}</td>
       <td>${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : '—'}</td>
       <td>${row.tm_score !== null && row.tm_score !== undefined ? row.tm_score.toFixed(3) : '—'}</td>
-      <td>${row.metadata.epitope || row.metadata.arm || ''}</td>
+      <td>${escapeHtml(epitopeLabel)}</td>
     `;
     tr.addEventListener('click', () => selectDesign(row.design_name));
     tbody.appendChild(tr);
@@ -1223,16 +1266,34 @@ function computeScatterLayout(points) {
   if (!el.scatterCanvas) {
     state.scatterLayout = [];
     state.scatterStats = null;
+    state.scatterColorMap = new Map();
     return;
   }
   const filtered = points
     .filter((p) => typeof p.iptm === 'number' && typeof p.rmsd_diego === 'number')
-    .map((p) => ({ ...p }));
+    .map((p) => ({
+      ...p,
+      epitopeLabel: getEpitopeLabel(p),
+    }));
   if (filtered.length === 0) {
     state.scatterLayout = [];
     state.scatterStats = null;
+    state.scatterColorMap = new Map();
     return;
   }
+  const epitopeKeys = filtered.map((p) => (p.epitopeLabel ? p.epitopeLabel : '__default__'));
+  const uniqueKeys = Array.from(new Set(epitopeKeys));
+  uniqueKeys.sort((a, b) => {
+    if (a === '__default__') return 1;
+    if (b === '__default__') return -1;
+    return a.localeCompare(b, undefined, { sensitivity: 'base' });
+  });
+  const colorMap = new Map();
+  uniqueKeys.forEach((key, idx) => {
+    const color = SCATTER_COLOR_PALETTE[idx % SCATTER_COLOR_PALETTE.length];
+    colorMap.set(key, color);
+  });
+  state.scatterColorMap = colorMap;
   const margin = { left: 72, right: 32, top: 48, bottom: 72 };
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
@@ -1260,6 +1321,8 @@ function computeScatterLayout(points) {
     const normalizedY = (p.iptm - yMin) / yRange;
     const x = margin.left + normalizedX * (width - margin.left - margin.right);
     const y = height - margin.bottom - normalizedY * (height - margin.top - margin.bottom);
+    const colorKey = p.epitopeLabel ? p.epitopeLabel : '__default__';
+    const color = colorMap.get(colorKey) || SCATTER_COLOR_PALETTE[0];
     if (Number.isFinite(thresholds.rmsd) && Number.isFinite(thresholds.iptm)) {
       if (p.rmsd_diego <= thresholds.rmsd && p.iptm >= thresholds.iptm) {
         passingCount += 1;
@@ -1277,6 +1340,7 @@ function computeScatterLayout(points) {
       ...p,
       x,
       y,
+      color,
       xMin,
       xMax,
       yMin,
@@ -1424,7 +1488,7 @@ function renderScatter() {
 
   state.scatterLayout.forEach((point) => {
     ctx.beginPath();
-    ctx.fillStyle = '#2563eb';
+    ctx.fillStyle = point.color || '#2563eb';
     ctx.globalAlpha = 0.82;
     ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
     ctx.fill();
@@ -1590,6 +1654,7 @@ function resetResultsPanel(options = {}) {
   state.scatterLayout = [];
   state.scatterPoints = [];
   state.scatterStats = null;
+  state.scatterColorMap = new Map();
   state.selectedDesign = null;
   state.galleryAvailable = false;
   state.librarySummary = null;
@@ -2272,13 +2337,17 @@ function selectDesign(designName) {
     el.binderDetail.hidden = true;
     return;
   }
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
   const info = [
     `<strong>${row.design_name}</strong>`,
     `ipTM: ${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : 'NA'}`,
     `Binder RMSD: ${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : 'NA'}`,
-    row.metadata.arm ? `Arm: ${row.metadata.arm}` : '',
-    row.metadata.epitope ? `Epitope: ${row.metadata.epitope}` : '',
-    row.metadata.pymol_script_path ? `PyMOL script: ${row.metadata.pymol_script_path}` : '',
+    metadata.arm ? `Arm: ${metadata.arm}` : '',
+    (() => {
+      const epitopeLabel = getEpitopeLabel(row);
+      return epitopeLabel ? `Epitope: ${epitopeLabel}` : '';
+    })(),
+    metadata.pymol_script_path ? `PyMOL script: ${metadata.pymol_script_path}` : '',
   ].filter(Boolean);
   el.binderDetail.innerHTML = info.join('<br>');
   el.binderDetail.hidden = false;
