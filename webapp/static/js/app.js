@@ -6,6 +6,9 @@ const state = {
   rankingsResponse: null,
   tableSort: { key: 'iptm', dir: 'desc' },
   scatterLayout: [],
+  scatterPoints: [],
+  scatterThresholds: { rmsd: 3.7, iptm: 0.8 },
+  scatterStats: null,
   selectedDesign: null,
   jobs: [],
   selectedJobId: null,
@@ -79,6 +82,11 @@ const el = {
   resultsTableWrapper: document.querySelector('#results-table-wrapper'),
   resultsTable: document.querySelector('#results-table'),
   scatterCanvas: document.querySelector('#scatter-plot'),
+  scatterHistX: document.querySelector('#scatter-hist-x'),
+  scatterHistY: document.querySelector('#scatter-hist-y'),
+  scatterThresholdRmsd: document.querySelector('#scatter-threshold-rmsd'),
+  scatterThresholdIptm: document.querySelector('#scatter-threshold-iptm'),
+  scatterThresholdCount: document.querySelector('#scatter-threshold-count'),
   plotContainer: document.querySelector('#plot-container'),
   exportOpen: document.querySelector('#export-open'),
   exportModal: document.querySelector('#export-modal'),
@@ -1200,14 +1208,20 @@ function renderResultsTable() {
 }
 
 function computeScatterLayout(points) {
+  if (!el.scatterCanvas) {
+    state.scatterLayout = [];
+    state.scatterStats = null;
+    return;
+  }
   const filtered = points
     .filter((p) => typeof p.iptm === 'number' && typeof p.rmsd_diego === 'number')
     .map((p) => ({ ...p }));
   if (filtered.length === 0) {
     state.scatterLayout = [];
+    state.scatterStats = null;
     return;
   }
-  const margin = { left: 56, right: 16, top: 16, bottom: 48 };
+  const margin = { left: 72, right: 32, top: 48, bottom: 72 };
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
   const xs = filtered.map((p) => p.rmsd_diego);
@@ -1219,20 +1233,78 @@ function computeScatterLayout(points) {
 
   const xRange = xMax - xMin || 1;
   const yRange = yMax - yMin || 1;
+  const thresholds = {
+    rmsd: Number.isFinite(state.scatterThresholds?.rmsd) ? state.scatterThresholds.rmsd : 3.7,
+    iptm: Number.isFinite(state.scatterThresholds?.iptm) ? state.scatterThresholds.iptm : 0.8,
+  };
+  const xBinCount = 24;
+  const yBinCount = 24;
+  const xBins = Array.from({ length: xBinCount }, () => 0);
+  const yBins = Array.from({ length: yBinCount }, () => 0);
+  let passingCount = 0;
 
   state.scatterLayout = filtered.map((p) => {
-    const x = margin.left + ((p.rmsd_diego - xMin) / xRange) * (width - margin.left - margin.right);
-    const y = height - margin.bottom - ((p.iptm - yMin) / yRange) * (height - margin.top - margin.bottom);
-    return { ...p, x, y, xMin, xMax, yMin, yMax, xRange, yRange, margin };
+    const normalizedX = (p.rmsd_diego - xMin) / xRange;
+    const normalizedY = (p.iptm - yMin) / yRange;
+    const x = margin.left + normalizedX * (width - margin.left - margin.right);
+    const y = height - margin.bottom - normalizedY * (height - margin.top - margin.bottom);
+    if (Number.isFinite(thresholds.rmsd) && Number.isFinite(thresholds.iptm)) {
+      if (p.rmsd_diego <= thresholds.rmsd && p.iptm >= thresholds.iptm) {
+        passingCount += 1;
+      }
+    }
+    if (Number.isFinite(normalizedX)) {
+      const binX = Math.min(xBinCount - 1, Math.max(0, Math.floor(normalizedX * xBinCount)));
+      xBins[binX] += 1;
+    }
+    if (Number.isFinite(normalizedY)) {
+      const binY = Math.min(yBinCount - 1, Math.max(0, Math.floor(normalizedY * yBinCount)));
+      yBins[binY] += 1;
+    }
+    return {
+      ...p,
+      x,
+      y,
+      xMin,
+      xMax,
+      yMin,
+      yMax,
+      xRange,
+      yRange,
+      margin,
+    };
   });
+
+  state.scatterStats = {
+    xBins,
+    yBins,
+    total: filtered.length,
+    passingCount,
+    thresholds,
+    axis: {
+      xMin,
+      xMax,
+      yMin,
+      yMax,
+      xRange,
+      yRange,
+      margin,
+    },
+  };
 }
 
 function renderScatter() {
+  if (!el.scatterCanvas) return;
   const ctx = el.scatterCanvas.getContext('2d');
   ctx.clearRect(0, 0, el.scatterCanvas.width, el.scatterCanvas.height);
+  renderScatterHistograms(null);
   if (state.scatterLayout.length === 0) {
+    updateScatterThresholdSummary();
     ctx.fillStyle = '#64748b';
-    ctx.fillText('No scatter data available', 20, 40);
+    ctx.font = '13px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('No scatter data available', 20, 24);
     return;
   }
 
@@ -1242,66 +1314,256 @@ function renderScatter() {
   } = sample;
   const width = el.scatterCanvas.width;
   const height = el.scatterCanvas.height;
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const stats = state.scatterStats || {};
+  const thresholds = stats.thresholds || {};
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
 
   ctx.strokeStyle = '#cbd5f5';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(margin.left, margin.top);
-  ctx.lineTo(margin.left, height - margin.bottom);
-  ctx.lineTo(width - margin.right, height - margin.bottom);
+  ctx.rect(margin.left, margin.top, plotWidth, plotHeight);
   ctx.stroke();
 
+  ctx.font = '13px Inter, sans-serif';
   ctx.fillStyle = '#0f172a';
-  ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('RMSD Diego (Å)', (width - margin.right + margin.left) / 2, height - margin.bottom + 32);
+  ctx.fillText('RMSD Diego (Å)', margin.left + plotWidth / 2, height - margin.bottom + 36);
   ctx.save();
-  ctx.translate(20, (height - margin.bottom + margin.top) / 2);
+  ctx.translate(margin.left - 56, margin.top + plotHeight / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillText('ipTM', 0, 0);
   ctx.restore();
 
-  ctx.strokeStyle = '#cbd5f5';
+  ctx.strokeStyle = '#e2e8f0';
   ctx.fillStyle = '#0f172a';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const xTicks = 5;
+  ctx.font = '12px Inter, sans-serif';
+  const xTicks = 6;
   for (let i = 0; i < xTicks; i += 1) {
     const t = xTicks === 1 ? 0 : i / (xTicks - 1);
     const value = xMin + t * xRange;
-    const x = margin.left + t * (width - margin.left - margin.right);
+    const x = margin.left + t * plotWidth;
     ctx.beginPath();
     ctx.moveTo(x, height - margin.bottom);
     ctx.lineTo(x, height - margin.bottom + 6);
     ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
     ctx.fillText(value.toFixed(1), x, height - margin.bottom + 10);
   }
 
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  const yTicks = 5;
+  const yTicks = 6;
   for (let i = 0; i < yTicks; i += 1) {
     const t = yTicks === 1 ? 0 : i / (yTicks - 1);
     const value = yMin + t * yRange;
-    const y = height - margin.bottom - t * (height - margin.top - margin.bottom);
+    const y = height - margin.bottom - t * plotHeight;
     ctx.beginPath();
     ctx.moveTo(margin.left - 6, y);
     ctx.lineTo(margin.left, y);
     ctx.stroke();
-    ctx.fillText(value.toFixed(2), margin.left - 8, y);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(value.toFixed(2), margin.left - 10, y);
+  }
+
+  const hasRmsdThreshold = Number.isFinite(thresholds.rmsd);
+  const hasIptmThreshold = Number.isFinite(thresholds.iptm);
+  if (hasRmsdThreshold && thresholds.rmsd >= xMin && thresholds.rmsd <= xMax) {
+    const t = (thresholds.rmsd - xMin) / xRange;
+    const x = margin.left + t * plotWidth;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, margin.top);
+    ctx.lineTo(x, height - margin.bottom);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = '#f97316';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`RMSD ≤ ${thresholds.rmsd.toFixed(2)} Å`, Math.min(x + 8, width - margin.right), margin.top + 18);
+  }
+
+  if (hasIptmThreshold && thresholds.iptm >= yMin && thresholds.iptm <= yMax) {
+    const t = (thresholds.iptm - yMin) / yRange;
+    const y = height - margin.bottom - t * plotHeight;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, y);
+    ctx.lineTo(width - margin.right, y);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = '#0f172a';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`ipTM ≥ ${thresholds.iptm.toFixed(2)}`, margin.left + 8, Math.max(margin.top + 8, y - 18));
   }
 
   state.scatterLayout.forEach((point) => {
     ctx.beginPath();
     ctx.fillStyle = '#2563eb';
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = 0.82;
     ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
   });
+
+  renderScatterHistograms(sample);
+  updateScatterThresholdSummary();
+}
+
+function renderScatterHistograms(sample) {
+  const topCanvas = el.scatterHistX;
+  const rightCanvas = el.scatterHistY;
+  if (topCanvas) {
+    const ctx = topCanvas.getContext('2d');
+    ctx.clearRect(0, 0, topCanvas.width, topCanvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, topCanvas.width, topCanvas.height);
+  }
+  if (rightCanvas) {
+    const ctx = rightCanvas.getContext('2d');
+    ctx.clearRect(0, 0, rightCanvas.width, rightCanvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rightCanvas.width, rightCanvas.height);
+  }
+  if (!sample || !state.scatterStats || state.scatterLayout.length === 0) return;
+
+  const {
+    margin, xRange, yRange, xMin, yMin,
+  } = sample;
+  const { thresholds = {}, xBins = [], yBins = [] } = state.scatterStats;
+
+  if (topCanvas) {
+    const ctx = topCanvas.getContext('2d');
+    const marginTop = { left: margin.left, right: margin.right, top: 16, bottom: 28 };
+    const plotWidth = Math.max(1, topCanvas.width - marginTop.left - marginTop.right);
+    const plotHeight = Math.max(1, topCanvas.height - marginTop.top - marginTop.bottom);
+    const maxBin = xBins.length ? Math.max(...xBins, 1) : 1;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, topCanvas.width, topCanvas.height);
+    ctx.strokeStyle = '#cbd5f5';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(marginTop.left, topCanvas.height - marginTop.bottom);
+    ctx.lineTo(topCanvas.width - marginTop.right, topCanvas.height - marginTop.bottom);
+    ctx.stroke();
+    const barWidth = plotWidth / (xBins.length || 1);
+    ctx.fillStyle = '#3b82f6';
+    xBins.forEach((count, idx) => {
+      if (!Number.isFinite(count)) return;
+      const heightRatio = maxBin === 0 ? 0 : count / maxBin;
+      const barHeight = heightRatio * plotHeight;
+      const x = marginTop.left + idx * barWidth;
+      const y = topCanvas.height - marginTop.bottom - barHeight;
+      ctx.fillRect(x + 0.5, y, Math.max(1, barWidth - 2), barHeight);
+    });
+    if (Number.isFinite(thresholds.rmsd) && thresholds.rmsd >= xMin && thresholds.rmsd <= xMin + xRange) {
+      const t = (thresholds.rmsd - xMin) / xRange;
+      const x = marginTop.left + t * plotWidth;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#f97316';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, marginTop.top);
+      ctx.lineTo(x, topCanvas.height - marginTop.bottom);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  if (rightCanvas) {
+    const ctx = rightCanvas.getContext('2d');
+    const marginRight = { top: margin.top, bottom: margin.bottom, left: 16, right: 28 };
+    const plotWidth = Math.max(1, rightCanvas.width - marginRight.left - marginRight.right);
+    const plotHeight = Math.max(1, rightCanvas.height - marginRight.top - marginRight.bottom);
+    const maxBin = yBins.length ? Math.max(...yBins, 1) : 1;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rightCanvas.width, rightCanvas.height);
+    ctx.strokeStyle = '#cbd5f5';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(marginRight.left, marginRight.top);
+    ctx.lineTo(marginRight.left, rightCanvas.height - marginRight.bottom);
+    ctx.stroke();
+    const barHeight = plotHeight / (yBins.length || 1);
+    ctx.fillStyle = '#22c55e';
+    yBins.forEach((count, idx) => {
+      if (!Number.isFinite(count)) return;
+      const widthRatio = maxBin === 0 ? 0 : count / maxBin;
+      const barWidth = widthRatio * plotWidth;
+      const y = marginRight.top + (yBins.length - 1 - idx) * barHeight;
+      ctx.fillRect(marginRight.left, y + 0.5, barWidth, Math.max(1, barHeight - 2));
+    });
+    if (Number.isFinite(thresholds.iptm) && thresholds.iptm >= yMin && thresholds.iptm <= yMin + yRange) {
+      const t = (thresholds.iptm - yMin) / yRange;
+      const y = rightCanvas.height - marginRight.bottom - t * plotHeight;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(marginRight.left, y);
+      ctx.lineTo(rightCanvas.width - marginRight.right, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+function updateScatterThresholdSummary() {
+  if (!el.scatterThresholdCount) return;
+  const stats = state.scatterStats;
+  if (!stats || !stats.total) {
+    el.scatterThresholdCount.textContent = '';
+    return;
+  }
+  const { thresholds, passingCount, total } = stats;
+  if (!thresholds || !Number.isFinite(thresholds.rmsd) || !Number.isFinite(thresholds.iptm)) {
+    el.scatterThresholdCount.textContent = '';
+    return;
+  }
+  const percent = total === 0 ? 0 : ((passingCount / total) * 100);
+  const formatted = `${passingCount} / ${total} designs (${percent.toFixed(1)}%) meet RMSD ≤ ${thresholds.rmsd.toFixed(2)} Å and ipTM ≥ ${thresholds.iptm.toFixed(2)}`;
+  el.scatterThresholdCount.textContent = formatted;
+}
+
+function handleScatterThresholdChange(key, rawValue) {
+  if (!Number.isFinite(rawValue)) return;
+  const thresholds = {
+    rmsd: Number.isFinite(state.scatterThresholds?.rmsd) ? state.scatterThresholds.rmsd : 3.7,
+    iptm: Number.isFinite(state.scatterThresholds?.iptm) ? state.scatterThresholds.iptm : 0.8,
+  };
+  let value = rawValue;
+  if (key === 'rmsd') {
+    value = Math.max(0, value);
+  }
+  if (key === 'iptm') {
+    value = Math.min(1, Math.max(0, value));
+  }
+  if (!Number.isFinite(value)) return;
+  const updated = { ...thresholds, [key]: value };
+  state.scatterThresholds = updated;
+  if (key === 'rmsd' && el.scatterThresholdRmsd) {
+    el.scatterThresholdRmsd.value = value;
+  }
+  if (key === 'iptm' && el.scatterThresholdIptm) {
+    el.scatterThresholdIptm.value = value;
+  }
+  computeScatterLayout(state.scatterPoints || []);
+  renderScatter();
 }
 
 function analysisSignature(pdbId, runLabel, sourcePath) {
@@ -1617,6 +1879,14 @@ function renderResults() {
   sortRankings();
   renderResultsTable();
   const scatterPoints = state.rankingsResponse?.scatter || [];
+  state.scatterPoints = scatterPoints;
+  const thresholds = state.scatterThresholds || {};
+  if (el.scatterThresholdRmsd && Number.isFinite(thresholds.rmsd)) {
+    el.scatterThresholdRmsd.value = thresholds.rmsd;
+  }
+  if (el.scatterThresholdIptm && Number.isFinite(thresholds.iptm)) {
+    el.scatterThresholdIptm.value = thresholds.iptm;
+  }
   computeScatterLayout(scatterPoints);
   renderScatter();
   const hasRows = state.rankings.length > 0;
@@ -2637,6 +2907,26 @@ function initEventHandlers() {
     el.refreshJobsBtn.addEventListener('click', () => {
       fetchJobList();
     });
+  }
+  if (el.scatterThresholdRmsd) {
+    const handler = (event) => {
+      const value = Number.parseFloat(event.target.value);
+      if (Number.isFinite(value)) {
+        handleScatterThresholdChange('rmsd', value);
+      }
+    };
+    el.scatterThresholdRmsd.addEventListener('change', handler);
+    el.scatterThresholdRmsd.addEventListener('input', handler);
+  }
+  if (el.scatterThresholdIptm) {
+    const handler = (event) => {
+      const value = Number.parseFloat(event.target.value);
+      if (Number.isFinite(value)) {
+        handleScatterThresholdChange('iptm', value);
+      }
+    };
+    el.scatterThresholdIptm.addEventListener('change', handler);
+    el.scatterThresholdIptm.addEventListener('input', handler);
   }
   registerScatterClick();
   handleTableHeaderClicks();
