@@ -28,9 +28,20 @@ const state = {
   analysisRunning: false,
   analysisContext: null,
   librarySummary: null,
+  libraryAlignmentMode: 'aa',
+  libraryJobId: null,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 const el = {
   targetForm: document.querySelector('#target-form'),
@@ -113,9 +124,13 @@ const el = {
   libraryDownstream: document.querySelector('#library-downstream'),
   libraryStatus: document.querySelector('#library-status'),
   librarySummary: document.querySelector('#library-summary'),
+  libraryDownloads: document.querySelector('#library-downloads'),
+  libraryAlignment: document.querySelector('#library-alignment'),
+  libraryAlignmentToggle: document.querySelector('#library-alignment-toggle'),
+  libraryAlignmentLegend: document.querySelector('#library-alignment-legend'),
+  libraryAlignmentTable: document.querySelector('#library-alignment-table'),
   libraryAssembly: document.querySelector('#library-assembly'),
   libraryPreview: document.querySelector('#library-preview'),
-  libraryDownload: document.querySelector('#library-download'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -1638,13 +1653,23 @@ function renderLibrarySummary(summary) {
   if (!el.librarySummary) return;
   if (!summary) {
     el.librarySummary.innerHTML = '<em>Load rankings and generate the assembly plan to preview fragment layout.</em>';
+    if (el.libraryDownloads) {
+      el.libraryDownloads.hidden = true;
+      el.libraryDownloads.innerHTML = '';
+    }
+    if (el.libraryAlignment) {
+      el.libraryAlignment.hidden = true;
+      if (el.libraryAlignmentTable) el.libraryAlignmentTable.innerHTML = '';
+    }
     if (el.libraryAssembly) el.libraryAssembly.innerHTML = '';
     if (el.libraryPreview) el.libraryPreview.innerHTML = '';
-    if (el.libraryDownload) {
-      el.libraryDownload.hidden = true;
-      el.libraryDownload.textContent = '';
-    }
+    state.libraryAlignmentMode = 'aa';
+    state.libraryJobId = null;
     return;
+  }
+
+  if (summary.job_id) {
+    state.libraryJobId = summary.job_id;
   }
 
   const framework1 = summary.framework1 || {};
@@ -1658,28 +1683,14 @@ function renderLibrarySummary(summary) {
   lines.push(`<div><strong>Framework 2:</strong> ${framework2.length_aa || '—'} aa (${framework2.length_nt || '—'} nt)</div>`);
   const processed = summary.design_count || 0;
   const targetTop = summary.top_n || processed;
-  lines.push(`<div><strong>CDR window:</strong> ${cdr.length_aa || '—'} aa (${cdr.length_nt || '—'} nt) · ${processed} designs (top ${targetTop})</div>`);
+  const alignedAa = cdr.aligned_length_aa || cdr.length_aa || '—';
+  const alignedNt = cdr.aligned_length_nt || cdr.length_nt || '—';
+  lines.push(`<div><strong>CDR window:</strong> ${cdr.length_aa || '—'} aa (${cdr.length_nt || '—'} nt) · aligned ${alignedAa} aa / ${alignedNt} nt · ${processed} designs (top ${targetTop})</div>`);
   lines.push(`<div><strong>BsaI:</strong> ${bsaI.forward || 'GGTCTC'} / ${bsaI.reverse || 'GAGACC'} · flanks ${flanks.upstream || ''} … ${flanks.downstream || ''}</div>`);
-  if (summary.example?.framework1_fragment) {
-    lines.push(`<div><strong>Framework 1 fragment (DNA):</strong> ${summary.example.framework1_fragment}</div>`);
-  }
-  if (summary.example?.framework2_fragment) {
-    lines.push(`<div><strong>Framework 2 fragment (DNA):</strong> ${summary.example.framework2_fragment}</div>`);
-  }
-  if (summary.example?.cdr_fragment) {
-    lines.push(`<div><strong>CDR fragment template:</strong> ${summary.example.cdr_fragment}</div>`);
-  }
   el.librarySummary.innerHTML = lines.join('');
 
-  if (el.libraryDownload) {
-    if (summary.excel_path) {
-      el.libraryDownload.hidden = false;
-      el.libraryDownload.textContent = `Excel workbook: ${summary.excel_path}`;
-    } else {
-      el.libraryDownload.hidden = true;
-      el.libraryDownload.textContent = '';
-    }
-  }
+  renderLibraryDownloads(summary.downloads);
+  renderLibraryAlignment(summary.alignment);
 
   if (el.libraryAssembly) {
     const segments = Array.isArray(summary.example?.segments)
@@ -1689,14 +1700,14 @@ function renderLibrarySummary(summary) {
       const html = segments
         .map((seg) => {
           const typeClass = seg.type ? seg.type.toLowerCase() : 'framework';
-          const label = seg.label ? `<strong>${seg.label}:</strong> ` : '';
-          return `<span class="gg-segment ${typeClass}">${label}${seg.sequence || ''}</span>`;
+          const label = seg.label ? `<strong>${escapeHtml(seg.label)}:</strong> ` : '';
+          return `<span class="gg-segment ${typeClass}">${label}${escapeHtml(seg.sequence || '')}</span>`;
         })
         .join('');
       const finalInsert = summary.example?.final_insert || '';
-      const finalLabel = summary.example?.design_name ? ` (${summary.example.design_name})` : '';
+      const finalLabel = summary.example?.design_name ? ` (${escapeHtml(summary.example.design_name)})` : '';
       const finalHtml = finalInsert
-        ? `<div class="gg-final">Final insert${finalLabel}: ${finalInsert}</div>`
+        ? `<div class="gg-final">Final insert${finalLabel}: ${escapeHtml(finalInsert)}</div>`
         : '';
       el.libraryAssembly.innerHTML = html + finalHtml;
     } else {
@@ -1710,10 +1721,11 @@ function renderLibrarySummary(summary) {
       const rows = preview
         .map((row) => `
           <tr>
-            <td>${row.design_name || ''}</td>
-            <td>${row.cdr_aa || ''}</td>
+            <td>${escapeHtml(row.design_name || '')}</td>
+            <td>${escapeHtml(row.cdr_aa || '')}</td>
             <td>${(row.cdr_dna || '').length}</td>
-            <td class="monospace">${row.cdr_fragment || ''}</td>
+            <td>${(row.final_insert || '').length}</td>
+            <td class="monospace">${escapeHtml(row.cdr_fragment || '')}</td>
           </tr>`)
         .join('');
       el.libraryPreview.innerHTML = `
@@ -1723,6 +1735,7 @@ function renderLibrarySummary(summary) {
               <th>Design</th>
               <th>CDR (aa)</th>
               <th>CDR nt</th>
+              <th>Final insert nt</th>
               <th>BsaI-flanked CDR fragment</th>
             </tr>
           </thead>
@@ -1731,6 +1744,216 @@ function renderLibrarySummary(summary) {
     } else {
       el.libraryPreview.innerHTML = '<em>No preview available.</em>';
     }
+  }
+}
+
+function renderLibraryDownloads(downloads) {
+  if (!el.libraryDownloads) return;
+  const entries = [];
+  if (downloads && typeof downloads === 'object') {
+    const order = [
+      { key: 'csv', fallback: 'Download CSV' },
+      { key: 'aa_fasta', fallback: 'Download AA FASTA' },
+      { key: 'dna_fasta', fallback: 'Download DNA FASTA' },
+    ];
+    for (const item of order) {
+      const info = downloads[item.key];
+      if (info && info.path) {
+        entries.push({
+          key: item.key,
+          label: info.label || item.fallback,
+        });
+      }
+    }
+  }
+
+  if (!entries.length) {
+    el.libraryDownloads.hidden = true;
+    el.libraryDownloads.innerHTML = '';
+    return;
+  }
+
+  const buttons = entries
+    .map(
+      (entry) =>
+        `<button type="button" class="download-link" data-download="${entry.key}">${escapeHtml(entry.label)}</button>`,
+    )
+    .join('');
+  el.libraryDownloads.innerHTML = `<div class="download-buttons">${buttons}</div>`;
+  el.libraryDownloads.hidden = false;
+}
+
+function regionClass(region) {
+  if (!region) return 'region-cdr';
+  return `region-${String(region).toLowerCase().replace(/[^a-z0-9_-]+/g, '') || 'cdr'}`;
+}
+
+function buildAlignmentTable(view) {
+  const columns = Array.isArray(view?.columns) ? view.columns : [];
+  const rows = Array.isArray(view?.rows) ? view.rows : [];
+  if (!columns.length || !rows.length) {
+    return '<em>No alignment available.</em>';
+  }
+
+  const headerCells = columns
+    .map((col) => {
+      const refChar = col.reference ? escapeHtml(col.reference) : '&nbsp;';
+      return `<th class="gg-col ${regionClass(col.region)}">${refChar}</th>`;
+    })
+    .join('');
+  const positionCells = columns
+    .map((col) => {
+      const text = col.position !== null && col.position !== undefined ? String(col.position) : '';
+      return `<th class="gg-col ${regionClass(col.region)}">${escapeHtml(text)}</th>`;
+    })
+    .join('');
+
+  const bodyRows = rows
+    .map((row) => {
+      const seq = typeof row.sequence === 'string' ? row.sequence : '';
+      const chars = seq.split('');
+      const mutations = Array.isArray(row.mutations) ? row.mutations : [];
+      const cells = columns
+        .map((col, idx) => {
+          const ch = idx < chars.length ? chars[idx] : '-';
+          const mutated = mutations[idx] === true;
+          const classes = ['gg-cell', regionClass(col.region)];
+          if (mutated) classes.push('mutated');
+          if (ch === '-') classes.push('gap');
+          const displayChar = ch === '-' ? '&middot;' : escapeHtml(ch);
+          return `<td class="${classes.join(' ')}" data-region="${escapeHtml(col.region || '')}">${displayChar}</td>`;
+        })
+        .join('');
+      const label = row.is_reference ? `${row.design_name || 'Reference'} (ref)` : row.design_name || '';
+      const rowClass = row.is_reference ? 'reference-row' : '';
+      return `<tr class="${rowClass}"><th scope="row">${escapeHtml(label)}</th>${cells}</tr>`;
+    })
+    .join('');
+
+  return `
+    <div class="alignment-scroll">
+      <table class="gg-alignment-table">
+        <thead>
+          <tr>
+            <th scope="col">Design</th>${headerCells}
+          </tr>
+          <tr class="position-row">
+            <th scope="col">#</th>${positionCells}
+          </tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderLibraryAlignment(alignment) {
+  if (!el.libraryAlignment || !el.libraryAlignmentTable) return;
+  if (!alignment || typeof alignment !== 'object') {
+    el.libraryAlignment.hidden = true;
+    el.libraryAlignmentTable.innerHTML = '';
+    return;
+  }
+
+  const modes = [];
+  if (alignment.aa?.columns?.length && alignment.aa?.rows?.length) modes.push('aa');
+  if (alignment.dna?.columns?.length && alignment.dna?.rows?.length) modes.push('dna');
+  if (!modes.length) {
+    el.libraryAlignment.hidden = true;
+    el.libraryAlignmentTable.innerHTML = '<em>No alignment available.</em>';
+    return;
+  }
+
+  if (!modes.includes(state.libraryAlignmentMode)) {
+    state.libraryAlignmentMode = modes[0];
+  }
+
+  if (el.libraryAlignmentToggle) {
+    el.libraryAlignmentToggle.querySelectorAll('button[data-mode]').forEach((btn) => {
+      const mode = btn.dataset.mode;
+      btn.disabled = !modes.includes(mode);
+      btn.classList.toggle('active', mode === state.libraryAlignmentMode);
+    });
+  }
+
+  if (el.libraryAlignmentLegend) {
+    const legendItems = Array.isArray(alignment.legends?.[state.libraryAlignmentMode])
+      ? alignment.legends[state.libraryAlignmentMode]
+      : [];
+    if (legendItems.length) {
+      const legendHtml = legendItems
+        .map(
+          (item) =>
+            `<span class="legend-item"><span class="legend-swatch ${regionClass(item.type)}"></span>${escapeHtml(
+              item.label || item.type || '',
+            )}</span>`,
+        )
+        .join('');
+      el.libraryAlignmentLegend.innerHTML = legendHtml;
+      el.libraryAlignmentLegend.hidden = false;
+    } else {
+      el.libraryAlignmentLegend.innerHTML = '';
+      el.libraryAlignmentLegend.hidden = true;
+    }
+  }
+
+  const view = alignment[state.libraryAlignmentMode];
+  el.libraryAlignmentTable.innerHTML = buildAlignmentTable(view);
+  el.libraryAlignment.hidden = false;
+}
+
+function handleLibraryAlignmentToggle(event) {
+  const btn = event.target.closest('button[data-mode]');
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  if (!mode || btn.disabled || state.libraryAlignmentMode === mode) return;
+  state.libraryAlignmentMode = mode;
+  if (state.librarySummary?.alignment) {
+    renderLibraryAlignment(state.librarySummary.alignment);
+  }
+}
+
+function handleLibraryDownloadClick(event) {
+  const btn = event.target.closest('button[data-download]');
+  if (!btn) return;
+  const kind = btn.dataset.download;
+  if (!kind) return;
+  downloadGoldenGateFile(kind);
+}
+
+async function downloadGoldenGateFile(kind) {
+  if (!state.libraryJobId) {
+    showAlert('Golden Gate plan is not available for download.');
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/golden-gate/${state.libraryJobId}/download/${kind}`);
+    if (!resp.ok) {
+      throw new Error(`Download failed (${resp.status})`);
+    }
+    const blob = await resp.blob();
+    const disposition = resp.headers.get('content-disposition') || '';
+    let filename = state.librarySummary?.downloads?.[kind]?.filename || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    if (match && match[1]) {
+      filename = match[1];
+    }
+    if (!filename) {
+      if (kind === 'csv') filename = 'golden_gate.csv';
+      else if (kind === 'aa_fasta') filename = 'golden_gate_aa.fasta';
+      else if (kind === 'dna_fasta') filename = 'golden_gate_dna.fasta';
+      else filename = 'download.dat';
+    }
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(err);
+    showAlert(err.message || 'Failed to download file.');
   }
 }
 
@@ -1919,13 +2142,17 @@ function updateJobUI(job) {
     } else if (job.status === 'success') {
       const summary = job.details?.summary || null;
       state.librarySummary = summary;
+      state.libraryJobId = job.job_id;
+      state.libraryAlignmentMode = 'aa';
       renderLibrarySummary(summary);
       if (el.libraryStatus) setBadge(el.libraryStatus, 'Golden Gate plan ready', 'rgba(134, 239, 172, 0.25)');
       if (el.libraryRun) el.libraryRun.disabled = false;
       stopJobPolling();
-      const excelPath = job.details?.excel_path || '';
-      if (excelPath) {
-        showAlert(`Golden Gate workbook saved to ${excelPath}`, false);
+      const downloadCount = summary?.downloads
+        ? Object.values(summary.downloads).filter((info) => info && info.path).length
+        : 0;
+      if (downloadCount > 0) {
+        showAlert(`Golden Gate plan ready — ${downloadCount} download${downloadCount === 1 ? '' : 's'} available.`, false);
       } else {
         showAlert('Golden Gate plan finished.', false);
       }
@@ -1934,6 +2161,7 @@ function updateJobUI(job) {
       if (el.libraryRun) el.libraryRun.disabled = false;
       showAlert(job.message || 'Golden Gate planning failed.');
       state.librarySummary = null;
+      state.libraryJobId = null;
       renderLibrarySummary(null);
       stopJobPolling();
     }
@@ -2368,6 +2596,12 @@ function initEventHandlers() {
   }
   if (el.assessSubmit) {
     el.assessSubmit.addEventListener('click', queueAssessmentRun);
+  }
+  if (el.libraryDownloads) {
+    el.libraryDownloads.addEventListener('click', handleLibraryDownloadClick);
+  }
+  if (el.libraryAlignmentToggle) {
+    el.libraryAlignmentToggle.addEventListener('click', handleLibraryAlignmentToggle);
   }
   if (el.resultsRunLabel) {
     el.resultsRunLabel.addEventListener('input', (event) => {

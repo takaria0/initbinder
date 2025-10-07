@@ -214,8 +214,18 @@
           <button type="button" id="library-run" disabled>Plan Golden Gate library</button>
           <span class="badge" id="library-status" hidden>Idle</span>
         </div>
-        <div class="library-download" id="library-download" hidden></div>
         <div class="library-summary" id="library-summary"></div>
+        <div class="library-downloads" id="library-downloads" hidden></div>
+        <div class="library-alignment" id="library-alignment" hidden>
+          <div class="alignment-toolbar">
+            <div class="alignment-toggle" id="library-alignment-toggle">
+              <button type="button" data-mode="aa" class="active">Amino acids</button>
+              <button type="button" data-mode="dna">Nucleotides</button>
+            </div>
+            <div class="alignment-legend" id="library-alignment-legend"></div>
+          </div>
+          <div class="alignment-table" id="library-alignment-table"></div>
+        </div>
         <div class="gg-assembly" id="library-assembly"></div>
         <div class="library-preview" id="library-preview"></div>
       </section>

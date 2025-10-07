@@ -9,6 +9,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pathlib import Path
+
+from fastapi.responses import FileResponse
+
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .analysis import AnalysisGenerationError, generate_rankings_analysis
 from .config import load_config
@@ -110,6 +114,42 @@ async def api_golden_gate(payload: GoldenGateRequest) -> GoldenGateResponse:
     job_id = submit_golden_gate_plan(payload, job_store=store)
     message = f"Queued Golden Gate plan for {payload.pdb_id.upper()}"
     return GoldenGateResponse(job_id=job_id, message=message)
+
+
+@app.get("/api/golden-gate/{job_id}/download/{kind}")
+async def api_golden_gate_download(job_id: str, kind: str):
+    allowed = {"csv", "aa_fasta", "dna_fasta"}
+    if kind not in allowed:
+        raise HTTPException(status_code=404, detail="Download not available")
+
+    try:
+        record: JobRecord = store.get(job_id)
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+    details = record.details or {}
+    summary = details.get("summary") if isinstance(details, dict) else None
+    downloads = summary.get("downloads") if isinstance(summary, dict) else None
+    if not isinstance(downloads, dict) or kind not in downloads:
+        raise HTTPException(status_code=404, detail="Download not available")
+
+    info = downloads.get(kind) or {}
+    path_value = info.get("path") if isinstance(info, dict) else None
+    if not path_value:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    path = Path(str(path_value)).expanduser()
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    filename = info.get("filename") if isinstance(info, dict) else None
+    media_type = "application/octet-stream"
+    if kind == "csv":
+        media_type = "text/csv"
+    elif kind in {"aa_fasta", "dna_fasta"}:
+        media_type = "text/x-fasta"
+
+    return FileResponse(path, filename=filename or path.name, media_type=media_type)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
