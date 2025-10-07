@@ -520,11 +520,15 @@ function closeExportModal() {
 function setCurrentPdb(pdbId, options = {}) {
   if (!pdbId) return;
   const upper = pdbId.toUpperCase();
+  const changed = state.currentPdb !== upper;
   state.currentPdb = upper;
   if (options.updateInput !== false && el.pdbInput) {
     el.pdbInput.value = upper;
   }
   state.activeRunLabel = '';
+  if (changed || options.forceReset) {
+    resetResultsPanel();
+  }
   resetAnalysisPanel({ disableButton: true });
   updateActiveRunDisplay();
   syncActivePreset();
@@ -1196,7 +1200,9 @@ function sortRankings() {
 }
 
 function renderResultsTable() {
+  if (!el.resultsTable) return;
   const tbody = el.resultsTable.querySelector('tbody');
+  if (!tbody) return;
   tbody.innerHTML = '';
   state.rankings.forEach((row) => {
     const tr = document.createElement('tr');
@@ -1574,6 +1580,29 @@ function handleScatterThresholdChange(key, rawValue) {
 
 function analysisSignature(pdbId, runLabel, sourcePath) {
   return [pdbId || '', runLabel || '', sourcePath || ''].join('::');
+}
+
+function resetResultsPanel(options = {}) {
+  const preserveMeta = Boolean(options.preserveMeta);
+  const preserveRunLabel = Boolean(options.preserveRunLabel);
+  state.rankings = [];
+  state.rankingsResponse = null;
+  state.scatterLayout = [];
+  state.scatterPoints = [];
+  state.scatterStats = null;
+  state.selectedDesign = null;
+  state.galleryAvailable = false;
+  state.librarySummary = null;
+  if (!preserveRunLabel && el.resultsRunLabel) {
+    el.resultsRunLabel.value = '';
+  }
+  if (!preserveMeta && el.resultsMeta) {
+    setBadge(el.resultsMeta, null);
+  }
+  if (el.binderDetail) {
+    el.binderDetail.hidden = true;
+  }
+  renderResults();
 }
 
 function resetAnalysisPanel(options = {}) {
