@@ -207,7 +207,37 @@ def init_target(
                 chosen_chains = list(alignment_summary.chain_ids)
                 overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
                 if overlap:
-                    config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
+                    chain_ranges = getattr(alignment_summary, "chain_ranges", {}) or {}
+                    formatted_ranges: list[str] = []
+                    for chain_id, span in sorted(chain_ranges.items()):
+                        chain_id_str = str(chain_id).strip()
+                        if not chain_id_str or not span:
+                            continue
+                        if isinstance(span, (list, tuple)) and len(span) >= 2:
+                            start_label = str(span[0]).strip()
+                            end_label = str(span[1]).strip()
+                        else:
+                            start_label = end_label = ""
+                        if not start_label or not end_label:
+                            continue
+                        # Ensure numeric ordering when possible (while preserving insertion codes)
+                        start_disp, end_disp = start_label, end_label
+                        try:
+                            start_match = re.match(r"^-?\d+", start_label)
+                            end_match = re.match(r"^-?\d+", end_label)
+                            if start_match and end_match:
+                                start_num = int(start_match.group(0))
+                                end_num = int(end_match.group(0))
+                                if end_num < start_num:
+                                    start_disp, end_disp = end_label, start_label
+                        except ValueError:
+                            pass
+                        formatted_ranges.append(f"{chain_id_str}:{start_disp}-{end_disp}")
+
+                    if formatted_ranges:
+                        config["allowed_epitope_range"] = ", ".join(formatted_ranges)
+                    else:
+                        config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
     else:
         print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
 
