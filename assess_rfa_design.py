@@ -1037,6 +1037,7 @@ def build_pymol_gallery_from_rankings(
             f"create target_af3_gallery, {tmp_tg_af}, 1, {i}\n",
             f"create binder_gallery_af3, {tmp_bd_af}, 1, {i}\n",
             f"create binder_gallery_rfdiff, {tmp_bd_rf}, 1, {i}\n",
+            f"align (target_rfcrop_gallery and state {i}), (target_af3_gallery and state {i})\n",
 
             # Epitope mask/hotspots for this state (derived from target_prepared)
             *( [

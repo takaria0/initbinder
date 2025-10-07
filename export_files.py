@@ -704,6 +704,7 @@ def export_pymol_gallery_bundle(
             f"create target_af3_gallery, {tmp_tg_af}, 1, {idx}",
             f"create binder_gallery_af3, {tmp_bd_af}, 1, {idx}",
             f"create binder_gallery_rfdiff, {tmp_bd_rf}, 1, {idx}",
+            f"align (target_rfcrop_gallery and state {idx}), (target_af3_gallery and state {idx})",
         ])
 
         if mask_expr:
