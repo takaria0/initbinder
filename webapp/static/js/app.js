@@ -1332,7 +1332,7 @@ function renderScatter() {
   ctx.fillStyle = '#0f172a';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('RMSD Diego (Å)', margin.left + plotWidth / 2, height - margin.bottom + 36);
+  ctx.fillText('Binder RMSD (Å)', margin.left + plotWidth / 2, height - margin.bottom + 36);
   ctx.save();
   ctx.translate(margin.left - 56, margin.top + plotHeight / 2);
   ctx.rotate(-Math.PI / 2);
@@ -2240,7 +2240,7 @@ function selectDesign(designName) {
   const info = [
     `<strong>${row.design_name}</strong>`,
     `ipTM: ${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : 'NA'}`,
-    `RMSD Diego: ${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : 'NA'}`,
+    `Binder RMSD: ${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : 'NA'}`,
     row.metadata.arm ? `Arm: ${row.metadata.arm}` : '',
     row.metadata.epitope ? `Epitope: ${row.metadata.epitope}` : '',
     row.metadata.pymol_script_path ? `PyMOL script: ${row.metadata.pymol_script_path}` : '',
