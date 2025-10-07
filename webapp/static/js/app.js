@@ -27,6 +27,7 @@ const state = {
   analysisResults: null,
   analysisRunning: false,
   analysisContext: null,
+  librarySummary: null,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -104,6 +105,17 @@ const el = {
   analysisMatrix: document.querySelector('#analysis-matrix'),
   analysisRun: document.querySelector('#analysis-run'),
   analysisLogs: document.querySelector('#analysis-logs'),
+  libraryRun: document.querySelector('#library-run'),
+  libraryTopN: document.querySelector('#library-topn'),
+  libraryCodonHost: document.querySelector('#library-codon-host'),
+  librarySequenceColumn: document.querySelector('#library-sequence-column'),
+  libraryUpstream: document.querySelector('#library-upstream'),
+  libraryDownstream: document.querySelector('#library-downstream'),
+  libraryStatus: document.querySelector('#library-status'),
+  librarySummary: document.querySelector('#library-summary'),
+  libraryAssembly: document.querySelector('#library-assembly'),
+  libraryPreview: document.querySelector('#library-preview'),
+  libraryDownload: document.querySelector('#library-download'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -977,6 +989,57 @@ async function runExport() {
   }
 }
 
+async function runGoldenGatePlanner() {
+  if (!state.currentPdb || !state.rankingsResponse) {
+    showAlert('Load rankings before building the Golden Gate plan.');
+    return;
+  }
+
+  const sequenceColumn = el.librarySequenceColumn?.value.trim();
+  const payload = {
+    pdb_id: state.currentPdb,
+    rankings_path: state.rankingsResponse.source_path,
+    top_n: Number(el.libraryTopN?.value || 0) || 48,
+    codon_host: el.libraryCodonHost?.value || 'yeast',
+    sequence_column: sequenceColumn ? sequenceColumn : null,
+    upstream_flank: (el.libraryUpstream?.value || 'GGAG').trim().toUpperCase(),
+    downstream_flank: (el.libraryDownstream?.value || 'CGCT').trim().toUpperCase(),
+  };
+
+  if (payload.upstream_flank.length < 2 || payload.downstream_flank.length < 2) {
+    showAlert('Flanking sequences should be at least 2 bases long.');
+    return;
+  }
+
+  state.librarySummary = null;
+  renderLibrarySummary(null);
+  if (el.libraryRun) el.libraryRun.disabled = true;
+  if (el.libraryStatus) setBadge(el.libraryStatus, 'Submitting…');
+  resetJobLog('Submitting Golden Gate planner…');
+  el.jobAlert.hidden = true;
+
+  try {
+    const res = await fetch('/api/golden-gate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Request failed with ${res.status}`);
+    }
+    const body = await res.json();
+    state.selectedJobId = body.job_id;
+    startJobPolling(body.job_id, 'library');
+    fetchJobList();
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    showAlert(message);
+    if (el.libraryRun) el.libraryRun.disabled = false;
+    if (el.libraryStatus) setBadge(el.libraryStatus, `Failed — ${message}`, 'rgba(248, 113, 113, 0.25)');
+  }
+}
+
 async function fetchRankings(options = {}) {
   const { silent = false } = options;
   if (!state.currentPdb) {
@@ -1035,8 +1098,16 @@ async function fetchRankings(options = {}) {
     );
     const contextMatches =
       state.analysisContext && state.analysisContext.signature === newSignature;
+    const previousSummary = state.librarySummary;
+    const newSource = payload.source_path ? String(payload.source_path) : '';
+    const keepSummary =
+      Boolean(previousSummary && previousSummary.rankings_source && newSource) &&
+      String(previousSummary.rankings_source) === newSource;
     state.rankings = payload.rows || [];
     state.rankingsResponse = payload;
+    if (!keepSummary) {
+      state.librarySummary = null;
+    }
     state.tableSort = { key: 'iptm', dir: 'desc' };
     state.scatterLayout = [];
     state.selectedDesign = null;
@@ -1538,6 +1609,7 @@ function renderResults() {
   if (el.plotContainer) el.plotContainer.hidden = state.scatterLayout.length === 0;
   if (el.exportButton) el.exportButton.disabled = !hasRows;
   if (el.exportOpen) el.exportOpen.disabled = !hasRows;
+  if (el.libraryRun) el.libraryRun.disabled = !hasRows;
   if (el.pymolTop) {
     el.pymolTop.disabled = !hasRows;
     el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
@@ -1555,8 +1627,110 @@ function renderResults() {
   }
   if (!hasRows) {
     resetAnalysisPanel({ disableButton: true });
+    state.librarySummary = null;
   } else {
     renderAnalysis();
+  }
+  renderLibrarySummary(state.librarySummary);
+}
+
+function renderLibrarySummary(summary) {
+  if (!el.librarySummary) return;
+  if (!summary) {
+    el.librarySummary.innerHTML = '<em>Load rankings and generate the assembly plan to preview fragment layout.</em>';
+    if (el.libraryAssembly) el.libraryAssembly.innerHTML = '';
+    if (el.libraryPreview) el.libraryPreview.innerHTML = '';
+    if (el.libraryDownload) {
+      el.libraryDownload.hidden = true;
+      el.libraryDownload.textContent = '';
+    }
+    return;
+  }
+
+  const framework1 = summary.framework1 || {};
+  const framework2 = summary.framework2 || {};
+  const cdr = summary.cdr || {};
+  const bsaI = summary.bsaI || {};
+  const flanks = summary.flanks || {};
+
+  const lines = [];
+  lines.push(`<div><strong>Framework 1:</strong> ${framework1.length_aa || '—'} aa (${framework1.length_nt || '—'} nt)</div>`);
+  lines.push(`<div><strong>Framework 2:</strong> ${framework2.length_aa || '—'} aa (${framework2.length_nt || '—'} nt)</div>`);
+  const processed = summary.design_count || 0;
+  const targetTop = summary.top_n || processed;
+  lines.push(`<div><strong>CDR window:</strong> ${cdr.length_aa || '—'} aa (${cdr.length_nt || '—'} nt) · ${processed} designs (top ${targetTop})</div>`);
+  lines.push(`<div><strong>BsaI:</strong> ${bsaI.forward || 'GGTCTC'} / ${bsaI.reverse || 'GAGACC'} · flanks ${flanks.upstream || ''} … ${flanks.downstream || ''}</div>`);
+  if (summary.example?.framework1_fragment) {
+    lines.push(`<div><strong>Framework 1 fragment (DNA):</strong> ${summary.example.framework1_fragment}</div>`);
+  }
+  if (summary.example?.framework2_fragment) {
+    lines.push(`<div><strong>Framework 2 fragment (DNA):</strong> ${summary.example.framework2_fragment}</div>`);
+  }
+  if (summary.example?.cdr_fragment) {
+    lines.push(`<div><strong>CDR fragment template:</strong> ${summary.example.cdr_fragment}</div>`);
+  }
+  el.librarySummary.innerHTML = lines.join('');
+
+  if (el.libraryDownload) {
+    if (summary.excel_path) {
+      el.libraryDownload.hidden = false;
+      el.libraryDownload.textContent = `Excel workbook: ${summary.excel_path}`;
+    } else {
+      el.libraryDownload.hidden = true;
+      el.libraryDownload.textContent = '';
+    }
+  }
+
+  if (el.libraryAssembly) {
+    const segments = Array.isArray(summary.example?.segments)
+      ? summary.example.segments
+      : [];
+    if (segments.length) {
+      const html = segments
+        .map((seg) => {
+          const typeClass = seg.type ? seg.type.toLowerCase() : 'framework';
+          const label = seg.label ? `<strong>${seg.label}:</strong> ` : '';
+          return `<span class="gg-segment ${typeClass}">${label}${seg.sequence || ''}</span>`;
+        })
+        .join('');
+      const finalInsert = summary.example?.final_insert || '';
+      const finalLabel = summary.example?.design_name ? ` (${summary.example.design_name})` : '';
+      const finalHtml = finalInsert
+        ? `<div class="gg-final">Final insert${finalLabel}: ${finalInsert}</div>`
+        : '';
+      el.libraryAssembly.innerHTML = html + finalHtml;
+    } else {
+      el.libraryAssembly.innerHTML = '';
+    }
+  }
+
+  if (el.libraryPreview) {
+    const preview = Array.isArray(summary.preview) ? summary.preview : [];
+    if (preview.length) {
+      const rows = preview
+        .map((row) => `
+          <tr>
+            <td>${row.design_name || ''}</td>
+            <td>${row.cdr_aa || ''}</td>
+            <td>${(row.cdr_dna || '').length}</td>
+            <td class="monospace">${row.cdr_fragment || ''}</td>
+          </tr>`)
+        .join('');
+      el.libraryPreview.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Design</th>
+              <th>CDR (aa)</th>
+              <th>CDR nt</th>
+              <th>BsaI-flanked CDR fragment</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    } else {
+      el.libraryPreview.innerHTML = '<em>No preview available.</em>';
+    }
   }
 }
 
@@ -1628,6 +1802,10 @@ function startJobPolling(jobId, context, opts = {}) {
       if (context === 'export') {
         el.exportButton.disabled = false;
         if (el.exportOpen) el.exportOpen.disabled = false;
+      }
+      if (context === 'library') {
+        if (el.libraryRun) el.libraryRun.disabled = false;
+        if (el.libraryStatus) setBadge(el.libraryStatus, 'Polling failed', 'rgba(248, 113, 113, 0.25)');
       }
       if (context === 'sync' && el.syncResultsBtn) el.syncResultsBtn.disabled = false;
     }
@@ -1732,6 +1910,31 @@ function updateJobUI(job) {
       showAlert(job.message || 'Export failed.');
       el.exportButton.disabled = false;
       if (el.exportOpen) el.exportOpen.disabled = false;
+      stopJobPolling();
+    }
+  } else if (ctx === 'library') {
+    if (job.status === 'running' || job.status === 'pending') {
+      if (el.libraryStatus) setBadge(el.libraryStatus, job.status === 'running' ? 'Planning…' : 'Queued…');
+      if (el.libraryRun) el.libraryRun.disabled = true;
+    } else if (job.status === 'success') {
+      const summary = job.details?.summary || null;
+      state.librarySummary = summary;
+      renderLibrarySummary(summary);
+      if (el.libraryStatus) setBadge(el.libraryStatus, 'Golden Gate plan ready', 'rgba(134, 239, 172, 0.25)');
+      if (el.libraryRun) el.libraryRun.disabled = false;
+      stopJobPolling();
+      const excelPath = job.details?.excel_path || '';
+      if (excelPath) {
+        showAlert(`Golden Gate workbook saved to ${excelPath}`, false);
+      } else {
+        showAlert('Golden Gate plan finished.', false);
+      }
+    } else {
+      if (el.libraryStatus) setBadge(el.libraryStatus, 'Planning failed', 'rgba(248, 113, 113, 0.25)');
+      if (el.libraryRun) el.libraryRun.disabled = false;
+      showAlert(job.message || 'Golden Gate planning failed.');
+      state.librarySummary = null;
+      renderLibrarySummary(null);
       stopJobPolling();
     }
   } else if (ctx === 'sync') {
@@ -2115,6 +2318,9 @@ function disableFutureSections() {
   el.pymolHotspots.disabled = true;
   if (el.pymolMovie) el.pymolMovie.disabled = true;
   if (el.assessSubmit) el.assessSubmit.disabled = true;
+  if (el.libraryRun) el.libraryRun.disabled = true;
+  state.librarySummary = null;
+  renderLibrarySummary(null);
   state.targetStatus = null;
   state.targetDetails = null;
   renderTargetInsights({});
@@ -2143,6 +2349,7 @@ function initEventHandlers() {
   if (el.exportClose) el.exportClose.addEventListener('click', () => closeExportModal());
   if (el.exportBackdrop) el.exportBackdrop.addEventListener('click', () => closeExportModal());
   el.exportButton.addEventListener('click', runExport);
+  if (el.libraryRun) el.libraryRun.addEventListener('click', runGoldenGatePlanner);
   if (el.refreshResultsBtn) {
     el.refreshResultsBtn.addEventListener('click', () => fetchRankings({ silent: false }));
   }

@@ -188,6 +188,38 @@
         </div>
       </section>
 
+      <section id="library-section">
+        <h2>Golden Gate Assembly Planner</h2>
+        <p style="margin-top: 0;">Split constant VHH frameworks and variable CDRs into BsaI-flanked fragments ready for single-pot cloning, and export an order-ready spreadsheet.</p>
+        <div class="library-controls">
+          <label>Top designs
+            <input type="number" id="library-topn" value="48" min="1">
+          </label>
+          <label>Codon host
+            <select id="library-codon-host">
+              <option value="yeast">Yeast</option>
+              <option value="e_coli">E. coli</option>
+              <option value="human">Human</option>
+            </select>
+          </label>
+          <label>Sequence column (optional)
+            <input type="text" id="library-sequence-column" placeholder="binder_sequence_aa">
+          </label>
+          <label>5′ flank
+            <input type="text" id="library-upstream" value="GGAG">
+          </label>
+          <label>3′ flank
+            <input type="text" id="library-downstream" value="CGCT">
+          </label>
+          <button type="button" id="library-run" disabled>Plan Golden Gate library</button>
+          <span class="badge" id="library-status" hidden>Idle</span>
+        </div>
+        <div class="library-download" id="library-download" hidden></div>
+        <div class="library-summary" id="library-summary"></div>
+        <div class="gg-assembly" id="library-assembly"></div>
+        <div class="library-preview" id="library-preview"></div>
+      </section>
+
       </div>
 
       <aside id="jobs-sidebar">

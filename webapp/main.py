@@ -25,6 +25,8 @@ from .models import (
     DesignRunResponse,
     ExportRequest,
     ExportResponse,
+    GoldenGateRequest,
+    GoldenGateResponse,
     JobStatusResponse,
     JobSummary,
     PyMolGalleryMovieRequest,
@@ -59,6 +61,7 @@ from .workflows import (
     submit_assessment_sync,
     submit_design_run,
     submit_export,
+    submit_golden_gate_plan,
     submit_target_initialization,
 )
 
@@ -100,6 +103,13 @@ async def api_export(payload: ExportRequest) -> ExportResponse:
     job_id = submit_export(payload, job_store=store)
     message = f"Queued export for {payload.pdb_id.upper()}"
     return ExportResponse(job_id=job_id, message=message)
+
+
+@app.post("/api/golden-gate", response_model=GoldenGateResponse)
+async def api_golden_gate(payload: GoldenGateRequest) -> GoldenGateResponse:
+    job_id = submit_golden_gate_plan(payload, job_store=store)
+    message = f"Queued Golden Gate plan for {payload.pdb_id.upper()}"
+    return GoldenGateResponse(job_id=job_id, message=message)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)

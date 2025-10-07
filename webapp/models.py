@@ -196,6 +196,24 @@ class ExportResponse(BaseModel):
     message: str
 
 
+class GoldenGateRequest(BaseModel):
+    pdb_id: str
+    rankings_path: str
+    top_n: int = Field(48, ge=1)
+    codon_host: str = Field("yeast")
+    sequence_column: Optional[str] = Field(
+        None,
+        description="Optional column override for binder amino acid sequence",
+    )
+    upstream_flank: str = Field("GGAG", min_length=2, description="5' flanking bases")
+    downstream_flank: str = Field("CGCT", min_length=2, description="3' flanking bases")
+
+
+class GoldenGateResponse(BaseModel):
+    job_id: str
+    message: str
+
+
 class PyMolHotspotRequest(BaseModel):
     launch: bool = Field(True, description="Invoke PyMOL after bundle generation")
     bundle_only: bool = Field(False, description="Skip launching PyMOL; just return bundle path")
