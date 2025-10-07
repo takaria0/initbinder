@@ -810,6 +810,124 @@ th {
   color: #15803d;
 }
 
+#library-section .library-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+#library-section label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.95rem;
+  gap: 6px;
+  color: #1f2937;
+}
+
+#library-section input,
+#library-section select {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.95rem;
+  background: #f8fafc;
+}
+
+#library-run {
+  padding: 10px 18px;
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#library-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.library-download {
+  font-size: 0.95rem;
+  margin-bottom: 10px;
+  color: #1f2937;
+}
+
+.library-summary {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+
+.gg-assembly {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-family: "Source Code Pro", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
+.gg-segment {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.15);
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.gg-final {
+  font-family: "Source Code Pro", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(15, 118, 110, 0.1);
+  border: 1px solid rgba(15, 118, 110, 0.35);
+  margin-bottom: 16px;
+  word-break: break-all;
+}
+
+.gg-segment.framework {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.gg-segment.cdr {
+  background: rgba(244, 114, 182, 0.2);
+  border-color: rgba(244, 114, 182, 0.4);
+}
+
+.gg-segment.bsaI {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.gg-segment.flank {
+  background: rgba(251, 191, 36, 0.18);
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.library-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.library-preview th,
+.library-preview td {
+  border: 1px solid var(--color-border);
+  padding: 8px;
+  text-align: left;
+}
+
+.library-preview th {
+  background: rgba(30, 64, 175, 0.08);
+  font-weight: 600;
+}
+
 @media (max-width: 1100px) {
   main.app-shell {
     flex-direction: column;

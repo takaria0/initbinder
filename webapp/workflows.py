@@ -17,16 +17,19 @@ from .models import (
     AssessmentRunRequest,
     DesignRunRequest,
     ExportRequest,
+    GoldenGateRequest,
     TargetInitRequest,
 )
 from .pipeline import PipelineError, init_decide_prep
 from .designs import run_design_workflow
 from .exporter import ExportError, run_export
+from .golden_gate import GoldenGateError, run_golden_gate_plan
 
 
 _executor: ThreadPoolExecutor | None = None
 _init_executor: ThreadPoolExecutor | None = None
 _export_executor: ThreadPoolExecutor | None = None
+_library_executor: ThreadPoolExecutor | None = None
 _cluster_executor: ThreadPoolExecutor | None = None
 
 
@@ -57,6 +60,16 @@ def _get_export_executor() -> ThreadPoolExecutor:
         workers = max(1, min(2, cfg.background_concurrency or 1))
         _export_executor = ThreadPoolExecutor(max_workers=workers)
     return _export_executor
+
+
+def _get_library_executor() -> ThreadPoolExecutor:
+    """Dedicated executor for Golden Gate planning jobs."""
+    global _library_executor
+    if _library_executor is None:
+        cfg = load_config()
+        workers = max(1, min(2, cfg.background_concurrency or 1))
+        _library_executor = ThreadPoolExecutor(max_workers=workers)
+    return _library_executor
 
 
 def _get_cluster_executor() -> ThreadPoolExecutor:
@@ -138,6 +151,25 @@ def submit_export(request: ExportRequest, *, job_store: JobStore | None = None) 
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
 
     executor = _get_export_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
+def submit_golden_gate_plan(request: GoldenGateRequest, *,
+                            job_store: JobStore | None = None) -> str:
+    store = job_store or get_job_store(load_config().log_dir)
+    label = f"Golden Gate plan {request.pdb_id.upper()}"
+    job = store.create_job("golden_gate", label, details=request.dict())
+
+    def _run() -> None:
+        try:
+            run_golden_gate_plan(request, job_store=store, job_id=job.job_id)
+        except GoldenGateError as exc:
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_library_executor()
     executor.submit(_run)
     return job.job_id
 
@@ -292,6 +324,7 @@ __all__ = [
     "submit_target_initialization",
     "submit_design_run",
     "submit_export",
+    "submit_golden_gate_plan",
     "submit_assessment_run",
     "submit_assessment_sync",
     "wait_for_job",
