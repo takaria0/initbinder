@@ -145,6 +145,7 @@ const el = {
   scatterThresholdXLabel: document.querySelector('#scatter-threshold-x-label'),
   scatterThresholdYLabel: document.querySelector('#scatter-threshold-y-label'),
   scatterThresholdCount: document.querySelector('#scatter-threshold-count'),
+  scatterLegend: document.querySelector('#scatter-legend'),
   plotContainer: document.querySelector('#plot-container'),
   exportOpen: document.querySelector('#export-open'),
   exportModal: document.querySelector('#export-modal'),
@@ -1646,11 +1647,63 @@ function computeScatterLayout(points) {
   };
 }
 
+function formatLegendLabel(key) {
+  if (!key || key === '__default__') return 'No epitope tag';
+  return key;
+}
+
+function updateScatterLegend() {
+  const container = el.scatterLegend;
+  if (!container) return;
+  const colorMap = state.scatterColorMap instanceof Map ? state.scatterColorMap : new Map();
+  if (!colorMap || colorMap.size === 0) {
+    container.innerHTML = '';
+    container.hidden = true;
+    return;
+  }
+
+  const counts = new Map();
+  if (Array.isArray(state.scatterLayout)) {
+    state.scatterLayout.forEach((point) => {
+      const key = point && point.epitopeLabel ? point.epitopeLabel : '__default__';
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+  }
+
+  container.innerHTML = '';
+  const title = document.createElement('span');
+  title.className = 'scatter-legend-title';
+  title.textContent = 'Color by epitope:';
+  container.appendChild(title);
+
+  colorMap.forEach((color, key) => {
+    const item = document.createElement('div');
+    item.className = 'scatter-legend-item';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'scatter-legend-swatch';
+    swatch.style.backgroundColor = color;
+
+    const label = document.createElement('span');
+    label.className = 'scatter-legend-label';
+    const count = counts.get(key) || 0;
+    const text = formatLegendLabel(key);
+    label.textContent = count > 0 ? `${text} (${count})` : text;
+
+    item.appendChild(swatch);
+    item.appendChild(label);
+    container.appendChild(item);
+  });
+
+  container.hidden = false;
+}
+
 function renderScatter() {
   if (!el.scatterCanvas) return;
   const ctx = el.scatterCanvas.getContext('2d');
   ctx.clearRect(0, 0, el.scatterCanvas.width, el.scatterCanvas.height);
   renderScatterHistograms(null);
+  updateScatterLegend();
   if (state.scatterLayout.length === 0) {
     updateScatterThresholdSummary();
     ctx.fillStyle = '#64748b';
