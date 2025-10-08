@@ -256,7 +256,7 @@ async def api_cluster_status() -> dict[str, object]:
 async def api_rankings(
     pdb_id: str,
     run_label: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=2000),
+    limit: int | None = Query(default=None, ge=1),
 ) -> RankingResponse:
     try:
         payload = load_rankings(pdb_id, run_label=run_label, limit=limit)
