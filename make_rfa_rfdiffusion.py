@@ -19,7 +19,7 @@ def make_rfa_rfdiffusion_command(
     pdb_id: str, epitope: str, num_designs: int, designs_per_task: int,
     framework_pdb: str, cdr_h1: str, cdr_h2: str, cdr_h3: str,
     hotspot_variant: str = "A",
-    crop_radius: float | None = 14.0,
+    crop_radius: float | None = None,
     crop_pad: int = 4,
     crop_keep_glycans: bool = False,
     run_tag: str | None = None

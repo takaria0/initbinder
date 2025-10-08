@@ -1,4 +1,5 @@
 const DEFAULT_TABLE_SORT = { key: 'iptm', dir: 'desc' };
+const DEFAULT_RFDIFF_CROP_RADIUS = 14;
 const SCATTER_COLOR_PALETTE = [
   '#2563eb',
   '#f97316',
@@ -130,6 +131,7 @@ const el = {
   designRunLabel: document.querySelector('#design-run-label'),
   designBinderChain: document.querySelector('#design-binder-chain'),
   designAf3Seed: document.querySelector('#design-af3-seed'),
+  designEnableRfdiffCrop: document.querySelector('#design-enable-rfdiff-crop'),
   refreshResultsBtn: document.querySelector('#refresh-results'),
   resultsMeta: document.querySelector('#results-meta'),
   binderDetail: document.querySelector('#binder-detail'),
@@ -1126,6 +1128,10 @@ async function queueDesignRun() {
     })(),
     run_label: el.designRunLabel.value.trim() || null,
     run_assess: true,
+    rfdiff_crop_radius: (() => {
+      if (!el.designEnableRfdiffCrop) return null;
+      return el.designEnableRfdiffCrop.checked ? DEFAULT_RFDIFF_CROP_RADIUS : null;
+    })(),
   };
 
   el.designSubmit.disabled = true;

@@ -129,6 +129,13 @@ class DesignRunRequest(BaseModel):
     run_label: Optional[str] = Field(None)
     run_assess: bool = Field(True, description="Auto-schedule assess-rfa-all after AF3")
     submit: bool = Field(False, description="Submit jobs to scheduler immediately")
+    rfdiff_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description=(
+            "Optional crop radius (Å) for RFdiffusion; when omitted the full prepared target is used."
+        ),
+    )
 
 
 class DesignRunResponse(BaseModel):

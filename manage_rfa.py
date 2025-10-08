@@ -741,8 +741,12 @@ def main():
     p_rfd.add_argument("--cdr_h1", default="3-8")
     p_rfd.add_argument("--cdr_h2", default="3-8")
     p_rfd.add_argument("--cdr_h3", default="8-20")
-    p_rfd.add_argument("--crop_radius", type=float, default=14.0,
-        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only.")
+    p_rfd.add_argument(
+        "--crop_radius",
+        type=float,
+        default=None,
+        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only (default: disabled).",
+    )
     p_rfd.add_argument("--crop_pad", type=int, default=4,
         help="Sequence padding (± residues) to keep around included residues when cropping.")
     p_rfd.add_argument("--crop_keep_glycans", action="store_true",
@@ -824,8 +828,12 @@ def main():
         help="Model seeds for AF3 inference (default: 1-10)."
     )
     p_pipe.add_argument("--submit", action="store_true")
-    p_pipe.add_argument("--crop_radius", type=float, default=14.0,
-        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only.")
+    p_pipe.add_argument(
+        "--crop_radius",
+        type=float,
+        default=None,
+        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only (default: disabled).",
+    )
     p_pipe.add_argument("--crop_pad", type=int, default=4,
         help="Sequence padding (± residues) to keep around included residues when cropping.")
     p_pipe.add_argument("--crop_keep_glycans", action="store_true",
@@ -851,8 +859,12 @@ def main():
     p_follow.add_argument("--assess_tsv", default=None)
     p_follow.add_argument("--submit", action="store_true",
                         help="If set, submit jobs now with SLURM dependencies; otherwise write a one-shot launcher.")
-    p_follow.add_argument("--crop_radius", type=float, default=14.0,
-        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only.")
+    p_follow.add_argument(
+        "--crop_radius",
+        type=float,
+        default=None,
+        help="If set (Å), crop the target PDB around hotspot residues for RFdiffusion only (default: disabled).",
+    )
     p_follow.add_argument("--crop_pad", type=int, default=4,
         help="Sequence padding (± residues) to keep around included residues when cropping.")
     p_follow.add_argument("--crop_keep_glycans", action="store_true",

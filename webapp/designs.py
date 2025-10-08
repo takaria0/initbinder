@@ -116,6 +116,8 @@ def _build_pipeline_args(
         args.extend(["--model_seeds", str(request.af3_seed)])
     if request.run_assess:
         args.append("--run_assess")
+    if request.rfdiff_crop_radius is not None:
+        args.extend(["--crop_radius", str(request.rfdiff_crop_radius)])
     return args
 
 
@@ -456,6 +458,7 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
             "binder_chain": binder_chain,
             "run_assess": request.run_assess,
             "assessment_shards": assessment_shards,
+            "rfdiff_crop_radius": request.rfdiff_crop_radius,
         },
     )
     job_store.append_log(job_id, f"[arms] {', '.join(arms)}")
@@ -463,6 +466,13 @@ def run_design_workflow(request: DesignRunRequest, *, job_store: JobStore, job_i
     job_store.append_log(job_id, f"[af3_seed] {request.af3_seed}")
     job_store.append_log(job_id, f"[binder_chain] {binder_chain}")
     job_store.append_log(job_id, f"[run_assess] {request.run_assess}")
+    if request.rfdiff_crop_radius is None or request.rfdiff_crop_radius <= 0:
+        job_store.append_log(job_id, "[rfdiff_crop] disabled")
+    else:
+        job_store.append_log(
+            job_id,
+            f"[rfdiff_crop] radius={request.rfdiff_crop_radius}Å",
+        )
     job_store.append_log(job_id, f"[assessment_shards] {assessment_shards}")
 
     cluster = ClusterClient(log_hook=lambda line: job_store.append_log(job_id, line))
