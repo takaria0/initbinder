@@ -273,6 +273,7 @@ async def api_rankings(
             rmsd_diego=row.rmsd_diego,
             tm_score=row.tm_score,
             ipsae_min=row.ipsae_min,
+            hotspot_min_distance=row.hotspot_min_distance,
             metadata=row.metadata,
         )
         for row in payload.rows

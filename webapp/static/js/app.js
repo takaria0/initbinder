@@ -1437,6 +1437,7 @@ function renderResultsTable() {
       <td>${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : '—'}</td>
       <td>${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : '—'}</td>
       <td>${row.ipsae_min !== null && row.ipsae_min !== undefined ? row.ipsae_min.toFixed(3) : '—'}</td>
+      <td>${row.hotspot_min_distance !== null && row.hotspot_min_distance !== undefined ? row.hotspot_min_distance.toFixed(3) : '—'}</td>
       <td>${escapeHtml(epitopeLabel)}</td>
     `;
     tr.addEventListener('click', () => selectDesign(row.design_name));
@@ -2712,6 +2713,12 @@ function selectDesign(designName) {
     `ipTM: ${row.iptm !== null && row.iptm !== undefined ? row.iptm.toFixed(3) : 'NA'}`,
     `Binder RMSD: ${row.rmsd_diego !== null && row.rmsd_diego !== undefined ? row.rmsd_diego.toFixed(3) : 'NA'}`,
     `ipSAE_min: ${row.ipsae_min !== null && row.ipsae_min !== undefined ? row.ipsae_min.toFixed(3) : 'NA'}`,
+    (() => {
+      if (row.hotspot_min_distance !== null && row.hotspot_min_distance !== undefined && Number.isFinite(row.hotspot_min_distance)) {
+        return `Hotspot min distance: ${row.hotspot_min_distance.toFixed(3)} Å`;
+      }
+      return '';
+    })(),
     metadata.arm ? `Arm: ${metadata.arm}` : '',
     (() => {
       const epitopeLabel = getEpitopeLabel(row);

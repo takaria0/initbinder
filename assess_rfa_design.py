@@ -360,6 +360,7 @@ def _compute_rmsd_binder_prepared_frame(
     af3_cif: Path,                    # AF3 complex (.cif)
     prepared_target_chain_id: str,    # auto-selected prepared chain ID (prepared側)
     binder_chain_id: str,             # usually 'H'
+    hotspot_keys: list[str] | None = None,
 ) -> Dict[str, float | str | int] | None:
     """
     Binder_RMSD（= ターゲットで複合体を整列した後に binder の Cα RMSD）を prepared 座標系で算出。
@@ -379,6 +380,33 @@ def _compute_rmsd_binder_prepared_frame(
         if prepared_tgt_xyz.shape[0] < 10:
             print("[pose][fail] prepared target has too few Cα")
             return None
+
+        hotspot_ca_xyz = np.zeros((0, 3), dtype=float)
+        if hotspot_keys:
+            try:
+                hotspot_map = _parse_keys_to_chain_resi(hotspot_keys, default_chain=prepared_target_chain_id)
+                coords: list[np.ndarray] = []
+                for chain_id, residues in hotspot_map.items():
+                    if not residues:
+                        continue
+                    res_ids, chain_xyz = _load_chain_ca_coords(prepared_pdb, chain_id)
+                    if chain_xyz.shape[0] == 0:
+                        continue
+                    lookup = {int(r): idx for idx, r in enumerate(res_ids)}
+                    for res in residues:
+                        try:
+                            idx = lookup[int(res)]
+                        except Exception:
+                            continue
+                        coords.append(chain_xyz[idx])
+                if coords:
+                    hotspot_ca_xyz = np.vstack(coords).astype(float)
+                    print(
+                        f"[pose] hotspot CA count = {hotspot_ca_xyz.shape[0]}"
+                        f" (keys={','.join(map(str, hotspot_keys))})"
+                    )
+            except Exception as exc:
+                print(f"[pose][warn] failed to collect hotspot coords: {exc}")
 
         # ---- AF3 target → prepared ----
         R_af, c_af, c_refA, rms_af, n_af, map_af = _fit_mov_to_prepared_target(
@@ -517,6 +545,12 @@ def _compute_rmsd_binder_prepared_frame(
         # distances to prepared target (min CA–CA)
         min_d_rf = _min_ca_distance(P_b, prepared_tgt_xyz)
         min_d_af = _min_ca_distance(Q_b, prepared_tgt_xyz)
+        min_d_hot = float("nan")
+        if hotspot_ca_xyz.size:
+            min_d_hot = _min_ca_distance(P_b, hotspot_ca_xyz)
+            print(f"[pose] binder↔hotspot min CA distance = {min_d_hot:.3f} Å")
+        else:
+            print("[pose] hotspot CA coords unavailable; skipping hotspot distance")
 
         # metrics
         rmsd_binder_prepared = float(np.sqrt(np.mean(np.sum((P_b - Q_b) ** 2, axis=1))))
@@ -588,6 +622,7 @@ def _compute_rmsd_binder_prepared_frame(
             # target proximity (prepared)
             'min_dist_rfdiff_binder_prepared_target': float(min_d_rf),
             'min_dist_af3_binder_prepared_target': float(min_d_af),
+            'min_dist_rfdiff_binder_hotspot': float(min_d_hot),
 
             # final metrics
             'rmsd_binder_prepared_frame': float(final_rmsd),   # ← Binder_RMSD
@@ -736,6 +771,94 @@ def _parse_keys_to_chain_resi(keys, default_chain: str | None = None):
     for ch in list(m.keys()):
         m[ch] = sorted(set(m[ch]))
     return m
+
+
+def _format_hotspot_key(chain: str | None, residue: object) -> str | None:
+    if residue is None:
+        return None
+    res_text = str(residue).strip()
+    if not res_text:
+        return None
+    chain_text = (str(chain).strip() if chain else "")
+    if chain_text:
+        if res_text.upper().startswith(chain_text.upper()):
+            token = res_text
+        elif res_text.startswith(f"{chain_text}:"):
+            token = res_text
+        else:
+            token = f"{chain_text}:{res_text}"
+    else:
+        token = res_text
+    return token
+
+
+def _flatten_hotspot_keys(data: object) -> list[str]:
+    """Normalize hotspot JSON payload into canonical residue keys."""
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _add(token: str | None) -> None:
+        if not token:
+            return
+        text = token.strip()
+        if not text:
+            return
+        if text not in seen:
+            seen.add(text)
+            ordered.append(text)
+
+    def _visit(obj: object, chain_hint: str | None = None) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, str):
+            _add(obj)
+            return
+        if isinstance(obj, (int, float)):
+            if isinstance(obj, float) and (obj != obj):  # NaN guard
+                return
+            token = _format_hotspot_key(chain_hint, int(obj)) if chain_hint else str(int(obj))
+            _add(token)
+            return
+        if isinstance(obj, dict):
+            chain_val = obj.get("chain") or obj.get("chain_id") or obj.get("chainID")
+            res_val = (
+                obj.get("resi")
+                or obj.get("residue")
+                or obj.get("res_id")
+                or obj.get("resnum")
+                or obj.get("res_no")
+                or obj.get("resSeq")
+            )
+            if chain_val and res_val is not None:
+                _add(_format_hotspot_key(chain_val, res_val))
+            if "hotspots" in obj:
+                _visit(obj["hotspots"], chain_hint=chain_val or chain_hint)
+            for key, value in obj.items():
+                if key in {
+                    "chain",
+                    "chain_id",
+                    "chainID",
+                    "resi",
+                    "residue",
+                    "res_id",
+                    "resnum",
+                    "res_no",
+                    "resSeq",
+                    "hotspots",
+                }:
+                    continue
+                hint = chain_hint
+                if isinstance(key, str) and len(key) == 1 and key.isalpha():
+                    hint = key
+                _visit(value, chain_hint=hint)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                _visit(item, chain_hint=chain_hint)
+
+    _visit(data)
+    return ordered
 
 def _sel_from_map(obj_name: str, chain_map: dict[str, list[int]]):
     parts = []
@@ -1247,6 +1370,7 @@ def assess_rfa_all(
         # Key RMSD metrics (prepared frame)
         "rmsd_binder_prepared_frame", "rmsd_binder_diego", "rmsd_binder_after_kabsch", "binder_com_distance",
         "min_dist_rfdiff_binder_prepared_target", "min_dist_af3_binder_prepared_target",
+        "min_dist_rfdiff_binder_hotspot",
         "binder_seq_align_pairs", "binder_seq_align_score",
         "binder_seq_cov_rfdiff_pct", "binder_seq_cov_af3_pct",
         # Fit diagnostics
@@ -1383,6 +1507,7 @@ def assess_rfa_all(
                         return []
 
                     hotspots = _load_hotspots()
+                    hotspot_key_list = _flatten_hotspot_keys(hotspots)
 
                     af3_dir = hs_dir / "rfa_af3"
                     mpnn_dir = hs_dir / "rfa_mpnn"
@@ -1467,6 +1592,7 @@ def assess_rfa_all(
                             'binder_com_distance': "",
                             'min_dist_rfdiff_binder_prepared_target': "",
                             'min_dist_af3_binder_prepared_target': "",
+                            'min_dist_rfdiff_binder_hotspot': "",
                             'binder_seq_align_pairs': "",
                             'binder_seq_align_score': "",
                             'binder_seq_cov_rfdiff_pct': "",
@@ -1509,6 +1635,7 @@ def assess_rfa_all(
                                         af3_cif=af3_cif,
                                         prepared_target_chain_id=prepared_chain_sel,
                                         binder_chain_id=binder_chain_id,
+                                        hotspot_keys=hotspot_key_list,
                                     )
                                     if rmsd_results:
                                         for k, v in rmsd_results.items():

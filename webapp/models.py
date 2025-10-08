@@ -143,6 +143,7 @@ class RankingRow(BaseModel):
     rmsd_diego: Optional[float]
     tm_score: Optional[float]
     ipsae_min: Optional[float]
+    hotspot_min_distance: Optional[float]
     metadata: Dict[str, object] = Field(default_factory=dict)
 
 
