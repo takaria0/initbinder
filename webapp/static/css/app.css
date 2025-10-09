@@ -947,6 +947,28 @@ button.ghost:hover:not(:disabled) {
   position: relative;
 }
 
+.table-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0 0;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.table-footer .truncate-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.table-footer #results-truncate-text {
+  flex: 1 1 auto;
+}
+
 .analysis-panel {
   margin-top: 24px;
   border: 1px solid var(--color-border);

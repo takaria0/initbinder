@@ -50,12 +50,17 @@ const DEFAULT_SCATTER_THRESHOLDS = Object.fromEntries(
   }),
 );
 
+const RESULTS_TABLE_DISPLAY_LIMIT = 2000;
+
 const state = {
   currentPdb: null,
   jobPoller: null,
   jobContext: null,
   rankings: [],
   rankingsResponse: null,
+  rankingsTotal: 0,
+  rankingsShowAll: false,
+  rankingsDisplayLimit: RESULTS_TABLE_DISPLAY_LIMIT,
   tableSort: { ...DEFAULT_TABLE_SORT },
   scatterLayout: [],
   scatterPoints: [],
@@ -137,6 +142,9 @@ const el = {
   binderDetail: document.querySelector('#binder-detail'),
   resultsTableWrapper: document.querySelector('#results-table-wrapper'),
   resultsTable: document.querySelector('#results-table'),
+  resultsTruncate: document.querySelector('#results-truncate'),
+  resultsTruncateText: document.querySelector('#results-truncate-text'),
+  resultsTruncateToggle: document.querySelector('#results-truncate-toggle'),
   scatterCanvas: document.querySelector('#scatter-plot'),
   scatterHistX: document.querySelector('#scatter-hist-x'),
   scatterHistY: document.querySelector('#scatter-hist-y'),
@@ -1367,6 +1375,9 @@ async function fetchRankings(options = {}) {
       Boolean(previousSummary && previousSummary.rankings_source && newSource) &&
       String(previousSummary.rankings_source) === newSource;
     state.rankings = payload.rows || [];
+    state.rankingsTotal = state.rankings.length;
+    state.rankingsDisplayLimit = RESULTS_TABLE_DISPLAY_LIMIT;
+    state.rankingsShowAll = state.rankings.length <= state.rankingsDisplayLimit;
     state.rankingsResponse = payload;
     if (!keepSummary) {
       state.librarySummary = null;
@@ -1427,6 +1438,7 @@ function sortRankings() {
     return String(va || '').localeCompare(String(vb || '')) * multiplier;
   });
   state.rankings = rows;
+  state.rankingsTotal = rows.length;
 }
 
 function renderResultsTable() {
@@ -1434,7 +1446,11 @@ function renderResultsTable() {
   const tbody = el.resultsTable.querySelector('tbody');
   if (!tbody) return;
   tbody.innerHTML = '';
-  state.rankings.forEach((row) => {
+  const limitValue = state.rankingsShowAll
+    ? null
+    : Math.max(0, state.rankingsDisplayLimit || RESULTS_TABLE_DISPLAY_LIMIT);
+  const rowsToRender = limitValue ? state.rankings.slice(0, limitValue) : state.rankings;
+  rowsToRender.forEach((row) => {
     const tr = document.createElement('tr');
     tr.dataset.design = row.design_name;
     const epitopeLabel = getEpitopeLabel(row);
@@ -1449,6 +1465,46 @@ function renderResultsTable() {
     tr.addEventListener('click', () => selectDesign(row.design_name));
     tbody.appendChild(tr);
   });
+  updateResultsTruncateNotice();
+  if (state.selectedDesign) {
+    const selectedRow = Array.from(tbody.querySelectorAll('tr')).find(
+      (tr) => tr.dataset.design === state.selectedDesign,
+    );
+    if (selectedRow) {
+      selectedRow.classList.add('selected');
+    } else if (!state.rankingsShowAll && el.binderDetail) {
+      el.binderDetail.hidden = true;
+    }
+  }
+}
+
+function updateResultsTruncateNotice() {
+  if (!el.resultsTruncate) return;
+  const total = state.rankingsTotal || state.rankings.length || 0;
+  const limit = state.rankingsDisplayLimit || RESULTS_TABLE_DISPLAY_LIMIT;
+  if (!total || total <= limit) {
+    el.resultsTruncate.hidden = true;
+    if (el.resultsTruncateText) el.resultsTruncateText.textContent = '';
+    if (el.resultsTruncateToggle) {
+      el.resultsTruncateToggle.textContent = 'Show all rows';
+      el.resultsTruncateToggle.setAttribute('aria-pressed', 'false');
+    }
+    return;
+  }
+  const showingAll = Boolean(state.rankingsShowAll);
+  const showingCount = showingAll ? total : Math.min(limit, total);
+  if (el.resultsTruncateText) {
+    el.resultsTruncateText.textContent = showingAll
+      ? `Showing all ${showingCount.toLocaleString()} rows.`
+      : `Showing first ${showingCount.toLocaleString()} of ${total.toLocaleString()} rows.`;
+  }
+  if (el.resultsTruncateToggle) {
+    el.resultsTruncateToggle.textContent = showingAll
+      ? `Show first ${limit.toLocaleString()} rows`
+      : 'Show all rows';
+    el.resultsTruncateToggle.setAttribute('aria-pressed', showingAll ? 'true' : 'false');
+  }
+  el.resultsTruncate.hidden = false;
 }
 
 function computeScatterLayout(points) {
@@ -2033,6 +2089,9 @@ function resetResultsPanel(options = {}) {
   const preserveRunLabel = Boolean(options.preserveRunLabel);
   state.rankings = [];
   state.rankingsResponse = null;
+  state.rankingsTotal = 0;
+  state.rankingsShowAll = false;
+  state.rankingsDisplayLimit = RESULTS_TABLE_DISPLAY_LIMIT;
   state.scatterLayout = [];
   state.scatterPoints = [];
   state.scatterStats = null;
@@ -3371,6 +3430,15 @@ function initEventHandlers() {
   if (el.resultsLimit) {
     el.resultsLimit.addEventListener('change', () => {
       fetchRankings({ silent: false });
+    });
+  }
+  if (el.resultsTruncateToggle) {
+    el.resultsTruncateToggle.addEventListener('click', () => {
+      const total = state.rankingsTotal || state.rankings.length;
+      const limit = state.rankingsDisplayLimit || RESULTS_TABLE_DISPLAY_LIMIT;
+      if (!total || total <= limit) return;
+      state.rankingsShowAll = !state.rankingsShowAll;
+      renderResultsTable();
     });
   }
   if (el.pdbInput) {
