@@ -159,6 +159,11 @@ def init_decide_prep(
         decide_args = [pdb_id]
         if force:
             decide_args.append("--force")
+        if num_epitopes is not None and num_epitopes > 0:
+            expected = int(num_epitopes)
+            decide_args.extend(["--expected_epitopes", str(expected)])
+            decide_args.extend(["--max_llm_retries", "3"])
+            job_store.append_log(job_id, f"[decide-scope] expecting {expected} epitopes with retry")
         prompt_text = (decide_scope_prompt or "").strip()
         if prompt_text:
             decide_args.extend(["--epitope_prompt", prompt_text])
@@ -298,6 +303,14 @@ def _extract_epitopes(data: dict, metadata_map: dict[str, dict]) -> list[dict[st
                 ep_record["hotspot_count"] = sum(len(v) for v in hotspots.values())
             except Exception:
                 pass
+        if isinstance(meta, dict):
+            rationale = meta.get("rationale") or meta.get("llm_rationale") or meta.get("reasoning") or meta.get("explanation")
+            if isinstance(rationale, list):
+                rationale = " ".join(str(part).strip() for part in rationale if str(part).strip())
+            if isinstance(rationale, str):
+                cleaned = re.sub(r"\s+", " ", rationale).strip()
+                if cleaned:
+                    ep_record["rationale"] = cleaned
         ep_list.append(ep_record)
     return ep_list
 
@@ -332,6 +345,27 @@ def _extract_chain_info(data: dict) -> list[dict[str, object]]:
                 if chain_id:
                     chain_context[chain_id] = str(desc).strip()
 
+    chain_details: dict[str, dict[str, object]] = {}
+    raw_chain_details = data.get("chain_details")
+    if isinstance(raw_chain_details, dict):
+        for cid, detail in raw_chain_details.items():
+            chain_id = str(cid).strip().upper()
+            if not chain_id:
+                continue
+            if isinstance(detail, dict):
+                normalized: dict[str, object] = {}
+                for key, value in detail.items():
+                    if value in (None, "", []):
+                        continue
+                    if key == "synonyms" and isinstance(value, list):
+                        normalized[key] = [str(item).strip() for item in value if str(item).strip()]
+                    else:
+                        normalized[key] = value
+                if normalized:
+                    chain_details[chain_id] = normalized
+            elif isinstance(detail, str) and detail.strip():
+                chain_details[chain_id] = {"summary": detail.strip()}
+
     ordered_chain_ids: list[str] = []
     for cid in target_chains:
         if cid and cid not in ordered_chain_ids:
@@ -345,12 +379,38 @@ def _extract_chain_info(data: dict) -> list[dict[str, object]]:
 
     entries: list[dict[str, object]] = []
     for cid in ordered_chain_ids:
+        detail_info = chain_details.get(cid, {}) if chain_details else {}
+        summary = ""
+        if isinstance(detail_info, dict):
+            raw_summary = detail_info.get("summary") or detail_info.get("description")
+            if isinstance(raw_summary, str):
+                summary = raw_summary.strip()
+        description = chain_context.get(cid, "").strip()
         entry: dict[str, object] = {
             "id": cid,
             "length": chain_lengths.get(cid),
-            "role": "Target chain" if cid in target_set else "Additional chain",
-            "description": chain_context.get(cid, "").strip(),
+            "role": "Primary target chain" if cid in target_set else "Supporting chain",
+            "is_primary": cid in target_set,
+            "description": summary or description or "",
         }
+        if summary:
+            entry["summary"] = summary
+        if description and description != entry["description"]:
+            entry["context"] = description
+        if isinstance(detail_info, dict):
+            if detail_info.get("name"):
+                entry["name"] = str(detail_info["name"])
+            synonyms = detail_info.get("synonyms")
+            if isinstance(synonyms, list) and synonyms:
+                entry["synonyms"] = [str(item).strip() for item in synonyms if str(item).strip()]
+            if detail_info.get("organism"):
+                entry["organism"] = str(detail_info["organism"])
+            if detail_info.get("polymer_type"):
+                entry["polymer_type"] = str(detail_info["polymer_type"])
+            if detail_info.get("function"):
+                entry["function"] = str(detail_info["function"])
+            if detail_info.get("entity_id"):
+                entry["entity_id"] = str(detail_info["entity_id"])
         if not entry["description"]:
             entry["description"] = "Primary target chain" if cid in target_set else "Supporting chain"
         entries.append(entry)

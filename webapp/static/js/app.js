@@ -438,6 +438,12 @@ function renderTargetInsights(status = state.targetStatus) {
         hotspotLine.textContent = `Hotspots: ${ep.hotspot_count}`;
         li.appendChild(hotspotLine);
       }
+      if (ep.rationale) {
+        const rationaleLine = document.createElement('div');
+        rationaleLine.className = 'insight-subtext';
+        rationaleLine.textContent = `Rationale: ${ep.rationale}`;
+        li.appendChild(rationaleLine);
+      }
       el.epitopeList.appendChild(li);
     });
   }
@@ -452,18 +458,50 @@ function renderTargetInsights(status = state.targetStatus) {
   } else {
     chains.forEach((chain) => {
       const li = document.createElement('li');
+      if (chain.is_primary) {
+        li.classList.add('chain-primary');
+      }
       const title = document.createElement('span');
       title.className = 'insight-title';
       const chainId = chain.id || chain.chain_id || chain.chain || '—';
       title.textContent = `Chain ${chainId}`;
       li.appendChild(title);
-      const descBits = [];
-      if (chain.description) descBits.push(chain.description);
-      if (chain.length) descBits.push(`${chain.length} aa`);
-      if (chain.role) descBits.push(chain.role);
-      const detail = document.createElement('div');
-      detail.textContent = descBits.length ? descBits.join(' · ') : 'No additional description available.';
-      li.appendChild(detail);
+      const summaryText = chain.summary || chain.description || '';
+      if (summaryText) {
+        const summary = document.createElement('div');
+        summary.className = 'chain-summary';
+        summary.textContent = summaryText;
+        li.appendChild(summary);
+      }
+      const metaBits = [];
+      if (chain.role) metaBits.push(chain.role);
+      if (chain.length) metaBits.push(`${chain.length} aa`);
+      if (chain.organism) metaBits.push(chain.organism);
+      if (chain.polymer_type) metaBits.push(chain.polymer_type);
+      if (metaBits.length) {
+        const meta = document.createElement('div');
+        meta.className = 'chain-meta';
+        meta.textContent = metaBits.join(' · ');
+        li.appendChild(meta);
+      }
+      if (chain.context && chain.context !== summaryText) {
+        const context = document.createElement('div');
+        context.className = 'insight-subtext';
+        context.textContent = chain.context;
+        li.appendChild(context);
+      }
+      if (chain.function) {
+        const functionLine = document.createElement('div');
+        functionLine.className = 'insight-subtext';
+        functionLine.textContent = `Function: ${chain.function}`;
+        li.appendChild(functionLine);
+      }
+      if (Array.isArray(chain.synonyms) && chain.synonyms.length) {
+        const synonymsLine = document.createElement('div');
+        synonymsLine.className = 'insight-subtext';
+        synonymsLine.textContent = `Also known as: ${chain.synonyms.join(', ')}`;
+        li.appendChild(synonymsLine);
+      }
       el.chainList.appendChild(li);
     });
   }

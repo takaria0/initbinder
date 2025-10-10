@@ -1,5 +1,6 @@
 from utils import _ensure_dir, ROOT, TARGETS_ROOT_LOCAL, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
 import requests
+import json
 import yaml
 from Bio.PDB import PDBIO, PDBParser
 from pathlib import Path
@@ -32,6 +33,148 @@ def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
             continue
         out.append(s.upper())
     return out
+
+
+def _load_json(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text()) or {}
+    except Exception:
+        return None
+
+
+def _load_chainmap(path: Path) -> dict[str, str]:
+    data = _load_json(path) or {}
+    mapping = data.get("old_to_new") if isinstance(data, dict) else None
+    if not isinstance(mapping, dict):
+        return {}
+    out: dict[str, str] = {}
+    for old, new in mapping.items():
+        old_id = str(old).strip()
+        new_id = str(new).strip()
+        if not old_id or not new_id:
+            continue
+        out[old_id] = new_id
+    return out
+
+
+def _dedupe(seq: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in seq:
+        val = str(item).strip()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        ordered.append(val)
+    return ordered
+
+
+def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str, str]) -> dict[str, dict[str, object]]:
+    if not isinstance(entry, dict):
+        return {}
+
+    entity_details: dict[str, dict[str, object]] = {}
+    for entity in entry.get("polymer_entities", []) or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_id = str(entity.get("entity_id") or "").strip()
+        if not entity_id:
+            continue
+
+        names: list[str] = []
+        primary_desc = entity.get("pdbx_description")
+        if isinstance(primary_desc, str) and primary_desc.strip():
+            names.append(primary_desc.strip())
+        macromolecule_names = entity.get("rcsb_macromolecule_name") or []
+        if isinstance(macromolecule_names, list):
+            for candidate in macromolecule_names:
+                if isinstance(candidate, str) and candidate.strip():
+                    names.append(candidate.strip())
+
+        synonyms = _dedupe(names)
+        primary_name = synonyms[0] if synonyms else ""
+
+        organism: Optional[str] = None
+        for org_key in ("rcsb_entity_source_organism", "rcsb_entity_host_organism"):
+            org_block = entity.get(org_key)
+            if not isinstance(org_block, list):
+                continue
+            for record in org_block:
+                if not isinstance(record, dict):
+                    continue
+                for field in ("organism_scientific", "organism_common"):
+                    val = record.get(field)
+                    if isinstance(val, str) and val.strip():
+                        organism = val.strip()
+                        break
+                if organism:
+                    break
+            if organism:
+                break
+
+        polymer_type = None
+        poly_block = entity.get("entity_poly")
+        if isinstance(poly_block, dict):
+            poly_type = poly_block.get("type")
+            if isinstance(poly_type, str) and poly_type.strip():
+                polymer_type = poly_type.strip()
+        if not polymer_type:
+            rcsb_poly = entity.get("rcsb_polymer_entity")
+            if isinstance(rcsb_poly, dict):
+                poly_type = rcsb_poly.get("type")
+                if isinstance(poly_type, str) and poly_type.strip():
+                    polymer_type = poly_type.strip()
+
+        function_text: Optional[str] = None
+        rcsb_poly = entity.get("rcsb_polymer_entity") if isinstance(entity.get("rcsb_polymer_entity"), dict) else None
+        if isinstance(rcsb_poly, dict):
+            for key in ("description", "details", "function", "synopsis"):
+                candidate = rcsb_poly.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    function_text = candidate.strip()
+                    break
+
+        summary = primary_name.strip() if primary_name else ""
+        if organism:
+            summary = f"{summary} from {organism}" if summary else f"From {organism}"
+        if polymer_type:
+            summary = f"{summary} ({polymer_type.lower()})" if summary else polymer_type
+
+        entity_details[entity_id] = {
+            "summary": summary.strip(),
+            "name": primary_name.strip() if primary_name else None,
+            "synonyms": synonyms[1:] if len(synonyms) > 1 else None,
+            "organism": organism,
+            "polymer_type": polymer_type,
+            "function": function_text,
+        }
+
+    chain_details: dict[str, dict[str, object]] = {}
+    identifiers = entry.get("rcsb_entry_container_identifiers", {})
+    instances = identifiers.get("polymer_entity_instances") if isinstance(identifiers, dict) else None
+    if not isinstance(instances, list):
+        instances = []
+
+    for inst in instances:
+        if not isinstance(inst, dict):
+            continue
+        raw_chain = inst.get("auth_asym_id") or inst.get("asym_id") or inst.get("label_asym_id")
+        chain_id = str(raw_chain or "").strip()
+        if not chain_id:
+            continue
+        mapped = chainmap.get(chain_id, chain_id)
+        mapped_id = str(mapped).strip().upper()
+        if not mapped_id:
+            continue
+        entity_id = str(inst.get("entity_id") or "").strip()
+        detail = entity_details.get(entity_id, {}) if entity_id else {}
+        detail_copy = {k: v for k, v in detail.items() if v}
+        detail_copy["entity_id"] = entity_id or None
+        chain_details[mapped_id] = detail_copy
+
+    return chain_details
 
 def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
     """
@@ -174,6 +317,57 @@ def init_target(
     # Always set/refresh antigen URL
     config["antigen_catalog_url"] = antigen_url
 
+    entry_json = _load_json(raw_dir / "entry.json") or _load_json(tdir / "entry.json")
+    chainmap = _load_chainmap(raw_dir / "chainmap.json")
+    inferred_chain_details = _extract_chain_details_from_entry(entry_json, chainmap)
+
+    existing_details: dict[str, dict[str, object]] = {}
+    raw_existing_details = config.get("chain_details")
+    if isinstance(raw_existing_details, dict):
+        for key, value in raw_existing_details.items():
+            chain_id = str(key).strip().upper()
+            if not chain_id:
+                continue
+            if isinstance(value, dict):
+                cleaned = {k: v for k, v in value.items() if v not in (None, "", [])}
+                if cleaned:
+                    existing_details[chain_id] = cleaned
+            elif isinstance(value, str) and value.strip():
+                existing_details[chain_id] = {"summary": value.strip()}
+
+    for chain_id, detail in inferred_chain_details.items():
+        if chain_id not in existing_details:
+            existing_details[chain_id] = detail
+        else:
+            current = existing_details[chain_id]
+            if not isinstance(current, dict):
+                existing_details[chain_id] = detail
+            else:
+                for key, value in detail.items():
+                    if key not in current or not current.get(key):
+                        current[key] = value
+
+    if existing_details:
+        config["chain_details"] = existing_details
+
+    existing_descriptions: dict[str, str] = {}
+    raw_descriptions = config.get("chain_descriptions")
+    if isinstance(raw_descriptions, dict):
+        for key, value in raw_descriptions.items():
+            chain_id = str(key).strip().upper()
+            if not chain_id:
+                continue
+            if isinstance(value, str) and value.strip():
+                existing_descriptions[chain_id] = value.strip()
+
+    for chain_id, detail in inferred_chain_details.items():
+        summary = detail.get("summary") if isinstance(detail, dict) else None
+        if isinstance(summary, str) and summary.strip() and chain_id not in existing_descriptions:
+            existing_descriptions[chain_id] = summary.strip()
+
+    if existing_descriptions:
+        config["chain_descriptions"] = existing_descriptions
+
     # Gather PDB chain sequences (debug)
     pdb_sequences: dict[str, str] = {}
     pdb_residue_numbers: dict[str, list[str]] = {}
@@ -266,6 +460,14 @@ def init_target(
             vendor_meta["expression_host"] = verification_result["expression_host"]
         if verification_result.get("tags"):
             vendor_meta["tags"] = verification_result["tags"]
+        if verification_result.get("product_form"):
+            vendor_meta["product_form"] = verification_result["product_form"]
+        if verification_result.get("molecular_weight_kda") not in (None, "", []):
+            mw_val = verification_result["molecular_weight_kda"]
+            try:
+                vendor_meta["molecular_weight_kda"] = float(mw_val)
+            except (TypeError, ValueError):
+                vendor_meta["molecular_weight_kda"] = mw_val
 
     normalized_chosen = _normalize_chain_ids(chosen_chains)
 
@@ -446,6 +648,8 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
     expressed_seq = ((analysis.expressed_sequence or "") if analysis and getattr(analysis, "expressed_sequence", None) else "").replace("\n", "").strip().upper()
     expression_host = getattr(analysis, "expression_host", None) if analysis else None
     tags = getattr(analysis, "tags", None) if analysis else None
+    molecular_weight = getattr(analysis, "molecular_weight_kda", None) if analysis else None
+    product_form = getattr(analysis, "product_form", None) if analysis else None
 
     if not accession or not (vendor_range or expressed_seq):
         print("[warn] LLM analysis missing accession or range; trying legacy parser.")
@@ -467,6 +671,10 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         expression_host = getattr(analysis, "expression_host", None)
     if not tags and analysis:
         tags = getattr(analysis, "tags", None)
+    if molecular_weight is None and analysis:
+        molecular_weight = getattr(analysis, "molecular_weight_kda", None)
+    if product_form is None and analysis:
+        product_form = getattr(analysis, "product_form", None)
 
     # 2. Fetch NCBI sequence
     print(f"[2/5] Fetching sequence for {accession} from NCBI...")
@@ -583,4 +791,6 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         "vendor_range": vendor_range,
         "expression_host": expression_host,
         "tags": tags,
+        "molecular_weight_kda": molecular_weight,
+        "product_form": product_form,
     }

@@ -711,6 +711,11 @@ section {
   line-height: 1.35;
 }
 
+.insight-list li.chain-primary {
+  background: #fef3c7;
+  border: 1px solid #facc15;
+}
+
 .insight-list li.insight-empty {
   background: transparent;
   color: #64748b;
@@ -721,6 +726,24 @@ section {
   display: block;
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.insight-list li .chain-summary {
+  font-weight: 500;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+
+.insight-list li .chain-meta {
+  color: #334155;
+  font-size: 0.92rem;
+  margin-bottom: 4px;
+}
+
+.insight-list li .insight-subtext {
+  color: #475569;
+  font-size: 0.9rem;
+  margin-top: 2px;
 }
 
 .insight-details {
