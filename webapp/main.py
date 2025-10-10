@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
-from pathlib import Path
-
-from fastapi.responses import FileResponse
 
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .analysis import AnalysisGenerationError, generate_rankings_analysis
@@ -46,11 +43,16 @@ from .models import (
     RankingRow,
     SequenceSimilarityMatrix,
     ScatterPoint,
+    TargetCatalogFile,
     TargetPresetListResponse,
     TargetPresetRequest,
     TargetPresetResponse,
     TargetInitRequest,
     TargetInitResponse,
+    TargetCatalogListResponse,
+    TargetCatalogPreviewResponse,
+    TargetGenerationRequest,
+    TargetGenerationResponse,
 )
 from .pipeline import get_target_status
 from .pymol import (
@@ -67,12 +69,37 @@ from .workflows import (
     submit_export,
     submit_golden_gate_plan,
     submit_target_initialization,
+    submit_target_generation,
 )
 
 app = FastAPI(title="InitBinder UI API", version="0.1.0")
 
 cfg = load_config()
 store = get_job_store(cfg.log_dir)
+
+
+def _catalog_dir() -> Path:
+    path = Path(cfg.paths.project_root) / "targets_catalog"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_catalog_file(name: str) -> Path:
+    safe_name = Path(name).name
+    if safe_name != name or not safe_name.endswith(".tsv"):
+        raise HTTPException(status_code=400, detail="Invalid TSV file name")
+    root = _catalog_dir().resolve()
+    candidate = (root / safe_name).resolve()
+    if not str(candidate).startswith(str(root)):
+        raise HTTPException(status_code=400, detail="Invalid TSV file path")
+    return candidate
+
+
+def _template_path(filename: str) -> Path:
+    path = Path(cfg.paths.project_root) / "webapp" / "templates" / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"{filename} not found")
+    return path
 
 
 @app.on_event("startup")
@@ -199,6 +226,74 @@ async def api_job_list(limit: int = 20) -> list[JobSummary]:
             )
         )
     return summaries
+
+
+@app.get("/api/target-generation/catalog", response_model=TargetCatalogListResponse)
+async def api_target_generation_catalog() -> TargetCatalogListResponse:
+    root = _catalog_dir()
+    files: list[TargetCatalogFile] = []
+    if root.exists():
+        for path in sorted(root.glob("*.tsv"), key=lambda item: item.stat().st_mtime, reverse=True):
+            stat = path.stat()
+            files.append(
+                TargetCatalogFile(
+                    name=path.name,
+                    size_bytes=stat.st_size,
+                    modified_at=stat.st_mtime,
+                ),
+            )
+    return TargetCatalogListResponse(directory=str(root), files=files)
+
+
+@app.get("/api/target-generation/catalog/{filename}", response_model=TargetCatalogPreviewResponse)
+async def api_target_generation_preview(
+    filename: str,
+    limit: int = Query(200, ge=10, le=2000),
+) -> TargetCatalogPreviewResponse:
+    path = _resolve_catalog_file(filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    headers: list[str] = []
+    rows: list[list[str]] = []
+    total_rows = 0
+
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        for index, row in enumerate(reader):
+            if index == 0:
+                headers = [str(cell) for cell in row]
+                continue
+            total_rows += 1
+            if len(rows) < limit:
+                rows.append([str(cell) for cell in row])
+
+    displayed_rows = len(rows)
+    truncated = total_rows > displayed_rows
+
+    return TargetCatalogPreviewResponse(
+        name=path.name,
+        headers=headers,
+        rows=rows,
+        total_rows=total_rows,
+        displayed_rows=displayed_rows,
+        truncated=truncated,
+    )
+
+
+@app.get("/api/target-generation/catalog/{filename}/file")
+async def api_target_generation_download(filename: str) -> FileResponse:
+    path = _resolve_catalog_file(filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, filename=path.name, media_type="text/tab-separated-values")
+
+
+@app.post("/api/target-generation/run", response_model=TargetGenerationResponse)
+async def api_target_generation_run(payload: TargetGenerationRequest) -> TargetGenerationResponse:
+    job_id = submit_target_generation(payload, job_store=store)
+    message = "Queued target_generation.py run"
+    return TargetGenerationResponse(job_id=job_id, message=message)
 
 
 @app.get("/api/targets/presets", response_model=TargetPresetListResponse)
@@ -468,11 +563,12 @@ async def api_assess_run(pdb_id: str, payload: AssessmentRunRequest) -> Assessme
 
 @app.get("/")
 async def home() -> FileResponse:
-    index_path = Path(cfg.paths.project_root) / "webapp" / "templates" / "index.html"
-    print(index_path)
-    if not index_path.exists():
-        raise HTTPException(status_code=404, detail="index.html not found")
-    return FileResponse(index_path)
+    return FileResponse(_template_path("index.html"))
+
+
+@app.get("/target-generation")
+async def target_generation_page() -> FileResponse:
+    return FileResponse(_template_path("target_generation.html"))
 
 
 @app.exception_handler(AlignmentNotFoundError)

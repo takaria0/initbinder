@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 
 class TargetPreset(BaseModel):
@@ -105,6 +106,51 @@ class AssessmentSyncResponse(BaseModel):
     job_id: str
     message: str
     run_label: Optional[str] = None
+
+
+class TargetCatalogFile(BaseModel):
+    name: str
+    size_bytes: int
+    modified_at: float
+
+
+class TargetCatalogListResponse(BaseModel):
+    directory: str
+    files: List[TargetCatalogFile] = Field(default_factory=list)
+
+
+class TargetCatalogPreviewResponse(BaseModel):
+    name: str
+    headers: List[str] = Field(default_factory=list)
+    rows: List[List[str]] = Field(default_factory=list)
+    total_rows: int = 0
+    displayed_rows: int = 0
+    truncated: bool = False
+
+
+class TargetGenerationRequest(BaseModel):
+    instruction: str = Field(..., min_length=3, max_length=4000)
+    max_targets: Optional[int] = Field(None, ge=1, le=2000)
+    species: Optional[str] = Field(None, max_length=120)
+    prefer_tags: Optional[str] = Field(None, max_length=240)
+    out_prefix: Optional[str] = Field(None, max_length=240)
+    avoid_existing: List[str] = Field(default_factory=list)
+    extra_args: Optional[str] = Field(None, max_length=500)
+    no_browser_popup: bool = True
+
+    @validator("avoid_existing", each_item=True)
+    def _validate_avoid(cls, value: str) -> str:
+        name = Path(value).name
+        if name != value:
+            raise ValueError("Invalid TSV file name")
+        if not name.endswith(".tsv"):
+            raise ValueError("Avoid list entries must end with .tsv")
+        return name
+
+
+class TargetGenerationResponse(BaseModel):
+    job_id: str
+    message: str
 
 
 class AlignmentResponse(BaseModel):

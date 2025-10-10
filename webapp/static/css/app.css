@@ -24,6 +24,32 @@ body {
   gap: 24px;
 }
 
+.page-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: #f8fafc;
+  color: var(--color-accent);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.page-nav a:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
+
 .debug-toggle {
   display: inline-flex !important;
   align-items: center;
@@ -173,6 +199,222 @@ section {
   padding: 24px;
   margin-bottom: 24px;
   box-shadow: var(--shadow-sm);
+}
+
+.catalog-section {
+  overflow: hidden;
+}
+
+.catalog-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) 1fr;
+  gap: 24px;
+}
+
+.catalog-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.catalog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.catalog-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.catalog-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.catalog-controls label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.catalog-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: #f8fafc;
+}
+
+.catalog-item {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  gap: 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.catalog-item:last-child {
+  border-bottom: none;
+}
+
+.catalog-item button.catalog-button {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.catalog-item button.catalog-button:hover,
+.catalog-item button.catalog-button.active {
+  text-decoration: underline;
+}
+
+.catalog-item-meta {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.catalog-empty {
+  padding: 18px;
+  text-align: center;
+  color: #64748b;
+}
+
+.catalog-viewer {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: #fff;
+  min-height: 280px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.catalog-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.catalog-table thead {
+  position: sticky;
+  top: 0;
+  background: #eff6ff;
+  z-index: 1;
+}
+
+.catalog-table th,
+.catalog-table td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.catalog-table caption {
+  caption-side: bottom;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  color: #475569;
+}
+
+.catalog-spinner,
+.catalog-error {
+  padding: 24px;
+  text-align: center;
+  color: #475569;
+}
+
+.catalog-error {
+  color: #b91c1c;
+}
+
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-grid .form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.form-span-2 {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-span-2 textarea,
+.form-span-2 select {
+  width: 100%;
+}
+
+.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+  font-size: 0.95rem;
+  color: #475569;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.job-status-grid {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.status-line {
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+}
+
+.log-viewer {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 16px;
+  min-height: 220px;
+  max-height: 400px;
+  overflow: auto;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 960px) {
+  .catalog-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-controls {
+    justify-content: flex-start;
+  }
 }
 
 .scatter-panel {
@@ -829,6 +1071,16 @@ button:hover:not(:disabled) {
 
 button:active:not(:disabled) {
   transform: scale(0.99);
+}
+
+button.secondary {
+  background: #e2e8f0;
+  color: #1f2937;
+  border: 1px solid var(--color-border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #cbd5f5;
 }
 
 button.ghost {

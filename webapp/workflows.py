@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 import shlex
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -18,6 +20,7 @@ from .models import (
     DesignRunRequest,
     ExportRequest,
     GoldenGateRequest,
+    TargetGenerationRequest,
     TargetInitRequest,
 )
 from .pipeline import PipelineError, init_decide_prep
@@ -175,6 +178,83 @@ def submit_golden_gate_plan(request: GoldenGateRequest, *,
     return job.job_id
 
 
+def submit_target_generation(request: TargetGenerationRequest, *,
+                             job_store: JobStore | None = None) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    job = store.create_job("target_generation", "Target generation", details=request.dict())
+
+    script_path = Path(cfg.paths.project_root) / "target_generation.py"
+    catalog_root = Path(cfg.paths.project_root) / "targets_catalog"
+
+    def _run() -> None:
+        try:
+            if not script_path.exists():
+                raise FileNotFoundError(f"{script_path} not found")
+
+            python_exe = sys.executable or "python3"
+            cmd: list[str] = [python_exe, str(script_path), "--instruction", request.instruction]
+
+            if request.max_targets is not None:
+                cmd.extend(["--max_targets", str(request.max_targets)])
+            if request.species:
+                cmd.extend(["--species", request.species])
+            if request.prefer_tags:
+                cmd.extend(["--prefer_tags", request.prefer_tags])
+            if request.out_prefix:
+                cmd.extend(["--out_prefix", request.out_prefix])
+            if request.no_browser_popup:
+                cmd.append("--no_browser_popup")
+
+            catalog_root.mkdir(parents=True, exist_ok=True)
+            root_resolved = catalog_root.resolve()
+            for name in request.avoid_existing:
+                candidate = (catalog_root / name).resolve()
+                if not str(candidate).startswith(str(root_resolved)):
+                    raise ValueError(f"Invalid avoid TSV path: {name}")
+                cmd.extend(["--avoid_tsv", str(candidate)])
+
+            if request.extra_args:
+                cmd.extend(shlex.split(request.extra_args))
+
+            display_cmd = " ".join(shlex.quote(part) for part in cmd)
+            store.update(
+                job.job_id,
+                status=JobStatus.RUNNING,
+                message="Running target_generation.py",
+                details={"command": display_cmd},
+            )
+
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(cfg.paths.project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            assert process.stdout is not None
+            for line in process.stdout:
+                store.append_log(job.job_id, line.rstrip())
+
+            return_code = process.wait()
+            if return_code == 0:
+                store.update(job.job_id, status=JobStatus.SUCCESS, message="target_generation.py completed")
+            else:
+                store.update(
+                    job.job_id,
+                    status=JobStatus.FAILED,
+                    message=f"target_generation.py exited with status {return_code}",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
 def submit_assessment_run(request: AssessmentRunRequest, *, job_store: JobStore | None = None) -> str:
     store = job_store or get_job_store(load_config().log_dir)
     label = f"Assess designs {request.pdb_id.upper()}"
@@ -326,6 +406,7 @@ __all__ = [
     "submit_design_run",
     "submit_export",
     "submit_golden_gate_plan",
+    "submit_target_generation",
     "submit_assessment_run",
     "submit_assessment_sync",
     "wait_for_job",
