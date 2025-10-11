@@ -52,6 +52,147 @@ const DEFAULT_SCATTER_THRESHOLDS = Object.fromEntries(
 
 const RESULTS_TABLE_DISPLAY_LIMIT = 2000;
 
+const COUNTER_SELECTION_LIBRARY = {
+  macs_streptavidin: {
+    label: 'MACS streptavidin microbeads + biotinylated antigen',
+    description:
+      'Magnetic bead enrichment using streptavidin microbeads loaded with biotinylated antigen.',
+    recommendations: [
+      'Run streptavidin microbeads without antigen to deplete bead- and biotin-binding clones before the positive pull-down.',
+      'Perform a mock pull-down with beads pre-blocked using excess free biotin to measure anti-biotin binders prior to enrichment.',
+      'Include an OrthoRep host-only passage to monitor background binding after the MACS step.',
+    ],
+    notes: [
+      'Load antigen at saturating levels but remove unbound biotinylated antigen so it does not leach off the beads during selection.',
+      'Keep bead-to-cell ratios consistent between maturation cycles to maintain selection stringency.',
+    ],
+  },
+  facs_anti_biotin: {
+    label: 'FACS anti-biotin AF647 sorting with biotinylated antigen',
+    description:
+      'Two-color FACS sorting with anti-biotin AF647 secondary detecting nanobodies captured on biotinylated antigen.',
+    recommendations: [
+      'Sort a control sample stained with anti-biotin AF647 but without antigen to gate out clones that bind the detection reagent.',
+      'Pre-clear the library with anti-biotin AF647-coated beads or antibody-only mixes before the positive FACS sort.',
+      'Carry a secondary-only control (no antigen, no primary) every round to normalize OrthoRep background fluorescence.',
+    ],
+    notes: [
+      'Titrate the AF647 conjugate to stay in the linear range and avoid fluorophore aggregation artifacts.',
+      'Record the gating template (FSC/SSC, viability, negative control windows) and reuse it across maturation cycles.',
+    ],
+  },
+  custom: {
+    label: 'Custom / other selection workflow',
+    description:
+      'Capture bespoke counter-selection reminders for non-standard enrichment schemes.',
+    recommendations: [
+      'Design a negative selection that mimics your dominant off-target binder (tags, carrier proteins, scaffold, bead chemistry).',
+      'Include a no-antigen passage on naïve OrthoRep host cells to track spontaneous display or autofluorescence enrichment.',
+    ],
+    notes: [
+      'Document buffer additives (detergents, blockers, competitors) together with selection history so future rounds can replicate success.',
+    ],
+  },
+};
+
+const GLOBAL_COUNTER_NOTES = [
+  'Confirm Golden Gate fragments remain free of BsaI/BbsI/BsmBI motifs before ordering DNA; recode any variants that reintroduce these sites.',
+  'Log counter-selection timing and reagent lots after each maturation cycle so subsequent OrthoRep rounds stay reproducible.',
+];
+
+const COUNTER_TAG_RULES = [
+  {
+    id: 'trxa',
+    chip: 'TrxA fusion detected',
+    matches: (ctx) =>
+      ctx.tagsLower.some((tag) => /trx|thioredoxin/.test(tag)) || /trx|thioredoxin/.test(ctx.text),
+    recommendations: [
+      'Run a counter-selection against thioredoxin (TrxA) carrier protein without the antigen insert to remove tag binders.',
+    ],
+    notes: [
+      'Thioredoxin carriers are sticky; keep a TrxA-only control in each maturation round to spot false positives.',
+    ],
+    context: ['Vendor metadata indicates a thioredoxin (TrxA) fusion tag on the antigen.'],
+  },
+  {
+    id: 'his',
+    chip: 'His tag present',
+    matches: (ctx) =>
+      ctx.tagsLower.some((tag) => tag.includes('his')) || /his[-\s]?tag|6xhis|his6/.test(ctx.text),
+    recommendations: [
+      'Pre-clear the library on Ni-NTA or include soluble poly-His peptide/imidazole to suppress histidine-tag binders.',
+    ],
+    notes: [
+      'Histidine tags quickly enrich sticky clones; track Ni-NTA depletion efficiency after each cycle.',
+    ],
+    context: ['Histidine affinity tag detected in antigen metadata.'],
+  },
+  {
+    id: 'fc',
+    chip: 'Fc fusion partner',
+    matches: (ctx) =>
+      ctx.tagsLower.some((tag) => /(^|[^a-z])fc($|[^a-z])/.test(tag)) || /(igg|fc\b)/.test(ctx.text),
+    recommendations: [
+      'Counter-select with human IgG Fc or Fc-blocking reagent to remove clones that prefer the Fc fusion.',
+    ],
+    notes: [
+      'Fc fusions attract Protein A/G-like binders; include an Fc-only control during enrichment.',
+    ],
+    context: ['Antigen appears to include an Fc fusion partner.'],
+  },
+  {
+    id: 'gst',
+    chip: 'GST fusion partner',
+    matches: (ctx) =>
+      ctx.tagsLower.some((tag) => tag.includes('gst')) || /glutathione|gst/.test(ctx.text),
+    recommendations: [
+      'Include glutathione resin or GST-only protein counter selections to deplete GST binders.',
+    ],
+    notes: [
+      'GST is highly sticky; verify clones do not track with glutathione resin over time.',
+    ],
+    context: ['Detected GST/glutathione fusion tag in antigen metadata.'],
+  },
+  {
+    id: 'biotin',
+    chip: 'Biotinylated tag',
+    matches: (ctx) =>
+      ctx.tagsLower.some((tag) => tag.includes('biotin') || tag.includes('avi')) || ctx.text.includes('biotin'),
+    recommendations: [
+      'Include a streptavidin-only or free biotin counter-selection to identify anti-biotin binders early.',
+    ],
+    notes: [
+      'Track free biotin concentration in buffers; insufficient blocking increases bead-binding artifacts.',
+    ],
+    context: ['Biotin/avi-tag annotation detected; monitor for anti-biotin clones.'],
+  },
+  {
+    id: 'membrane_scaffold',
+    chip: 'Membrane scaffold',
+    matches: (ctx) =>
+      /nanodisc|liposome|amphipol|detergent|micelle|membrane/.test(ctx.text),
+    recommendations: [
+      'Run a counter-selection with the membrane scaffold or detergent micelle alone (no target protein) to eliminate scaffold binders.',
+    ],
+    notes: [
+      'Carrier scaffolds can dominate affinity signals; document detergent composition and concentration for reproducibility.',
+    ],
+    context: ['Vendor notes mention a membrane scaffold or detergent carrier.'],
+  },
+  {
+    id: 'albumin',
+    chip: 'Carrier protein (BSA/albumin)',
+    matches: (ctx) => ctx.tagsLower.some((tag) => tag.includes('bsa') || tag.includes('albumin')) || /bsa|albumin/.test(ctx.text),
+    recommendations: [
+      'Include BSA/albumin-only counter selections or add soluble carrier protein during positive selections to soak up carrier binders.',
+    ],
+    notes: [
+      'Albumin carriers frequently drive false positives; watch for clones that persist even without antigen present.',
+    ],
+    context: ['Carrier protein (BSA/albumin) annotated in antigen metadata.'],
+  },
+];
+
 const state = {
   currentPdb: null,
   jobPoller: null,
@@ -92,6 +233,8 @@ const state = {
   librarySummary: null,
   libraryAlignmentMode: 'aa',
   libraryJobId: null,
+  counterSelectionMethod: '',
+  counterSelectionPlan: { recommendations: [], notes: [], context: [], chips: [] },
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -208,6 +351,14 @@ const el = {
   libraryAlignmentTable: document.querySelector('#library-alignment-table'),
   libraryAssembly: document.querySelector('#library-assembly'),
   libraryPreview: document.querySelector('#library-preview'),
+  counterSelectionSection: document.querySelector('#counter-selection-section'),
+  counterSelectionMethod: document.querySelector('#counter-selection-method'),
+  counterSelectionList: document.querySelector('#counter-selection-list'),
+  counterSelectionNotes: document.querySelector('#counter-selection-notes'),
+  counterSelectionContext: document.querySelector('#counter-selection-context'),
+  counterSelectionContextList: document.querySelector('#counter-selection-context-list'),
+  counterSelectionChips: document.querySelector('#counter-selection-chips'),
+  counterSelectionDescription: document.querySelector('#counter-selection-description'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -404,6 +555,198 @@ function updateActiveRunDisplay() {
   el.activeRunName.textContent = state.activeRunLabel || 'latest';
 }
 
+function dedupeList(items = []) {
+  const seen = new Set();
+  const output = [];
+  items.forEach((item) => {
+    const text = typeof item === 'string' ? item.trim() : '';
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(text);
+  });
+  return output;
+}
+
+function extractAntigenCounterInsights(target = state.targetDetails) {
+  const plan = { recommendations: [], notes: [], context: [], chips: [] };
+  if (!target || !target.antigen) {
+    return plan;
+  }
+  const antigen = target.antigen || {};
+  const rawTags = Array.isArray(antigen.tags)
+    ? antigen.tags
+    : antigen.tags
+      ? [antigen.tags]
+      : [];
+  const tags = rawTags
+    .map((tag) => String(tag).trim())
+    .filter(Boolean);
+  const tagsLower = tags.map((tag) => tag.toLowerCase());
+  const textParts = [
+    antigen.notes,
+    antigen.product_form,
+    antigen.catalog,
+    antigen.expression_host,
+  ]
+    .map((part) => (part == null ? '' : String(part).toLowerCase()))
+    .filter(Boolean);
+  const text = textParts.join(' ');
+
+  if (tags.length) {
+    plan.context.push(`Vendor tags: ${tags.join(', ')}`);
+    tags.forEach((tag) => {
+      plan.chips.push(`Tag: ${tag}`);
+    });
+  }
+  if (antigen.expression_host) {
+    plan.context.push(`Expression host: ${antigen.expression_host}`);
+  }
+  if (antigen.product_form) {
+    plan.context.push(`Product form: ${antigen.product_form}`);
+  }
+
+  const ctx = { tagsLower, text, antigen, target, tags };
+  COUNTER_TAG_RULES.forEach((rule) => {
+    try {
+      if (!rule || typeof rule.matches !== 'function') return;
+      if (!rule.matches(ctx)) return;
+      if (rule.chip) plan.chips.push(rule.chip);
+      if (Array.isArray(rule.recommendations)) {
+        plan.recommendations.push(...rule.recommendations);
+      }
+      if (Array.isArray(rule.notes)) {
+        plan.notes.push(...rule.notes);
+      }
+      if (Array.isArray(rule.context)) {
+        plan.context.push(...rule.context);
+      }
+    } catch (err) {
+      console.warn('Failed to evaluate counter-selection rule', rule?.id, err);
+    }
+  });
+
+  plan.recommendations = dedupeList(plan.recommendations);
+  plan.notes = dedupeList(plan.notes);
+  plan.context = dedupeList(plan.context);
+  plan.chips = dedupeList(plan.chips);
+  return plan;
+}
+
+function computeCounterSelectionPlan(selectionKey, target = state.targetDetails) {
+  const plan = { recommendations: [], notes: [], context: [], chips: [] };
+  const config = selectionKey ? COUNTER_SELECTION_LIBRARY[selectionKey] : null;
+  if (config) {
+    if (Array.isArray(config.recommendations)) {
+      plan.recommendations.push(...config.recommendations);
+    }
+    if (Array.isArray(config.notes)) {
+      plan.notes.push(...config.notes);
+    }
+  }
+  plan.notes.push(...GLOBAL_COUNTER_NOTES);
+
+  const antigenInsights = extractAntigenCounterInsights(target);
+  plan.recommendations.push(...antigenInsights.recommendations);
+  plan.notes.push(...antigenInsights.notes);
+  plan.context.push(...antigenInsights.context);
+  plan.chips.push(...antigenInsights.chips);
+
+  plan.recommendations = dedupeList(plan.recommendations);
+  plan.notes = dedupeList(plan.notes);
+  plan.context = dedupeList(plan.context);
+  plan.chips = dedupeList(plan.chips);
+  return plan;
+}
+
+function renderCounterList(listEl, items, emptyText) {
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  if (!Array.isArray(items) || items.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'counter-empty';
+    li.textContent = emptyText;
+    listEl.appendChild(li);
+    return;
+  }
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    li.textContent = item;
+    listEl.appendChild(li);
+  });
+}
+
+function renderCounterSelectionPanel() {
+  if (!el.counterSelectionSection) return;
+  const method = state.counterSelectionMethod || '';
+  const config = method ? COUNTER_SELECTION_LIBRARY[method] : null;
+  const plan = state.counterSelectionPlan || { recommendations: [], notes: [], context: [], chips: [] };
+
+  if (el.counterSelectionMethod && el.counterSelectionMethod.value !== method) {
+    el.counterSelectionMethod.value = method;
+  }
+
+  if (el.counterSelectionDescription) {
+    let description = 'Select a primary selection workflow to surface counter selections and pitfalls to keep OrthoRep affinity maturation on track.';
+    if (config && config.description) {
+      description = config.description;
+    } else if (config && config.label) {
+      description = config.label;
+    }
+    el.counterSelectionDescription.textContent = description;
+  }
+
+  const recEmptyText = method
+    ? 'No counter selections recorded yet for this workflow.'
+    : 'Choose a primary selection to see counter-selection suggestions.';
+  renderCounterList(el.counterSelectionList, plan.recommendations, recEmptyText);
+
+  const noteEmptyText = method
+    ? 'No additional pitfalls detected yet.'
+    : 'Select a workflow to surface technical reminders.';
+  renderCounterList(el.counterSelectionNotes, plan.notes, noteEmptyText);
+
+  if (el.counterSelectionChips) {
+    el.counterSelectionChips.innerHTML = '';
+    if (Array.isArray(plan.chips) && plan.chips.length) {
+      plan.chips.forEach((chip) => {
+        const span = document.createElement('span');
+        span.className = 'counter-chip';
+        span.textContent = chip;
+        el.counterSelectionChips.appendChild(span);
+      });
+    }
+  }
+
+  if (el.counterSelectionContextList) {
+    const contextItems = Array.isArray(plan.context) ? plan.context : [];
+    el.counterSelectionContextList.innerHTML = '';
+    if (contextItems.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'counter-empty';
+      li.textContent = 'No antigen-specific risk factors detected yet.';
+      el.counterSelectionContextList.appendChild(li);
+    } else {
+      contextItems.forEach((item) => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        el.counterSelectionContextList.appendChild(li);
+      });
+    }
+  }
+
+  if (el.counterSelectionContext) {
+    const hasContext = (plan.context && plan.context.length > 0) || (plan.chips && plan.chips.length > 0);
+    el.counterSelectionContext.hidden = !hasContext;
+  }
+}
+
+function updateCounterSelectionPlan() {
+  state.counterSelectionPlan = computeCounterSelectionPlan(state.counterSelectionMethod || '', state.targetDetails);
+  renderCounterSelectionPanel();
+}
+
 function renderTargetInsights(status = state.targetStatus) {
   if (!el.epitopeList || !el.chainList || !el.antigenDetails) return;
 
@@ -553,6 +896,8 @@ function renderTargetInsights(status = state.targetStatus) {
       el.antigenDetails.appendChild(dd);
     });
   }
+
+  updateCounterSelectionPlan();
 }
 
 function renderCurrentSelection() {
@@ -3433,6 +3778,12 @@ function initEventHandlers() {
   if (el.exportBackdrop) el.exportBackdrop.addEventListener('click', () => closeExportModal());
   el.exportButton.addEventListener('click', runExport);
   if (el.libraryRun) el.libraryRun.addEventListener('click', runGoldenGatePlanner);
+  if (el.counterSelectionMethod) {
+    el.counterSelectionMethod.addEventListener('change', (event) => {
+      state.counterSelectionMethod = event.target.value;
+      updateCounterSelectionPlan();
+    });
+  }
   if (el.refreshResultsBtn) {
     el.refreshResultsBtn.addEventListener('click', () => fetchRankings({ silent: false }));
   }

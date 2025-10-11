@@ -283,6 +283,35 @@
         <div class="library-preview" id="library-preview"></div>
       </section>
 
+      <section id="counter-selection-section">
+        <h2>Counter Selection Planner</h2>
+        <p class="counter-description" id="counter-selection-description">Select a primary selection workflow to surface counter selections and pitfalls to keep OrthoRep affinity maturation on track.</p>
+        <div class="counter-controls">
+          <label for="counter-selection-method">Primary selection method
+            <select id="counter-selection-method">
+              <option value="">Select a primary selection…</option>
+              <option value="macs_streptavidin">MACS streptavidin microbeads + biotinylated antigen</option>
+              <option value="facs_anti_biotin">FACS anti-biotin AF647 sorting with biotinylated antigen</option>
+              <option value="custom">Custom / other selection workflow</option>
+            </select>
+          </label>
+        </div>
+        <div class="counter-context" id="counter-selection-context" hidden>
+          <div class="counter-context-chips" id="counter-selection-chips"></div>
+          <ul id="counter-selection-context-list"></ul>
+        </div>
+        <div class="counter-panels">
+          <div class="counter-card">
+            <h3>Recommended counter selections</h3>
+            <ul id="counter-selection-list"></ul>
+          </div>
+          <div class="counter-card">
+            <h3>Things to note</h3>
+            <ul id="counter-selection-notes"></ul>
+          </div>
+        </div>
+      </section>
+
       </div>
 
       <aside id="jobs-sidebar">
