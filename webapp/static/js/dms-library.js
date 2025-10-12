@@ -78,6 +78,22 @@ function renderMeta(data) {
   createMetaRow('Mutation menu', data.mutation_kind);
   createMetaRow('RSA threshold', data.rsa_threshold.toFixed(2));
   createMetaRow('Surface only', data.target_surface_only ? 'Yes' : 'No');
+  const expressedState = data.restrict_to_expressed_region
+    ? data.expressed_region_applied
+      ? 'Applied'
+      : 'Requested (not applied)'
+    : 'Disabled';
+  createMetaRow('Vendor expressed filter', expressedState);
+  if (data.restrict_to_expressed_region) {
+    createMetaRow('Vendor expressed range', data.expressed_region_vendor_range || '—');
+    if (typeof data.expressed_region_sequence_length === 'number') {
+      createMetaRow('Vendor expressed length', data.expressed_region_sequence_length.toLocaleString());
+    }
+    createMetaRow(
+      'Residues overlapping vendor range',
+      data.expressed_region_matched_residues.toLocaleString(),
+    );
+  }
 }
 
 function renderPreview(rows) {
@@ -143,6 +159,7 @@ async function handleSubmit(event) {
     chain_id: (formData.get('chain_id') || '').toString().trim().toUpperCase(),
     mutation_kind: (formData.get('mutation_kind') || 'SSM').toString(),
     target_surface_only: document.querySelector('#dms-surface-only')?.checked ?? true,
+    restrict_to_expressed_region: document.querySelector('#dms-vendor-range')?.checked ?? false,
     rsa_threshold: parseFloat(formData.get('rsa_threshold')) || 0.25,
     include_glycan_toggles: document.querySelector('#dms-glycan')?.checked ?? true,
     add_conservative_swaps: document.querySelector('#dms-conservative')?.checked ?? true,
@@ -179,6 +196,9 @@ async function handleSubmit(event) {
     renderMeta(data);
     renderPreview(data.preview);
     renderMutatedResidues(data.mutated_residues, data.surface_residue_count);
+    if (Array.isArray(data.expressed_region_notes) && data.expressed_region_notes.length) {
+      data.expressed_region_notes.forEach((note) => appendLog(note));
+    }
 
     downloadLink.href = data.download_url;
     downloadLink.classList.remove('disabled');

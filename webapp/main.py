@@ -495,6 +495,7 @@ async def api_dms_library_run(payload: AntigenDMSRequest) -> AntigenDMSResponse:
         pdb_id=payload.pdb_id,
         chain_id=payload.chain_id,
         target_surface_only=payload.target_surface_only,
+        restrict_to_expressed_region=payload.restrict_to_expressed_region,
         rsa_threshold=payload.rsa_threshold,
         mutation_kind=payload.mutation_kind,
         include_glycan_toggles=payload.include_glycan_toggles,
@@ -551,6 +552,19 @@ async def api_dms_library_run(payload: AntigenDMSRequest) -> AntigenDMSResponse:
         else "No mutable residues met the selection criteria"
     )
 
+    expressed_region = metadata.expressed_region
+    vendor_range_str = None
+    if expressed_region.vendor_range:
+        vendor_range_str = f"{expressed_region.vendor_range[0]}-{expressed_region.vendor_range[1]}"
+    matched_expressed = len(expressed_region.matched_uids)
+
+    if expressed_region.requested:
+        if expressed_region.applied:
+            suffix = f"restricted to vendor range {vendor_range_str}" if vendor_range_str else "restricted to vendor construct"
+            message = f"{message} · {suffix}"
+        else:
+            message = f"{message} · Vendor expressed range unavailable; used full chain"
+
     return AntigenDMSResponse(
         result_id=metadata.result_id,
         pdb_id=metadata.pdb_id,
@@ -565,6 +579,12 @@ async def api_dms_library_run(payload: AntigenDMSRequest) -> AntigenDMSResponse:
         candidate_residue_count=candidate_count,
         sequence_length=sequence_length,
         target_surface_only=options.target_surface_only,
+        restrict_to_expressed_region=options.restrict_to_expressed_region,
+        expressed_region_applied=expressed_region.applied,
+        expressed_region_vendor_range=vendor_range_str,
+        expressed_region_sequence_length=expressed_region.expressed_sequence_length,
+        expressed_region_matched_residues=matched_expressed,
+        expressed_region_notes=list(expressed_region.notes),
         rsa_threshold=options.rsa_threshold,
         mutation_kind=options.mutation_kind,
         download_url=download_url,

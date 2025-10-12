@@ -273,6 +273,10 @@ class AntigenDMSRequest(BaseModel):
     )
     chain_id: str = Field(..., min_length=1, max_length=2)
     target_surface_only: bool = True
+    restrict_to_expressed_region: bool = Field(
+        False,
+        description="Limit mutations to residues overlapping the vendor expressed/soluble construct",
+    )
     rsa_threshold: float = Field(0.25, ge=0.0, le=1.0)
     mutation_kind: str = Field("SSM", description="Mutation menu to apply (SSM, alanine, charge)")
     include_glycan_toggles: bool = True
@@ -335,6 +339,12 @@ class AntigenDMSResponse(BaseModel):
     target_surface_only: bool
     rsa_threshold: float
     mutation_kind: str
+    restrict_to_expressed_region: bool
+    expressed_region_applied: bool
+    expressed_region_vendor_range: Optional[str]
+    expressed_region_sequence_length: Optional[int]
+    expressed_region_matched_residues: int
+    expressed_region_notes: List[str] = Field(default_factory=list)
     download_url: str
     created_at: float
     message: str

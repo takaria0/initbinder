@@ -7,12 +7,22 @@ import itertools
 import json
 import math
 import random
+import re
 import time
 import uuid
 from collections import defaultdict, namedtuple
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import yaml
+
+from sequence_alignment import (
+    biotite_gapped_alignment,
+    clean_sequence,
+    extract_subsequence,
+    normalize_range,
+)
 
 from .config import load_config
 
@@ -298,6 +308,7 @@ class DMSLibraryOptions:
     add_controls: bool = True
     add_barcodes: Optional[int] = None
     pdb_path_override: Optional[str] = None
+    restrict_to_expressed_region: bool = False
 
 
 @dataclass(slots=True)
@@ -324,6 +335,63 @@ class DMSResidueSummary:
 
 
 @dataclass(slots=True)
+class DMSExpressedRegionSelection:
+    requested: bool = False
+    vendor_range: Optional[Tuple[int, int]] = None
+    expressed_sequence_length: Optional[int] = None
+    matched_uids: Set[str] = field(default_factory=set)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def applied(self) -> bool:
+        return self.requested and bool(self.matched_uids)
+
+    @property
+    def vendor_range_length(self) -> Optional[int]:
+        if not self.vendor_range:
+            return None
+        start, end = self.vendor_range
+        return max(0, end - start + 1)
+
+    def to_json(self) -> Dict[str, object]:
+        return {
+            "requested": self.requested,
+            "vendor_range": list(self.vendor_range) if self.vendor_range else None,
+            "expressed_sequence_length": self.expressed_sequence_length,
+            "matched_uids": sorted(self.matched_uids),
+            "notes": list(self.notes),
+        }
+
+    @classmethod
+    def from_json(cls, data: Optional[Dict[str, object]]) -> "DMSExpressedRegionSelection":
+        if not data:
+            return cls()
+        vendor_range = data.get("vendor_range")
+        rng_tuple: Optional[Tuple[int, int]] = None
+        if isinstance(vendor_range, (list, tuple)) and len(vendor_range) >= 2:
+            rng_tuple = (int(vendor_range[0]), int(vendor_range[1]))
+        matched_raw = data.get("matched_uids") or []
+        matched: Set[str] = set()
+        for item in matched_raw:
+            if isinstance(item, str) and item:
+                matched.add(item)
+        notes_raw = data.get("notes") or []
+        notes: List[str] = []
+        for entry in notes_raw:
+            if entry:
+                notes.append(str(entry))
+        length_val = data.get("expressed_sequence_length")
+        length_int = int(length_val) if isinstance(length_val, (int, float)) else None
+        return cls(
+            requested=bool(data.get("requested", False)),
+            vendor_range=rng_tuple,
+            expressed_sequence_length=length_int,
+            matched_uids=matched,
+            notes=notes,
+        )
+
+
+@dataclass(slots=True)
 class DMSLibraryMetadata:
     result_id: str
     pdb_id: Optional[str]
@@ -336,6 +404,7 @@ class DMSLibraryMetadata:
     design: List[DMSDesignRow]
     csv_path: Path
     metadata_path: Path
+    expressed_region: DMSExpressedRegionSelection = field(default_factory=DMSExpressedRegionSelection)
 
     @property
     def mutated_residue_summaries(self) -> List[DMSResidueSummary]:
@@ -415,12 +484,139 @@ def _resolve_pdb_path(options: DMSLibraryOptions) -> Path:
     )
 
 
+def _target_yaml_path(pdb_id: str) -> Optional[Path]:
+    cfg = load_config()
+    search_roots: List[Path] = []
+    if cfg.paths.targets_dir:
+        search_roots.append(cfg.paths.targets_dir)
+    if cfg.paths.workspace_root:
+        search_roots.append(cfg.paths.workspace_root / "targets")
+
+    pdb_upper = pdb_id.upper()
+    for root in search_roots:
+        candidate = (root / pdb_upper / "target.yaml").resolve()
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _parse_range(value: object) -> Optional[Tuple[int, int]]:
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        try:
+            start = int(value[0])
+            end = int(value[1])
+            return normalize_range((start, end))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        match = re.match(r"\s*(\d+)\s*[-–]\s*(\d+)\s*", value)
+        if match:
+            start = int(match.group(1))
+            end = int(match.group(2))
+            return normalize_range((start, end))
+    return None
+
+
+def _load_target_yaml(pdb_id: str) -> Optional[dict]:
+    yaml_path = _target_yaml_path(pdb_id)
+    if not yaml_path:
+        return None
+    try:
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # pragma: no cover - defensive
+        raise DMSLibraryGenerationError(f"Failed to read target metadata at {yaml_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise DMSLibraryGenerationError(f"Target metadata at {yaml_path} is not a mapping")
+    return data
+
+
+def _select_expressed_region(
+    options: DMSLibraryOptions,
+    sequence: str,
+    mapping: Sequence[dict],
+) -> DMSExpressedRegionSelection:
+    selection = DMSExpressedRegionSelection(requested=options.restrict_to_expressed_region)
+    if not selection.requested:
+        return selection
+
+    if not options.pdb_id:
+        selection.notes.append("pdb_id is required to locate target metadata for vendor expressed range")
+        return selection
+
+    try:
+        target_data = _load_target_yaml(options.pdb_id)
+    except DMSLibraryGenerationError as exc:
+        selection.notes.append(str(exc))
+        return selection
+
+    if not target_data:
+        selection.notes.append(f"No target metadata found for {options.pdb_id.upper()}")
+        return selection
+
+    sequences_block = target_data.get("sequences") or {}
+    accession_block = sequences_block.get("accession") or {}
+    expressed_range_value = accession_block.get("expressed_range")
+    vendor_range = _parse_range(expressed_range_value)
+    if not vendor_range:
+        selection.notes.append("expressed_range missing in target metadata; cannot restrict to vendor construct")
+        return selection
+
+    selection.vendor_range = vendor_range
+
+    expressed_seq_raw = accession_block.get("expressed_aa") or ""
+    vendor_seq_raw = accession_block.get("aa") or sequences_block.get("vendor") or ""
+    fragment = clean_sequence(expressed_seq_raw)
+    if not fragment:
+        fragment = clean_sequence(extract_subsequence(vendor_seq_raw or "", vendor_range))
+    if not fragment:
+        selection.notes.append("Unable to recover expressed sequence for vendor range from target metadata")
+        return selection
+
+    selection.expressed_sequence_length = len(fragment)
+
+    try:
+        vendor_aligned, chain_aligned = biotite_gapped_alignment(fragment, sequence)
+    except ImportError:
+        selection.notes.append(
+            "Biotite is required for aligning the vendor construct; install biotite to use expressed-region filtering"
+        )
+        return selection
+    except Exception as exc:  # pragma: no cover - defensive
+        selection.notes.append(f"Failed to align vendor expressed region to chain {options.chain_id}: {exc}")
+        return selection
+
+    if not vendor_aligned or not chain_aligned or len(vendor_aligned) != len(chain_aligned):
+        selection.notes.append("Vendor alignment returned no overlapping residues with the target chain")
+        return selection
+
+    vendor_index = vendor_range[0] - 1
+    chain_index = -1
+    for vendor_char, chain_char in zip(vendor_aligned, chain_aligned):
+        if chain_char != "-":
+            chain_index += 1
+        if vendor_char == "-":
+            continue
+        vendor_index += 1
+        if chain_char == "-":
+            continue
+        if 0 <= chain_index < len(mapping):
+            uid = mapping[chain_index].get("uid")
+            if uid:
+                selection.matched_uids.add(str(uid))
+
+    if not selection.matched_uids:
+        selection.notes.append("No residues overlapped the vendor expressed range after alignment")
+
+    return selection
+
+
 def _design_rows(
     options: DMSLibraryOptions,
     sequence: str,
     residues: Sequence[Residue],
     mapping: Sequence[dict],
     rsa: Dict[str, float],
+    allowed_uids: Optional[Set[str]] = None,
 ) -> List[DMSDesignRow]:
     uid_to_map = {entry["uid"]: entry for entry in mapping}
 
@@ -430,6 +626,8 @@ def _design_rows(
         if not one or one not in AA1_SET:
             continue
         uid = residue_uid(residue)
+        if allowed_uids is not None and uid not in allowed_uids:
+            continue
         if options.target_surface_only and rsa.get(uid, 0.0) < options.rsa_threshold:
             continue
         candidates.append((uid, one))
@@ -559,7 +757,9 @@ def generate_dms_library(options: DMSLibraryOptions) -> DMSLibraryMetadata:
         )
 
     rsa = compute_rsa(residues)
-    rows = _design_rows(options, sequence, residues, mapping, rsa)
+    expressed_region = _select_expressed_region(options, sequence, mapping)
+    allowed_uids = expressed_region.matched_uids if expressed_region.applied else None
+    rows = _design_rows(options, sequence, residues, mapping, rsa, allowed_uids)
 
     if options.add_barcodes and options.add_barcodes > 0:
         barcodes = barcode_generator(len(rows), seed=42)
@@ -600,6 +800,7 @@ def generate_dms_library(options: DMSLibraryOptions) -> DMSLibraryMetadata:
         "rsa": rsa,
         "design": [asdict(row) for row in rows],
         "csv_path": str(csv_path),
+        "expressed_region": expressed_region.to_json(),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -616,6 +817,7 @@ def generate_dms_library(options: DMSLibraryOptions) -> DMSLibraryMetadata:
         design=design_rows,
         csv_path=csv_path,
         metadata_path=metadata_path,
+        expressed_region=expressed_region,
     )
 
 
@@ -638,6 +840,7 @@ def load_dms_metadata(result_id: str) -> DMSLibraryMetadata:
         add_controls=options_dict.get("add_controls", True),
         add_barcodes=options_dict.get("add_barcodes"),
         pdb_path_override=options_dict.get("pdb_path_override"),
+        restrict_to_expressed_region=options_dict.get("restrict_to_expressed_region", False),
     )
     design_rows = [
         DMSDesignRow(
@@ -665,6 +868,7 @@ def load_dms_metadata(result_id: str) -> DMSLibraryMetadata:
         design=design_rows,
         csv_path=Path(data["csv_path"]).expanduser(),
         metadata_path=metadata_path,
+        expressed_region=DMSExpressedRegionSelection.from_json(data.get("expressed_region")),
     )
 
 
@@ -689,6 +893,7 @@ __all__ = [
     "DMSLibraryGenerationError",
     "DMSDesignRow",
     "DMSResidueSummary",
+    "DMSExpressedRegionSelection",
     "generate_dms_library",
     "load_dms_metadata",
     "build_residue_selection",
