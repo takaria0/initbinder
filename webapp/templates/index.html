@@ -26,6 +26,10 @@
 
         <section id="target-setup">
         <h2>Target Setup</h2>
+        <div class="target-actions">
+          <button type="button" id="open-catalog-browser" class="secondary">Browse target catalog</button>
+          <span class="help-text">Copy PDB IDs and antigen URLs from discovery TSVs without leaving the dashboard.</span>
+        </div>
         <div class="preset-strip">
           <div class="preset-strip-header">
             <span>Saved target pairs</span>
@@ -377,6 +381,45 @@
             <button type="button" id="export-run" disabled>Generate exports</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="catalog-modal" class="modal catalog-modal" hidden>
+      <div class="modal-backdrop" data-close="catalog"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Target catalog browser</h3>
+          <button type="button" id="catalog-close" class="ghost">Close</button>
+        </div>
+        <div class="catalog-layout">
+          <div class="catalog-column">
+            <div class="catalog-header">
+              <h4>Catalog files</h4>
+              <button type="button" id="catalog-browser-refresh">Refresh</button>
+            </div>
+            <p class="help-text">Located in <code>targets_catalog/</code></p>
+            <ul id="catalog-browser-list" class="catalog-list" role="list"></ul>
+          </div>
+          <div class="catalog-column">
+            <div class="catalog-header">
+              <h4>Preview</h4>
+              <div class="catalog-meta">
+                <span id="catalog-browser-selected-name" class="catalog-selected">Select a file to preview</span>
+                <span id="catalog-browser-selected-info" class="badge" hidden></span>
+                <span id="catalog-browser-status" class="badge" hidden></span>
+              </div>
+            </div>
+            <div class="catalog-controls">
+              <label>
+                Rows to preview
+                <input type="number" id="catalog-browser-limit" value="200" min="10" max="2000">
+              </label>
+              <button type="button" id="catalog-browser-download" class="secondary" disabled>Download TSV</button>
+            </div>
+            <p class="help-text">Click a row to send its PDB ID and antigen URL to the Target Setup form.</p>
+            <div id="catalog-browser-viewer" class="catalog-viewer" role="region" aria-live="polite"></div>
+          </div>
+        </div>
       </div>
     </div>
 

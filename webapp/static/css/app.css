@@ -205,6 +205,18 @@ section {
   overflow: hidden;
 }
 
+.target-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.target-actions .help-text {
+  margin: 0;
+}
+
 .catalog-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) 1fr;
@@ -1369,6 +1381,28 @@ button.ghost:hover:not(:disabled) {
   max-height: 80vh;
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+}
+
+.catalog-modal .modal-content {
+  width: min(1100px, 95vw);
+}
+
+.catalog-modal .catalog-viewer {
+  min-height: 220px;
+  max-height: 420px;
+}
+
+.catalog-modal .catalog-table tbody tr {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.catalog-modal .catalog-table tbody tr:hover {
+  background: #eff6ff;
+}
+
+.catalog-modal .catalog-table tbody tr.selected {
+  background: #dbeafe;
 }
 
 .modal-header {

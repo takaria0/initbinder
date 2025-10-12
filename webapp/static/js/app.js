@@ -235,6 +235,11 @@ const state = {
   libraryJobId: null,
   counterSelectionMethod: '',
   counterSelectionPlan: { recommendations: [], notes: [], context: [], chips: [] },
+  catalogFiles: [],
+  catalogSelectedFile: null,
+  catalogHeaders: [],
+  catalogRows: [],
+  catalogSelectedRowIndex: null,
 };
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
@@ -359,6 +364,18 @@ const el = {
   counterSelectionContextList: document.querySelector('#counter-selection-context-list'),
   counterSelectionChips: document.querySelector('#counter-selection-chips'),
   counterSelectionDescription: document.querySelector('#counter-selection-description'),
+  catalogOpen: document.querySelector('#open-catalog-browser'),
+  catalogModal: document.querySelector('#catalog-modal'),
+  catalogClose: document.querySelector('#catalog-close'),
+  catalogBackdrop: document.querySelector('#catalog-modal .modal-backdrop'),
+  catalogList: document.querySelector('#catalog-browser-list'),
+  catalogViewer: document.querySelector('#catalog-browser-viewer'),
+  catalogSelectedName: document.querySelector('#catalog-browser-selected-name'),
+  catalogSelectedInfo: document.querySelector('#catalog-browser-selected-info'),
+  catalogStatus: document.querySelector('#catalog-browser-status'),
+  catalogRefresh: document.querySelector('#catalog-browser-refresh'),
+  catalogLimit: document.querySelector('#catalog-browser-limit'),
+  catalogDownload: document.querySelector('#catalog-browser-download'),
 };
 
 function setBadge(badge, text, color = null) {
@@ -1120,6 +1137,342 @@ function scheduleRankingsPolling() {
     if (!state.currentPdb || state.rankingsFetching) return;
     fetchRankings({ silent: true }).catch(() => {});
   }, 8000);
+}
+
+function updateCatalogStatus(message, color = null) {
+  setBadge(el.catalogStatus, message, color);
+}
+
+function resetCatalogPreview() {
+  state.catalogHeaders = [];
+  state.catalogRows = [];
+  state.catalogSelectedRowIndex = null;
+  if (el.catalogSelectedName) {
+    el.catalogSelectedName.textContent = 'Select a file to preview';
+  }
+  if (el.catalogSelectedInfo) {
+    el.catalogSelectedInfo.hidden = true;
+  }
+  if (el.catalogViewer) {
+    el.catalogViewer.innerHTML = '';
+  }
+  if (el.catalogDownload) {
+    el.catalogDownload.disabled = true;
+  }
+  updateCatalogStatus('', null);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / Math.pow(1024, idx);
+  return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function formatTimestamp(ts) {
+  if (!Number.isFinite(ts)) {
+    return '';
+  }
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function renderCatalogFiles() {
+  if (!el.catalogList) return;
+  el.catalogList.innerHTML = '';
+  if (!state.catalogFiles.length) {
+    const empty = document.createElement('li');
+    empty.className = 'catalog-empty';
+    empty.textContent = 'No TSV files found yet.';
+    el.catalogList.appendChild(empty);
+    return;
+  }
+  state.catalogFiles.forEach((file) => {
+    const item = document.createElement('li');
+    item.className = 'catalog-item';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = file.name;
+    button.dataset.filename = file.name;
+    button.className = 'catalog-button';
+    if (state.catalogSelectedFile === file.name) {
+      button.classList.add('active');
+    }
+    button.addEventListener('click', () => {
+      if (state.catalogSelectedFile !== file.name) {
+        state.catalogSelectedFile = file.name;
+      }
+      selectCatalogFile(file.name);
+    });
+    const meta = document.createElement('span');
+    meta.className = 'catalog-item-meta';
+    const size = Number.isFinite(file.size_bytes) ? formatBytes(file.size_bytes) : '';
+    const modified = Number.isFinite(file.modified_at) ? formatTimestamp(file.modified_at) : '';
+    meta.textContent = [size, modified].filter(Boolean).join(' • ');
+    item.appendChild(button);
+    item.appendChild(meta);
+    el.catalogList.appendChild(item);
+  });
+}
+
+async function loadCatalogFiles() {
+  if (!el.catalogRefresh) return;
+  try {
+    el.catalogRefresh.disabled = true;
+    const response = await fetch('/api/target-generation/catalog');
+    if (!response.ok) {
+      throw new Error(`Failed to load catalog (HTTP ${response.status})`);
+    }
+    const payload = await response.json();
+    state.catalogFiles = Array.isArray(payload.files) ? payload.files : [];
+    renderCatalogFiles();
+    if (
+      state.catalogSelectedFile &&
+      !state.catalogFiles.some((file) => file && file.name === state.catalogSelectedFile)
+    ) {
+      state.catalogSelectedFile = null;
+      resetCatalogPreview();
+    }
+    if (!state.catalogSelectedFile && state.catalogFiles.length) {
+      state.catalogSelectedFile = state.catalogFiles[0].name;
+      selectCatalogFile(state.catalogSelectedFile);
+    }
+  } catch (err) {
+    console.error('Failed to load catalog list', err);
+    resetCatalogPreview();
+    updateCatalogStatus(err.message || 'Unable to load catalog files.', 'rgba(248, 113, 113, 0.2)');
+  } finally {
+    el.catalogRefresh.disabled = false;
+  }
+}
+
+function renderCatalogPreview(headers, rows, truncated) {
+  if (!el.catalogViewer) return;
+  el.catalogViewer.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'catalog-table';
+  if (headers && headers.length) {
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    headers.forEach((header) => {
+      const th = document.createElement('th');
+      th.textContent = header;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+  }
+  const tbody = document.createElement('tbody');
+  rows.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    tr.tabIndex = 0;
+    if (state.catalogSelectedRowIndex === index) {
+      tr.classList.add('selected');
+    }
+    row.forEach((cell) => {
+      const td = document.createElement('td');
+      td.textContent = cell;
+      tr.appendChild(td);
+    });
+    const handleSelect = () => handleCatalogRowClick(index);
+    tr.addEventListener('click', handleSelect);
+    tr.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handleSelect();
+      }
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  if (truncated) {
+    const caption = document.createElement('caption');
+    caption.textContent = 'Preview truncated. Increase the row limit to view more records.';
+    table.appendChild(caption);
+  }
+  el.catalogViewer.appendChild(table);
+}
+
+function extractCatalogValue(headerMap, row, keys) {
+  for (const key of keys) {
+    const idx = headerMap.get(key);
+    if (idx == null) continue;
+    const value = row[idx];
+    if (value == null) continue;
+    const trimmed = String(value).trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return '';
+}
+
+function applyCatalogRow(row) {
+  if (!Array.isArray(row) || !state.catalogHeaders.length) {
+    return { applied: false };
+  }
+  const headerMap = new Map();
+  state.catalogHeaders.forEach((header, index) => {
+    if (header == null) return;
+    headerMap.set(String(header).trim().toLowerCase(), index);
+  });
+  const pdbRaw = extractCatalogValue(headerMap, row, [
+    'chosen_pdb',
+    'pdb_id',
+    'pdb',
+    'pdbid',
+  ]);
+  const antigenRaw = extractCatalogValue(headerMap, row, [
+    'antigen_url',
+    'antigen url',
+    'vendor_url',
+    'product_url',
+    'url',
+  ]);
+  const gene = extractCatalogValue(headerMap, row, ['gene', 'gene_symbol', 'gene name']);
+  const protein = extractCatalogValue(headerMap, row, ['protein_name', 'protein', 'target']);
+  let appliedPdb = '';
+  let appliedAntigen = '';
+  if (antigenRaw && el.antigenInput) {
+    el.antigenInput.value = antigenRaw;
+    appliedAntigen = antigenRaw;
+  }
+  if (pdbRaw) {
+    const normalized = pdbRaw.trim().toUpperCase();
+    const condensed = normalized.replace(/[^0-9A-Z]/g, '');
+    const truncated = condensed.length >= 4 ? condensed.slice(0, 4) : normalized;
+    setCurrentPdb(truncated, { updateInput: true });
+    appliedPdb = truncated;
+  }
+  if (!appliedPdb && !appliedAntigen) {
+    return { applied: false };
+  }
+  const parts = [];
+  if (gene) parts.push(gene);
+  if (protein && protein !== gene) parts.push(protein);
+  if (appliedPdb) parts.push(`PDB ${appliedPdb.slice(0, 4)}`);
+  if (appliedAntigen) parts.push('Antigen URL copied');
+  const message = parts.length ? `${parts.join(' · ')} ready in Target Setup.` : 'Target form updated.';
+  showAlert(message, false);
+  return { applied: true, appliedPdb, appliedAntigen };
+}
+
+function handleCatalogRowClick(index) {
+  if (!state.catalogRows.length || index < 0 || index >= state.catalogRows.length) {
+    return;
+  }
+  state.catalogSelectedRowIndex = index;
+  if (el.catalogViewer) {
+    const rows = el.catalogViewer.querySelectorAll('tbody tr');
+    rows.forEach((tr, idx) => {
+      if (idx === index) tr.classList.add('selected');
+      else tr.classList.remove('selected');
+    });
+  }
+  const result = applyCatalogRow(state.catalogRows[index]);
+  if (result.applied) {
+    updateCatalogStatus('Target form updated from catalog row.', 'rgba(34, 197, 94, 0.22)');
+  } else {
+    updateCatalogStatus('Row is missing a PDB ID or antigen URL.', 'rgba(248, 113, 113, 0.2)');
+  }
+}
+
+async function selectCatalogFile(name) {
+  if (!name) return;
+  const limit = Number.parseInt(el.catalogLimit?.value ?? '', 10);
+  state.catalogSelectedFile = name;
+  state.catalogSelectedRowIndex = null;
+  updateCatalogStatus('', null);
+  if (el.catalogSelectedName) {
+    el.catalogSelectedName.textContent = name;
+  }
+  if (el.catalogSelectedInfo) {
+    el.catalogSelectedInfo.hidden = true;
+  }
+  if (el.catalogDownload) {
+    el.catalogDownload.disabled = false;
+  }
+  if (el.catalogViewer) {
+    el.catalogViewer.innerHTML = '';
+    const spinner = document.createElement('div');
+    spinner.className = 'catalog-spinner';
+    spinner.textContent = 'Loading preview…';
+    el.catalogViewer.appendChild(spinner);
+  }
+  try {
+    const queryLimit = Number.isFinite(limit) ? limit : 200;
+    const response = await fetch(
+      `/api/target-generation/catalog/${encodeURIComponent(name)}?limit=${queryLimit}`,
+    );
+    if (!response.ok) {
+      throw new Error(`Preview failed (HTTP ${response.status})`);
+    }
+    const payload = await response.json();
+    state.catalogHeaders = Array.isArray(payload.headers) ? payload.headers : [];
+    state.catalogRows = Array.isArray(payload.rows) ? payload.rows : [];
+    renderCatalogPreview(state.catalogHeaders, state.catalogRows, Boolean(payload.truncated));
+    const extra = [];
+    if (Number.isFinite(payload.total_rows)) {
+      extra.push(`${payload.total_rows} rows`);
+    }
+    if (Number.isFinite(payload.displayed_rows)) {
+      extra.push(`${payload.displayed_rows} shown`);
+    }
+    if (el.catalogSelectedInfo) {
+      if (extra.length) {
+        el.catalogSelectedInfo.textContent = extra.join(' • ');
+        el.catalogSelectedInfo.hidden = false;
+      } else {
+        el.catalogSelectedInfo.hidden = true;
+      }
+    }
+    if (!state.catalogRows.length) {
+      updateCatalogStatus('No rows found in this file.', 'rgba(248, 113, 113, 0.2)');
+    }
+  } catch (err) {
+    console.error('Failed to load catalog preview', err);
+    resetCatalogPreview();
+    if (el.catalogViewer) {
+      const errorBox = document.createElement('div');
+      errorBox.className = 'catalog-error';
+      errorBox.textContent = err.message || 'Failed to load preview.';
+      el.catalogViewer.appendChild(errorBox);
+    }
+    updateCatalogStatus(err.message || 'Unable to load preview.', 'rgba(248, 113, 113, 0.2)');
+  }
+}
+
+function downloadCatalogFile() {
+  if (!state.catalogSelectedFile) return;
+  window.open(
+    `/api/target-generation/catalog/${encodeURIComponent(state.catalogSelectedFile)}/file`,
+    '_blank',
+  );
+}
+
+function openCatalogModal() {
+  if (!el.catalogModal) return;
+  el.catalogModal.hidden = false;
+  document.body.classList.add('modal-open');
+  if (!state.catalogFiles.length) {
+    loadCatalogFiles();
+  } else {
+    renderCatalogFiles();
+    if (state.catalogSelectedFile) {
+      selectCatalogFile(state.catalogSelectedFile);
+    } else if (state.catalogFiles.length) {
+      state.catalogSelectedFile = state.catalogFiles[0].name;
+      selectCatalogFile(state.catalogSelectedFile);
+    }
+  }
+}
+
+function closeCatalogModal() {
+  if (!el.catalogModal) return;
+  el.catalogModal.hidden = true;
+  document.body.classList.remove('modal-open');
 }
 
 function openExportModal() {
@@ -3777,6 +4130,28 @@ function initEventHandlers() {
   if (el.exportClose) el.exportClose.addEventListener('click', () => closeExportModal());
   if (el.exportBackdrop) el.exportBackdrop.addEventListener('click', () => closeExportModal());
   el.exportButton.addEventListener('click', runExport);
+  if (el.catalogOpen) {
+    el.catalogOpen.addEventListener('click', () => openCatalogModal());
+  }
+  if (el.catalogClose) {
+    el.catalogClose.addEventListener('click', () => closeCatalogModal());
+  }
+  if (el.catalogBackdrop) {
+    el.catalogBackdrop.addEventListener('click', () => closeCatalogModal());
+  }
+  if (el.catalogRefresh) {
+    el.catalogRefresh.addEventListener('click', () => loadCatalogFiles());
+  }
+  if (el.catalogLimit) {
+    el.catalogLimit.addEventListener('change', () => {
+      if (state.catalogSelectedFile) {
+        selectCatalogFile(state.catalogSelectedFile);
+      }
+    });
+  }
+  if (el.catalogDownload) {
+    el.catalogDownload.addEventListener('click', () => downloadCatalogFile());
+  }
   if (el.libraryRun) el.libraryRun.addEventListener('click', runGoldenGatePlanner);
   if (el.counterSelectionMethod) {
     el.counterSelectionMethod.addEventListener('change', (event) => {
