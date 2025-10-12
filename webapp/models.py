@@ -240,6 +240,106 @@ class RankingAnalysisResponse(BaseModel):
     logs: List[str] = Field(default_factory=list)
 
 
+class DMSLibraryDesignRow(BaseModel):
+    chain: str
+    uid: str
+    pdb_resnum: int
+    icode: Optional[str] = ""
+    wt: str
+    mut: str
+    category: str
+    rsa: float
+    barcode_18nt: Optional[str] = None
+
+
+class DMSResidueSummaryModel(BaseModel):
+    uid: str
+    pdb_resnum: int
+    icode: Optional[str] = ""
+    wt: str
+    rsa: float
+    categories: List[str] = Field(default_factory=list)
+
+
+class AntigenDMSRequest(BaseModel):
+    pdb_id: Optional[str] = Field(
+        None,
+        pattern=r"^[0-9A-Za-z]{4}$",
+        description="Optional PDB identifier; required when pdb_path is omitted",
+    )
+    pdb_path: Optional[str] = Field(
+        None,
+        description="Optional override path to a prepared PDB file",
+    )
+    chain_id: str = Field(..., min_length=1, max_length=2)
+    target_surface_only: bool = True
+    rsa_threshold: float = Field(0.25, ge=0.0, le=1.0)
+    mutation_kind: str = Field("SSM", description="Mutation menu to apply (SSM, alanine, charge)")
+    include_glycan_toggles: bool = True
+    add_conservative_swaps: bool = True
+    add_controls: bool = True
+    add_barcodes: Optional[int] = Field(None, ge=0, le=20000)
+    preview_limit: int = Field(200, ge=1, le=1000)
+
+    @validator("mutation_kind")
+    def _normalize_menu(cls, value: str) -> str:
+        menu = value.strip()
+        if not menu:
+            raise ValueError("mutation_kind cannot be empty")
+        upper = menu.upper()
+        mapping = {
+            "SSM": "SSM",
+            "ALANINE": "alanine",
+            "CHARGE": "charge",
+            "CHARGEFLIP": "charge",
+        }
+        if upper not in mapping:
+            raise ValueError(f"Unsupported mutation_kind: {value}")
+        return mapping[upper]
+
+    @validator("pdb_path")
+    def _trim_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
+
+    @validator("chain_id")
+    def _upper_chain(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @validator("pdb_id")
+    def _upper_pdb(cls, value: Optional[str]) -> Optional[str]:
+        return value.upper() if value else value
+
+    @validator("pdb_id", always=True)
+    def _require_identifier(cls, value: Optional[str], values: Dict[str, object]) -> Optional[str]:
+        if not value and not values.get("pdb_path"):
+            raise ValueError("Either pdb_id or pdb_path must be provided")
+        return value
+
+
+class AntigenDMSResponse(BaseModel):
+    result_id: str
+    pdb_id: Optional[str]
+    pdb_path: str
+    chain_id: str
+    total_variants: int
+    preview: List[DMSLibraryDesignRow] = Field(default_factory=list)
+    preview_count: int
+    truncated: bool
+    mutated_residues: List[DMSResidueSummaryModel] = Field(default_factory=list)
+    surface_residue_count: int
+    candidate_residue_count: int
+    sequence_length: int
+    target_surface_only: bool
+    rsa_threshold: float
+    mutation_kind: str
+    download_url: str
+    created_at: float
+    message: str
+
+
 class ExportRequest(BaseModel):
     pdb_id: str
     rankings_path: str
@@ -282,6 +382,18 @@ class PyMolHotspotRequest(BaseModel):
 
 class PyMolHotspotResponse(BaseModel):
     bundle_path: Optional[str]
+    launched: bool
+    message: str
+
+
+class PyMolDMSRequest(BaseModel):
+    launch: bool = True
+    bundle_only: bool = False
+
+
+class PyMolDMSResponse(BaseModel):
+    session_path: str
+    script_path: str
     launched: bool
     message: str
 

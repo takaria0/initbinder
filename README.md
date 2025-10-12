@@ -11,6 +11,7 @@ End‑to‑end workflow to discover protein targets, scope epitopes, prepare str
   - Setup: Initialize target, LLM‑assisted scoping, SASA masks + hotspots (`init_target.py`, `decide_scope.py`, `prep_target.py`).
   - Design: RFdiffusion backbones → MPNN sequences → AF3 inference (`make_rfa_rfdiffusion.py`, `make_rfa_proteinmpnn.py`, `make_rfa_af3.py`).
   - Assessment/Viz: Rank, gallery bundles, and per‑design PyMOL scripts (`assess_rfa_design.py`, `scripts/pymol_utils.py`, `plot_rankings.py`).
+  - Escape mapping: Antigen DMS library builder with PyMOL coverage visualization (`webapp/dms.py`, `/antigen-dms`).
 
 ```mermaid
 flowchart TD

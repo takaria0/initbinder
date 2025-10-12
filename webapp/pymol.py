@@ -10,9 +10,10 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .config import load_config
+from .dms import DMSLibraryMetadata, DMSResidueSummary, build_residue_selection
 from .result_collectors import RankingPayload, RankingRowData, RankingsNotFoundError, load_rankings
 
 try:
@@ -488,9 +489,106 @@ def render_gallery_movie(
     )
 
 
+def launch_dms_library(
+    metadata: DMSLibraryMetadata,
+    *,
+    launch: bool = True,
+    bundle_only: bool = False,
+) -> tuple[Path, Path, bool]:
+    _ensure_env()
+    dest_root = _cache_dir("dms_pymol")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    pdb_token = metadata.pdb_id.upper() if metadata.pdb_id else metadata.pdb_path.stem
+    session_dir = dest_root / f"{pdb_token}_{metadata.chain_id}_{metadata.result_id}_{timestamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    pdb_source = metadata.pdb_path
+    if not pdb_source.exists():
+        raise PyMolLaunchError(f"PDB file not found for visualization: {pdb_source}")
+
+    pdb_dest = session_dir / pdb_source.name
+    shutil.copy2(pdb_source, pdb_dest)
+
+    mutated = metadata.mutated_residue_summaries
+    category_groups: Dict[str, List[DMSResidueSummary]] = {}
+    for residue in mutated:
+        categories = residue.categories or ["OTHER"]
+        for category in categories:
+            category_groups.setdefault(category, []).append(residue)
+
+    selection_all = build_residue_selection(mutated)
+    colors_cycle = [
+        "tv_orange",
+        "deepteal",
+        "lightmagenta",
+        "marine",
+        "salmon",
+        "deepsalmon",
+        "paleyellow",
+        "density",
+    ]
+
+    script_lines = [
+        "reinitialize",
+        "bg_color white",
+        f"load {pdb_dest.name}, antigen",
+        "hide everything, antigen",
+        "show cartoon, antigen",
+        "color grey70, antigen",
+        "set cartoon_transparency, 0.3, antigen",
+    ]
+
+    if selection_all:
+        script_lines.extend(
+            [
+                f"select dms_all, antigen and chain {metadata.chain_id} and resi {selection_all}",
+                "show sticks, dms_all",
+                "show spheres, dms_all",
+                "set sphere_scale, 0.4, dms_all",
+                "color yelloworange, dms_all",
+                "label dms_all and name CA, sprintf('%s', resi)",
+                "set label_color, black, dms_all",
+                "set label_outline_color, white, dms_all",
+                "set label_size, 18, dms_all",
+            ]
+        )
+
+    for index, (category, residues) in enumerate(sorted(category_groups.items())):
+        selection = build_residue_selection(residues)
+        if not selection:
+            continue
+        color = colors_cycle[index % len(colors_cycle)]
+        safe_name = category.lower().replace(" ", "_")
+        selection_name = f"dms_{safe_name}"
+        script_lines.extend(
+            [
+                f"select {selection_name}, antigen and chain {metadata.chain_id} and resi {selection}",
+                f"color {color}, {selection_name}",
+            ]
+        )
+
+    if selection_all:
+        script_lines.append("zoom dms_all")
+    else:
+        script_lines.append("zoom antigen")
+
+    script_lines.append("set_view, (* get_view())")
+
+    script_path = session_dir / "antigen_dms_library.pml"
+    script_path.write_text("\n".join(script_lines) + "\n", encoding="utf-8")
+
+    launched = False
+    if launch and not bundle_only:
+        _launch_pymol(script_path)
+        launched = True
+
+    return session_dir, script_path, launched
+
+
 __all__ = [
     "launch_hotspots",
     "launch_top_binders",
     "render_gallery_movie",
+    "launch_dms_library",
     "PyMolLaunchError",
 ]

@@ -1602,6 +1602,21 @@ th {
   color: var(--color-accent);
 }
 
+.badge.warn {
+  background: rgba(234, 179, 8, 0.18);
+  color: #92400e;
+}
+
+.badge.error {
+  background: rgba(248, 113, 113, 0.18);
+  color: #b91c1c;
+}
+
+.badge.success {
+  background: rgba(34, 197, 94, 0.18);
+  color: #047857;
+}
+
 .flex-row {
   display: flex;
   align-items: center;
@@ -2069,6 +2084,111 @@ th {
 .library-preview th {
   background: rgba(30, 64, 175, 0.08);
   font-weight: 600;
+}
+
+.card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.card-actions .secondary.disabled,
+.card-actions .secondary[disabled],
+.card-actions button.disabled,
+.card-actions button[disabled] {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+}
+
+#dms-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+#dms-preview-table th,
+#dms-preview-table td {
+  padding: 10px 14px;
+  text-align: left;
+}
+
+#dms-preview-table th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #1f2937;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+#dms-preview-table td {
+  border-bottom: 1px solid #e2e8f0;
+  color: #1f2937;
+}
+
+#dms-preview-table tbody tr:hover {
+  background: #f1f5f9;
+}
+
+.mutated-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mutated-summary-header {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.mutated-summary .chip-row {
+  gap: 10px;
+}
+
+.mutated-summary .chip {
+  list-style: none;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: #ffffff;
+  padding: 8px 12px;
+  box-shadow: 0 6px 12px rgba(15, 23, 42, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+}
+
+.mutated-summary .chip strong {
+  font-size: 0.9rem;
+  color: #111827;
+}
+
+.mutated-summary .chip span {
+  font-size: 0.8rem;
+  color: #475569;
 }
 
 @media (max-width: 1100px) {

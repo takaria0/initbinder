@@ -13,6 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .analysis import AnalysisGenerationError, generate_rankings_analysis
 from .config import load_config
+from .dms import (
+    DMSLibraryGenerationError,
+    DMSLibraryOptions,
+    generate_dms_library,
+    load_dms_metadata,
+)
 from .hpc import ClusterClient
 from .job_store import JobRecord, JobStatus, get_job_store
 from . import preferences
@@ -34,6 +40,8 @@ from .models import (
     PyMolGalleryMovieResponse,
     PyMolHotspotRequest,
     PyMolHotspotResponse,
+    PyMolDMSRequest,
+    PyMolDMSResponse,
     PyMolTopBindersRequest,
     PyMolTopBindersResponse,
     RankingAnalysisRequest,
@@ -53,12 +61,15 @@ from .models import (
     TargetCatalogPreviewResponse,
     TargetGenerationRequest,
     TargetGenerationResponse,
+    AntigenDMSRequest,
+    AntigenDMSResponse,
 )
 from .pipeline import get_target_status
 from .pymol import (
     PyMolLaunchError,
     launch_hotspots,
     launch_top_binders,
+    launch_dms_library,
     render_gallery_movie,
 )
 from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
@@ -478,6 +489,132 @@ async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
     return combined
 
 
+@app.post("/api/dms-library/run", response_model=AntigenDMSResponse)
+async def api_dms_library_run(payload: AntigenDMSRequest) -> AntigenDMSResponse:
+    options = DMSLibraryOptions(
+        pdb_id=payload.pdb_id,
+        chain_id=payload.chain_id,
+        target_surface_only=payload.target_surface_only,
+        rsa_threshold=payload.rsa_threshold,
+        mutation_kind=payload.mutation_kind,
+        include_glycan_toggles=payload.include_glycan_toggles,
+        add_conservative_swaps=payload.add_conservative_swaps,
+        add_controls=payload.add_controls,
+        add_barcodes=payload.add_barcodes,
+        pdb_path_override=payload.pdb_path,
+    )
+
+    try:
+        metadata = await run_in_threadpool(generate_dms_library, options)
+    except DMSLibraryGenerationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    preview_limit = payload.preview_limit
+    preview_rows = [
+        {
+            "chain": row.chain,
+            "uid": row.uid,
+            "pdb_resnum": row.pdb_resnum,
+            "icode": row.icode,
+            "wt": row.wt,
+            "mut": row.mut,
+            "category": row.category,
+            "rsa": row.rsa,
+            "barcode_18nt": row.barcode_18nt,
+        }
+        for row in metadata.design[:preview_limit]
+    ]
+    preview_count = len(preview_rows)
+    total_variants = len(metadata.design)
+    mutated_residues = [
+        {
+            "uid": residue.uid,
+            "pdb_resnum": residue.pdb_resnum,
+            "icode": residue.icode,
+            "wt": residue.wt,
+            "rsa": residue.rsa,
+            "categories": residue.categories,
+        }
+        for residue in metadata.mutated_residue_summaries
+    ]
+
+    surface_count = sum(1 for value in metadata.rsa.values() if value >= options.rsa_threshold)
+    candidate_count = len({row.uid for row in metadata.design})
+    sequence_length = len(metadata.sequence)
+    truncated = total_variants > preview_limit
+    download_url = f"/api/dms-library/{metadata.result_id}/download"
+    message = (
+        f"Generated {total_variants} variants across {candidate_count} residues"
+        if total_variants
+        else "No mutable residues met the selection criteria"
+    )
+
+    return AntigenDMSResponse(
+        result_id=metadata.result_id,
+        pdb_id=metadata.pdb_id,
+        pdb_path=str(metadata.pdb_path),
+        chain_id=metadata.chain_id,
+        total_variants=total_variants,
+        preview=preview_rows,
+        preview_count=preview_count,
+        truncated=truncated,
+        mutated_residues=mutated_residues,
+        surface_residue_count=surface_count,
+        candidate_residue_count=candidate_count,
+        sequence_length=sequence_length,
+        target_surface_only=options.target_surface_only,
+        rsa_threshold=options.rsa_threshold,
+        mutation_kind=options.mutation_kind,
+        download_url=download_url,
+        created_at=metadata.created_at,
+        message=message,
+    )
+
+
+@app.get("/api/dms-library/{result_id}/download")
+async def api_dms_library_download(result_id: str) -> FileResponse:
+    try:
+        metadata = load_dms_metadata(result_id)
+    except DMSLibraryGenerationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    csv_path = metadata.csv_path
+    if not csv_path.exists() or not csv_path.is_file():
+        raise HTTPException(status_code=404, detail="Design CSV not found")
+
+    return FileResponse(csv_path, filename=csv_path.name, media_type="text/csv")
+
+
+@app.post("/api/dms-library/{result_id}/pymol", response_model=PyMolDMSResponse)
+async def api_dms_library_pymol(result_id: str, payload: PyMolDMSRequest) -> PyMolDMSResponse:
+    try:
+        metadata = load_dms_metadata(result_id)
+    except DMSLibraryGenerationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        session_dir, script_path, launched = await run_in_threadpool(
+            launch_dms_library,
+            metadata,
+            launch=payload.launch,
+            bundle_only=payload.bundle_only,
+        )
+    except PyMolLaunchError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    launched_msg = " and launched" if launched else ""
+    return PyMolDMSResponse(
+        session_path=str(session_dir),
+        script_path=str(script_path),
+        launched=bool(launched),
+        message=f"Prepared PyMOL session{launched_msg}",
+    )
+
+
 @app.post("/api/targets/{pdb_id}/pymol/hotspots", response_model=PyMolHotspotResponse)
 async def api_pymol_hotspots(pdb_id: str, payload: PyMolHotspotRequest) -> PyMolHotspotResponse:
     try:
@@ -569,6 +706,11 @@ async def home() -> FileResponse:
 @app.get("/target-generation")
 async def target_generation_page() -> FileResponse:
     return FileResponse(_template_path("target_generation.html"))
+
+
+@app.get("/antigen-dms")
+async def antigen_dms_page() -> FileResponse:
+    return FileResponse(_template_path("dms_library.html"))
 
 
 @app.exception_handler(AlignmentNotFoundError)
