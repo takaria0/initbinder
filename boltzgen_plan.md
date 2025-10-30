@@ -40,6 +40,7 @@
 - [x] Engine registry in the backend with RFantibody extracted into a dedicated implementation
 - [x] BoltzGen spec generation, cluster launcher, and engine wiring completed
 - [x] Web UI selector + API endpoint for discovering available engines
+- [x] Engine-specific UI controls (labels, visibility) switching with selection
 - [ ] Automated validation / documentation polish (pending final verification)
 
 ## Assumptions & Open Questions

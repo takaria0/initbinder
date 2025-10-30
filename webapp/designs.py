@@ -11,7 +11,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -25,6 +25,17 @@ from .models import DesignRunRequest
 
 
 @dataclass(frozen=True)
+class DesignEngineField:
+    """UI metadata describing how a request field should be presented."""
+
+    field_id: str
+    label: str
+    description: Optional[str] = None
+    visible: bool = True
+    debug_only: bool = False
+
+
+@dataclass(frozen=True)
 class DesignEngineMetadata:
     """Describes a concrete model engine exposed through the design workflow."""
 
@@ -32,6 +43,7 @@ class DesignEngineMetadata:
     label: str
     description: str
     is_default: bool = False
+    ui_fields: List[DesignEngineField] = field(default_factory=list)
 
 
 class DesignEngine(ABC):
@@ -102,6 +114,40 @@ class RFAntibodyEngine(DesignEngine):
         label="RFantibody (RFdiffusion → MPNN → AF3)",
         description="Legacy antibody pipeline using RFdiffusion, ProteinMPNN, and AlphaFold3.",
         is_default=True,
+        ui_fields=[
+            DesignEngineField(
+                field_id="total_designs",
+                label="Total designs",
+                description="Split evenly across detected epitope arms.",
+            ),
+            DesignEngineField(
+                field_id="num_sequences",
+                label="Sequences per backbone",
+                description="ProteinMPNN sequences to sample per RFdiffusion backbone.",
+            ),
+            DesignEngineField(
+                field_id="temperature",
+                label="RFdiffusion temperature",
+                description="Controls sampling diversity for RFdiffusion (0.0–1.0).",
+            ),
+            DesignEngineField(
+                field_id="binder_chain_id",
+                label="Binder chain ID",
+                description="Override default binder chain for downstream assessment (debug only).",
+                debug_only=True,
+            ),
+            DesignEngineField(
+                field_id="af3_seed",
+                label="AlphaFold 3 seed",
+                description="Seed forwarded to AlphaFold 3 stage for reproducibility.",
+            ),
+            DesignEngineField(
+                field_id="rfdiff_crop_radius",
+                label="RFdiffusion crop radius",
+                description="Enable to crop the prepared target around hotspots for RFdiffusion.",
+                debug_only=True,
+            ),
+        ],
     )
 
     _LAUNCH_PATH_RE = re.compile(r"\[ok] Wrote launcher: (?P<path>.*)")
@@ -767,6 +813,40 @@ class BoltzGenEngine(DesignEngine):
         engine_id="boltzgen",
         label="BoltzGen Diffusion",
         description="BoltzGen generative diffusion pipeline for protein binder design.",
+        ui_fields=[
+            DesignEngineField(
+                field_id="total_designs",
+                label="Designs per arm",
+                description="Approximate designs per hotspot arm (multiplied by detected arms).",
+            ),
+            DesignEngineField(
+                field_id="num_sequences",
+                label="Sequences per backbone",
+                visible=False,
+            ),
+            DesignEngineField(
+                field_id="temperature",
+                label="RFdiffusion temperature",
+                visible=False,
+            ),
+            DesignEngineField(
+                field_id="binder_chain_id",
+                label="Binder chain ID",
+                visible=False,
+                debug_only=True,
+            ),
+            DesignEngineField(
+                field_id="af3_seed",
+                label="AlphaFold 3 seed",
+                visible=False,
+            ),
+            DesignEngineField(
+                field_id="rfdiff_crop_radius",
+                label="RFdiffusion crop radius",
+                visible=False,
+                debug_only=True,
+            ),
+        ],
     )
 
     DEFAULT_SEQUENCE_MIN = 85

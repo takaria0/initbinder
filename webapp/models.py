@@ -193,11 +193,20 @@ class DesignRunResponse(BaseModel):
     message: str
 
 
+class DesignEngineFieldInfo(BaseModel):
+    field_id: str
+    label: str
+    description: Optional[str] = None
+    visible: bool = True
+    debug_only: bool = False
+
+
 class DesignEngineInfo(BaseModel):
     engine_id: str
     label: str
     description: str
     is_default: bool = False
+    fields: List[DesignEngineFieldInfo] = Field(default_factory=list)
 
 
 class DesignEngineListResponse(BaseModel):

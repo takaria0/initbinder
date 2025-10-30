@@ -52,12 +52,80 @@ const DEFAULT_SCATTER_THRESHOLDS = Object.fromEntries(
 
 const RESULTS_TABLE_DISPLAY_LIMIT = 2000;
 
+const ENGINE_FIELD_BLUEPRINT = [
+  {
+    field_id: 'total_designs',
+    label: 'Total designs',
+    description: 'Split evenly across detected epitope arms.',
+    visible: true,
+    debug_only: false,
+  },
+  {
+    field_id: 'num_sequences',
+    label: 'Sequences per backbone',
+    description: 'ProteinMPNN sequences to sample per RFdiffusion backbone.',
+    visible: true,
+    debug_only: false,
+  },
+  {
+    field_id: 'temperature',
+    label: 'RFdiffusion temperature',
+    description: 'Controls sampling diversity for RFdiffusion (0.0–1.0).',
+    visible: true,
+    debug_only: false,
+  },
+  {
+    field_id: 'binder_chain_id',
+    label: 'Binder chain ID',
+    description: 'Override binder chain for downstream assessment (debug only).',
+    visible: true,
+    debug_only: true,
+  },
+  {
+    field_id: 'af3_seed',
+    label: 'AlphaFold 3 seed',
+    description: 'Seed forwarded to AlphaFold 3 stage for reproducibility.',
+    visible: true,
+    debug_only: false,
+  },
+  {
+    field_id: 'rfdiff_crop_radius',
+    label: 'RFdiffusion crop radius',
+    description: 'Enable to crop the prepared target around hotspots for RFdiffusion.',
+    visible: true,
+    debug_only: true,
+  },
+];
+
 const DEFAULT_ENGINE_OPTIONS = [
   {
     engine_id: 'rfantibody',
     label: 'RFantibody (RFdiffusion → MPNN → AF3)',
     description: 'Legacy antibody pipeline using RFdiffusion, ProteinMPNN, and AlphaFold3.',
     is_default: true,
+    fields: ENGINE_FIELD_BLUEPRINT.map((field) => ({ ...field })),
+  },
+  {
+    engine_id: 'boltzgen',
+    label: 'BoltzGen Diffusion',
+    description: 'BoltzGen generative diffusion pipeline for protein binder design.',
+    is_default: false,
+    fields: ENGINE_FIELD_BLUEPRINT.map((field) => {
+      if (field.field_id === 'total_designs') {
+        return {
+          ...field,
+          label: 'Designs per arm',
+          description: 'Approximate designs per hotspot arm (multiplied by detected arms).',
+          visible: true,
+          debug_only: false,
+        };
+      }
+      return {
+        ...field,
+        description: '',
+        visible: false,
+      };
+    }),
   },
 ];
 
@@ -206,6 +274,7 @@ const state = {
   currentPdb: null,
   designEngines: [],
   selectedDesignEngine: 'rfantibody',
+  activeDesignFields: new Set(),
   jobPoller: null,
   jobContext: null,
   rankings: [],
@@ -252,6 +321,10 @@ const state = {
   catalogRows: [],
   catalogSelectedRowIndex: null,
 };
+
+state.activeDesignFields = new Set(
+  ENGINE_FIELD_BLUEPRINT.filter((field) => field.visible !== false).map((field) => field.field_id),
+);
 
 const SYNC_RESULTS_MIN_INTERVAL_MS = 600000;
 
@@ -390,6 +463,36 @@ const el = {
   catalogLimit: document.querySelector('#catalog-browser-limit'),
   catalogDownload: document.querySelector('#catalog-browser-download'),
 };
+
+const DESIGN_FIELD_ELEMENTS = (() => {
+  const blueprintMap = Object.fromEntries(ENGINE_FIELD_BLUEPRINT.map((field) => [field.field_id, field]));
+  const base = {
+    total_designs: { input: el.designTotal },
+    num_sequences: { input: el.designNumSeq },
+    temperature: { input: el.designTemp },
+    binder_chain_id: { input: el.designBinderChain },
+    af3_seed: { input: el.designAf3Seed },
+    rfdiff_crop_radius: { input: el.designEnableRfdiffCrop },
+  };
+
+  Object.entries(base).forEach(([fieldId, entry]) => {
+    const wrapper = document.querySelector(`[data-engine-field="${fieldId}"]`);
+    const container = document.querySelector(`[data-engine-field-container="${fieldId}"]`)
+      || (wrapper ? wrapper.closest('[data-engine-field-container]') : null);
+    const label = wrapper?.querySelector(`[data-engine-label="${fieldId}"]`) || wrapper?.querySelector('.field-label') || null;
+    const help = wrapper?.querySelector(`[data-engine-help="${fieldId}"]`) || null;
+
+    entry.wrapper = wrapper || null;
+    entry.container = container || null;
+    entry.label = label;
+    entry.help = help;
+    entry.defaultLabel = label ? label.textContent.trim() : (blueprintMap[fieldId]?.label || '');
+    entry.defaultDescription = help ? help.textContent.trim() : (blueprintMap[fieldId]?.description || '');
+    entry.defaultVisible = blueprintMap[fieldId]?.visible !== false;
+  });
+
+  return base;
+})();
 
 function setBadge(badge, text, color = null) {
   if (!badge) return;
@@ -1004,10 +1107,110 @@ function renderPresets() {
   });
 }
 
+function getAvailableDesignEngines() {
+  return state.designEngines.length > 0 ? state.designEngines : DEFAULT_ENGINE_OPTIONS;
+}
+
+function getDesignEngineMeta(engineId) {
+  const engines = getAvailableDesignEngines();
+  return engines.find((engine) => engine.engine_id === engineId) || null;
+}
+
+function normalizeEngineInfo(raw) {
+  const fallback = DEFAULT_ENGINE_OPTIONS.find((engine) => engine.engine_id === (raw?.engine_id || ''))
+    || DEFAULT_ENGINE_OPTIONS[0];
+  const fallbackFields = fallback?.fields || [];
+  const rawFields = Array.isArray(raw?.fields) ? raw.fields : [];
+  const overrideMap = new Map(rawFields.map((field) => [field.field_id, field]));
+  const mergedFields = fallbackFields.map((fallbackField) => {
+    const override = overrideMap.get(fallbackField.field_id);
+    if (override) overrideMap.delete(fallbackField.field_id);
+    return {
+      field_id: fallbackField.field_id,
+      label: override?.label || fallbackField.label,
+      description: override?.description ?? fallbackField.description ?? '',
+      visible: override?.visible !== undefined ? Boolean(override.visible) : fallbackField.visible !== false,
+      debug_only: override?.debug_only !== undefined ? Boolean(override.debug_only) : Boolean(fallbackField.debug_only),
+    };
+  });
+  overrideMap.forEach((override, fieldId) => {
+    mergedFields.push({
+      field_id: fieldId,
+      label: override.label || fieldId,
+      description: override.description || '',
+      visible: override.visible !== false,
+      debug_only: Boolean(override.debug_only),
+    });
+  });
+  return {
+    engine_id: raw?.engine_id || fallback.engine_id,
+    label: raw?.label || fallback.label,
+    description: raw?.description || fallback.description || '',
+    is_default: raw?.is_default !== undefined ? Boolean(raw.is_default) : Boolean(fallback.is_default),
+    fields: mergedFields,
+  };
+}
+
+function applyDesignEngineFieldConfig(engineMeta) {
+  const meta = engineMeta || getDesignEngineMeta(state.selectedDesignEngine) || DEFAULT_ENGINE_OPTIONS[0];
+  const fieldMap = new Map((Array.isArray(meta?.fields) ? meta.fields : []).map((field) => [field.field_id, field]));
+  const activeFields = new Set();
+
+  Object.entries(DESIGN_FIELD_ELEMENTS).forEach(([fieldId, refs]) => {
+    if (!refs) return;
+    const config = fieldMap.get(fieldId);
+    const visible = config ? config.visible !== false : refs.defaultVisible;
+    const labelText = config?.label || refs.defaultLabel || '';
+    const description = config?.description || '';
+
+    if (refs.label && labelText) {
+      refs.label.textContent = labelText;
+    }
+    if (refs.help) {
+      if (description) {
+        refs.help.textContent = description;
+        refs.help.hidden = false;
+      } else {
+        refs.help.textContent = '';
+        refs.help.hidden = true;
+      }
+    }
+
+    const target = refs.container || refs.wrapper;
+    if (target) {
+      if (visible) {
+        target.classList.remove('engine-hidden');
+        target.hidden = false;
+      } else {
+        target.classList.add('engine-hidden');
+        target.hidden = true;
+      }
+    }
+
+    if (refs.input) {
+      refs.input.disabled = !visible;
+      if (!visible && refs.input.type === 'checkbox') {
+        refs.input.checked = false;
+      }
+    }
+
+    if (visible) {
+      activeFields.add(fieldId);
+    }
+  });
+
+  state.activeDesignFields = activeFields;
+}
+
+function isDesignFieldActive(fieldId) {
+  if (!(state.activeDesignFields instanceof Set)) return true;
+  return state.activeDesignFields.has(fieldId);
+}
+
 function updateDesignEngineHint() {
   if (!el.designEngineHint) return;
-  const engines = state.designEngines.length > 0 ? state.designEngines : DEFAULT_ENGINE_OPTIONS;
-  const selected = engines.find((engine) => engine.engine_id === state.selectedDesignEngine);
+  const engines = getAvailableDesignEngines();
+  const selected = getDesignEngineMeta(state.selectedDesignEngine);
   const fallback = selected || engines.find((engine) => engine.is_default) || engines[0];
   const description = (selected && selected.description) || (fallback && fallback.description) || '';
   if (description) {
@@ -1023,7 +1226,7 @@ function renderDesignEngineOptions() {
   if (!el.designEngineSelect) return;
   const select = el.designEngineSelect;
   select.innerHTML = '';
-  const engines = state.designEngines.length > 0 ? state.designEngines : DEFAULT_ENGINE_OPTIONS;
+  const engines = getAvailableDesignEngines();
   const defaultEngine = engines.find((engine) => engine.is_default) || engines[0] || null;
   if (!state.selectedDesignEngine || !engines.some((engine) => engine.engine_id === state.selectedDesignEngine)) {
     state.selectedDesignEngine = defaultEngine ? defaultEngine.engine_id : 'rfantibody';
@@ -1038,24 +1241,31 @@ function renderDesignEngineOptions() {
   select.value = state.selectedDesignEngine;
   select.disabled = engines.length <= 1;
   updateDesignEngineHint();
+  applyDesignEngineFieldConfig(getDesignEngineMeta(state.selectedDesignEngine));
 }
 
 async function loadDesignEngines() {
   if (!el.designEngineSelect) return;
+  let previous = state.selectedDesignEngine;
   try {
     const res = await fetch('/api/designs/engines', { headers: { 'Cache-Control': 'no-cache' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     const engines = Array.isArray(payload?.engines) ? payload.engines : [];
-    state.designEngines = engines.map((engine) => ({
-      engine_id: engine.engine_id,
-      label: engine.label || engine.engine_id,
-      description: engine.description || '',
-      is_default: Boolean(engine.is_default),
-    }));
+    if (engines.length) {
+      const normalized = engines.map((engine) => normalizeEngineInfo(engine));
+      state.designEngines = normalized;
+      if (!normalized.some((engine) => engine.engine_id === previous)) {
+        const fallback = normalized.find((engine) => engine.is_default) || normalized[0];
+        state.selectedDesignEngine = fallback ? fallback.engine_id : previous;
+      }
+    } else {
+      state.designEngines = [];
+    }
   } catch (err) {
     console.warn('Failed to load design engines', err);
     state.designEngines = [];
+    state.selectedDesignEngine = previous;
   }
   renderDesignEngineOptions();
 }
@@ -1930,23 +2140,40 @@ async function queueDesignRun() {
   const payload = {
     pdb_id: state.currentPdb,
     model_engine: state.selectedDesignEngine || 'rfantibody',
-    total_designs: Number(el.designTotal.value) || 90,
-    num_sequences: Number(el.designNumSeq.value) || 1,
-    temperature: Number(el.designTemp.value) || 0.1,
-    binder_chain_id: el.designBinderChain?.value.trim() || null,
-    af3_seed: (() => {
-      const raw = Number(el.designAf3Seed?.value ?? 1);
-      const fallback = 1;
-      if (!Number.isFinite(raw)) return fallback;
-      return Math.max(0, Math.floor(raw));
-    })(),
-    run_label: el.designRunLabel.value.trim() || null,
-    run_assess: true,
-    rfdiff_crop_radius: (() => {
-      if (!el.designEnableRfdiffCrop) return null;
-      return el.designEnableRfdiffCrop.checked ? DEFAULT_RFDIFF_CROP_RADIUS : null;
-    })(),
   };
+
+  const totalDesignsRaw = Number(el.designTotal.value) || 90;
+  payload.total_designs = Math.max(1, Math.round(totalDesignsRaw));
+
+  if (isDesignFieldActive('num_sequences')) {
+    const sequences = Number(el.designNumSeq.value) || 1;
+    payload.num_sequences = Math.max(1, Math.round(sequences));
+  }
+
+  if (isDesignFieldActive('temperature')) {
+    const tempRaw = Number(el.designTemp.value);
+    payload.temperature = Number.isFinite(tempRaw) ? tempRaw : 0.1;
+  }
+
+  if (isDesignFieldActive('binder_chain_id')) {
+    const binder = el.designBinderChain?.value.trim() || null;
+    payload.binder_chain_id = binder || null;
+  }
+
+  if (isDesignFieldActive('af3_seed')) {
+    const rawSeed = Number(el.designAf3Seed?.value ?? 1);
+    const fallbackSeed = 1;
+    payload.af3_seed = Number.isFinite(rawSeed) ? Math.max(0, Math.floor(rawSeed)) : fallbackSeed;
+  }
+
+  payload.run_label = el.designRunLabel.value.trim() || null;
+  payload.run_assess = true;
+
+  if (isDesignFieldActive('rfdiff_crop_radius')) {
+    payload.rfdiff_crop_radius = el.designEnableRfdiffCrop && el.designEnableRfdiffCrop.checked
+      ? DEFAULT_RFDIFF_CROP_RADIUS
+      : null;
+  }
 
   el.designSubmit.disabled = true;
   setBadge(el.designStatus, 'Submitting…');
@@ -4190,6 +4417,7 @@ function initEventHandlers() {
       const value = (event.target.value || '').trim();
       state.selectedDesignEngine = value || 'rfantibody';
       updateDesignEngineHint();
+      applyDesignEngineFieldConfig(getDesignEngineMeta(state.selectedDesignEngine));
     });
   }
   if (el.presetRefresh) {

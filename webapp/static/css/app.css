@@ -76,6 +76,10 @@ body.debug-mode .debug-only {
   display: revert !important;
 }
 
+.engine-hidden {
+  display: none !important;
+}
+
 main.app-shell {
   max-width: 1600px;
   margin: 0 auto;

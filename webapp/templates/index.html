@@ -114,31 +114,42 @@
             </label>
           </div>
           <div class="form-row">
-            <label>Total designs
+            <label data-engine-field="total_designs">
+              <span class="field-label" data-engine-label="total_designs">Total designs</span>
               <input type="number" id="design-total" value="90" min="1">
+              <span class="help-text" data-engine-help="total_designs" hidden></span>
             </label>
-            <label>Sequences per backbone
+            <label data-engine-field="num_sequences">
+              <span class="field-label" data-engine-label="num_sequences">Sequences per backbone</span>
               <input type="number" id="design-num-seq" value="1" min="1">
+              <span class="help-text" data-engine-help="num_sequences" hidden></span>
             </label>
-            <label>Temperature
+            <label data-engine-field="temperature">
+              <span class="field-label" data-engine-label="temperature">Temperature</span>
               <input type="number" id="design-temp" value="0.1" min="0" max="1" step="0.05">
+              <span class="help-text" data-engine-help="temperature" hidden></span>
             </label>
           </div>
           <div class="form-row">
             <label>Run label
               <input type="text" id="design-run-label" placeholder="optional tag">
             </label>
-            <label class="debug-only">Binder chain ID
+            <label class="debug-only" data-engine-field="binder_chain_id">
+              <span class="field-label" data-engine-label="binder_chain_id">Binder chain ID</span>
               <input type="text" id="design-binder-chain" value="H" maxlength="1">
+              <span class="help-text" data-engine-help="binder_chain_id" hidden></span>
             </label>
-            <label>AlphaFold 3 seed
+            <label data-engine-field="af3_seed">
+              <span class="field-label" data-engine-label="af3_seed">AlphaFold 3 seed</span>
               <input type="number" id="design-af3-seed" value="1" min="0">
+              <span class="help-text" data-engine-help="af3_seed" hidden></span>
             </label>
           </div>
-          <div class="flex-row advanced-row debug-only">
-            <label>
+          <div class="flex-row advanced-row debug-only" data-engine-field-container="rfdiff_crop_radius">
+            <label data-engine-field="rfdiff_crop_radius">
               <input type="checkbox" id="design-enable-rfdiff-crop">
-              Enable RFdiffusion target crop (default off)
+              <span class="field-label" data-engine-label="rfdiff_crop_radius">Enable RFdiffusion target crop (default off)</span>
+              <span class="help-text" data-engine-help="rfdiff_crop_radius" hidden></span>
             </label>
           </div>
           <div class="flex-row" style="margin-top: 8px;">

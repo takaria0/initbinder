@@ -28,6 +28,7 @@ from .models import (
     AssessmentRunResponse,
     AssessmentRunSummary,
     AssessmentSyncResponse,
+    DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
     DesignRunRequest,
@@ -146,15 +147,27 @@ async def api_design_run(payload: DesignRunRequest) -> DesignRunResponse:
 @app.get("/api/designs/engines", response_model=DesignEngineListResponse)
 async def api_design_engines() -> DesignEngineListResponse:
     meta = list_design_engines()
-    engines = [
-        DesignEngineInfo(
-            engine_id=item.engine_id,
-            label=item.label,
-            description=item.description,
-            is_default=item.is_default,
+    engines: list[DesignEngineInfo] = []
+    for item in meta:
+        fields = [
+            DesignEngineFieldInfo(
+                field_id=field.field_id,
+                label=field.label,
+                description=field.description,
+                visible=field.visible,
+                debug_only=field.debug_only,
+            )
+            for field in item.ui_fields
+        ]
+        engines.append(
+            DesignEngineInfo(
+                engine_id=item.engine_id,
+                label=item.label,
+                description=item.description,
+                is_default=item.is_default,
+                fields=fields,
+            )
         )
-        for item in meta
-    ]
     return DesignEngineListResponse(engines=engines)
 
 
