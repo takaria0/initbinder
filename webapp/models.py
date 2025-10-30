@@ -162,6 +162,10 @@ class AlignmentResponse(BaseModel):
 
 class DesignRunRequest(BaseModel):
     pdb_id: str
+    model_engine: Literal["rfantibody", "boltzgen"] = Field(
+        "rfantibody",
+        description="Binder design engine to use (rfantibody default, boltzgen optional)",
+    )
     total_designs: int = Field(90, ge=1, le=50000)
     num_sequences: int = Field(1, ge=1, le=32)
     temperature: float = Field(0.1, ge=0.0, le=1.0)
@@ -187,6 +191,17 @@ class DesignRunRequest(BaseModel):
 class DesignRunResponse(BaseModel):
     job_id: str
     message: str
+
+
+class DesignEngineInfo(BaseModel):
+    engine_id: str
+    label: str
+    description: str
+    is_default: bool = False
+
+
+class DesignEngineListResponse(BaseModel):
+    engines: List[DesignEngineInfo]
 
 
 class RankingRow(BaseModel):

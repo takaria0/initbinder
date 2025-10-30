@@ -28,6 +28,8 @@ from .models import (
     AssessmentRunResponse,
     AssessmentRunSummary,
     AssessmentSyncResponse,
+    DesignEngineInfo,
+    DesignEngineListResponse,
     DesignRunRequest,
     DesignRunResponse,
     ExportRequest,
@@ -64,6 +66,7 @@ from .models import (
     AntigenDMSRequest,
     AntigenDMSResponse,
 )
+from .designs import list_design_engines
 from .pipeline import get_target_status
 from .pymol import (
     PyMolLaunchError,
@@ -138,6 +141,21 @@ async def api_design_run(payload: DesignRunRequest) -> DesignRunResponse:
     job_id = submit_design_run(payload, job_store=store)
     message = f"Queued design pipeline for {payload.pdb_id.upper()}"
     return DesignRunResponse(job_id=job_id, message=message)
+
+
+@app.get("/api/designs/engines", response_model=DesignEngineListResponse)
+async def api_design_engines() -> DesignEngineListResponse:
+    meta = list_design_engines()
+    engines = [
+        DesignEngineInfo(
+            engine_id=item.engine_id,
+            label=item.label,
+            description=item.description,
+            is_default=item.is_default,
+        )
+        for item in meta
+    ]
+    return DesignEngineListResponse(engines=engines)
 
 
 @app.post("/api/exports", response_model=ExportResponse)

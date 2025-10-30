@@ -127,7 +127,8 @@ def submit_target_initialization(request: TargetInitRequest, *,
 
 def submit_design_run(request: DesignRunRequest, *, job_store: JobStore | None = None) -> str:
     store = job_store or get_job_store(load_config().log_dir)
-    label = f"Design pipeline {request.pdb_id.upper()}"
+    engine_name = (request.model_engine or "rfantibody").strip().upper()
+    label = f"{engine_name} design {request.pdb_id.upper()}"
     job = store.create_job("design_run", label, details=request.dict())
 
     def _run() -> None:

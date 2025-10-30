@@ -52,6 +52,15 @@ const DEFAULT_SCATTER_THRESHOLDS = Object.fromEntries(
 
 const RESULTS_TABLE_DISPLAY_LIMIT = 2000;
 
+const DEFAULT_ENGINE_OPTIONS = [
+  {
+    engine_id: 'rfantibody',
+    label: 'RFantibody (RFdiffusion → MPNN → AF3)',
+    description: 'Legacy antibody pipeline using RFdiffusion, ProteinMPNN, and AlphaFold3.',
+    is_default: true,
+  },
+];
+
 const COUNTER_SELECTION_LIBRARY = {
   macs_streptavidin: {
     label: 'MACS streptavidin microbeads + biotinylated antigen',
@@ -195,6 +204,8 @@ const COUNTER_TAG_RULES = [
 
 const state = {
   currentPdb: null,
+  designEngines: [],
+  selectedDesignEngine: 'rfantibody',
   jobPoller: null,
   jobContext: null,
   rankings: [],
@@ -278,6 +289,8 @@ const el = {
   alignmentView: document.querySelector('#alignment-view'),
   designSubmit: document.querySelector('#design-submit'),
   designStatus: document.querySelector('#design-status'),
+  designEngineSelect: document.querySelector('#design-engine'),
+  designEngineHint: document.querySelector('#design-engine-hint'),
   designTotal: document.querySelector('#design-total'),
   designNumSeq: document.querySelector('#design-num-seq'),
   designTemp: document.querySelector('#design-temp'),
@@ -989,6 +1002,62 @@ function renderPresets() {
     btn.addEventListener('click', () => selectPreset(preset));
     el.presetList.appendChild(btn);
   });
+}
+
+function updateDesignEngineHint() {
+  if (!el.designEngineHint) return;
+  const engines = state.designEngines.length > 0 ? state.designEngines : DEFAULT_ENGINE_OPTIONS;
+  const selected = engines.find((engine) => engine.engine_id === state.selectedDesignEngine);
+  const fallback = selected || engines.find((engine) => engine.is_default) || engines[0];
+  const description = (selected && selected.description) || (fallback && fallback.description) || '';
+  if (description) {
+    el.designEngineHint.textContent = description;
+    el.designEngineHint.hidden = false;
+  } else {
+    el.designEngineHint.textContent = '';
+    el.designEngineHint.hidden = true;
+  }
+}
+
+function renderDesignEngineOptions() {
+  if (!el.designEngineSelect) return;
+  const select = el.designEngineSelect;
+  select.innerHTML = '';
+  const engines = state.designEngines.length > 0 ? state.designEngines : DEFAULT_ENGINE_OPTIONS;
+  const defaultEngine = engines.find((engine) => engine.is_default) || engines[0] || null;
+  if (!state.selectedDesignEngine || !engines.some((engine) => engine.engine_id === state.selectedDesignEngine)) {
+    state.selectedDesignEngine = defaultEngine ? defaultEngine.engine_id : 'rfantibody';
+  }
+  engines.forEach((engine) => {
+    const option = document.createElement('option');
+    option.value = engine.engine_id;
+    option.textContent = engine.label || engine.engine_id;
+    if (engine.description) option.title = engine.description;
+    select.appendChild(option);
+  });
+  select.value = state.selectedDesignEngine;
+  select.disabled = engines.length <= 1;
+  updateDesignEngineHint();
+}
+
+async function loadDesignEngines() {
+  if (!el.designEngineSelect) return;
+  try {
+    const res = await fetch('/api/designs/engines', { headers: { 'Cache-Control': 'no-cache' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    const engines = Array.isArray(payload?.engines) ? payload.engines : [];
+    state.designEngines = engines.map((engine) => ({
+      engine_id: engine.engine_id,
+      label: engine.label || engine.engine_id,
+      description: engine.description || '',
+      is_default: Boolean(engine.is_default),
+    }));
+  } catch (err) {
+    console.warn('Failed to load design engines', err);
+    state.designEngines = [];
+  }
+  renderDesignEngineOptions();
 }
 
 function applyTargetStatus(status = state.targetStatus) {
@@ -1860,6 +1929,7 @@ async function queueDesignRun() {
   }
   const payload = {
     pdb_id: state.currentPdb,
+    model_engine: state.selectedDesignEngine || 'rfantibody',
     total_designs: Number(el.designTotal.value) || 90,
     num_sequences: Number(el.designNumSeq.value) || 1,
     temperature: Number(el.designTemp.value) || 0.1,
@@ -4115,6 +4185,13 @@ function initEventHandlers() {
       setDebugMode(event.target.checked);
     });
   }
+  if (el.designEngineSelect) {
+    el.designEngineSelect.addEventListener('change', (event) => {
+      const value = (event.target.value || '').trim();
+      state.selectedDesignEngine = value || 'rfantibody';
+      updateDesignEngineHint();
+    });
+  }
   if (el.presetRefresh) {
     el.presetRefresh.addEventListener('click', () => loadPresets());
   }
@@ -4275,6 +4352,8 @@ function initEventHandlers() {
 
 function init() {
   initEventHandlers();
+  renderDesignEngineOptions();
+  loadDesignEngines();
   updateScatterControls();
   updateActiveRunDisplay();
   renderPresets();

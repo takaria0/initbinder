@@ -105,8 +105,14 @@
 
         <section id="design-config">
         <h2>Design Run Configuration</h2>
-        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3). Arms and hotspot variants are detected automatically from the prepared target.</p>
+        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3, BoltzGen diffusion, and future pipelines). Arms and hotspot variants are detected automatically from the prepared target.</p>
         <form id="design-form">
+          <div class="form-row">
+            <label>Design engine
+              <select id="design-engine"></select>
+              <span class="help-text" id="design-engine-hint" hidden></span>
+            </label>
+          </div>
           <div class="form-row">
             <label>Total designs
               <input type="number" id="design-total" value="90" min="1">

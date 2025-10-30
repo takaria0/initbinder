@@ -6,13 +6,46 @@ import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
 
 CONFIG_ENV_VAR = "INITBINDER_UI_CONFIG"
 DEFAULT_CONFIG_PATH = Path.cwd() / "cfg" / "webapp.yaml"
+
+
+@dataclass(slots=True)
+class BoltzGenClusterConfig:
+    conda_activate: Optional[str] = None
+    partition: Optional[str] = None
+    account: Optional[str] = None
+    time_hours: int = 12
+    mem_gb: int = 64
+    cpus: int = 8
+    gpus: str = "A100:1"
+    cache_dir: Optional[Path] = None
+    output_root: Optional[Path] = None
+    protocol: Optional[str] = None
+    extra_run_args: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.cache_dir, str) and self.cache_dir:
+            self.cache_dir = Path(self.cache_dir).expanduser()
+        if isinstance(self.output_root, str) and self.output_root:
+            self.output_root = Path(self.output_root).expanduser()
+        if isinstance(self.time_hours, str) and self.time_hours.strip():
+            self.time_hours = int(self.time_hours)
+        if isinstance(self.mem_gb, str) and self.mem_gb.strip():
+            self.mem_gb = int(self.mem_gb)
+        if isinstance(self.cpus, str) and self.cpus.strip():
+            self.cpus = int(self.cpus)
+        if isinstance(self.extra_run_args, str):
+            self.extra_run_args = [self.extra_run_args]
+        elif isinstance(self.extra_run_args, list):
+            self.extra_run_args = [str(arg) for arg in self.extra_run_args]
+        else:
+            self.extra_run_args = []
 
 
 @dataclass(slots=True)
@@ -38,6 +71,7 @@ class ClusterConfig:
     ensure_master: bool = True
     conda_activate: Optional[str] = None
     debug: bool = False
+    boltzgen: BoltzGenClusterConfig = field(default_factory=BoltzGenClusterConfig)
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:
@@ -62,6 +96,8 @@ class ClusterConfig:
                 self.control_persist = int(self.control_persist)
             except ValueError:
                 pass
+        if isinstance(self.boltzgen, dict):
+            self.boltzgen = BoltzGenClusterConfig(**self.boltzgen)
 
 
 @dataclass(slots=True)
@@ -187,6 +223,7 @@ __all__ = [
     "WebAppConfig",
     "ClusterConfig",
     "AppPaths",
+    "BoltzGenClusterConfig",
     "load_config",
     "CONFIG_ENV_VAR",
     "DEFAULT_CONFIG_PATH",
