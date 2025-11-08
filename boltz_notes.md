@@ -124,7 +124,7 @@ bash tools/launchers/launch_pipeline_6M17_20251011_221530.sh
 
 1. **Spec Generation**
    - Creates a workspace subdirectory: `targets/<PDB>/designs/_boltzgen/<run_label>/`.
-   - For each detected arm, writes a BoltzGen design YAML (entities block referencing the prepared PDB, binding site definitions derived from hotspot JSON, metadata describing the arm).
+   - Writes a single BoltzGen design YAML that references the prepared PDB without epitope/binding annotations. Any detected prep arms are logged for context but ignored so the requested total designs flow directly into the run.
    - Logs spec paths and hotspot counts, updating job details (`spec_paths`, `spec_outputs`).
 2. **Cluster Sync**
    - Same target and tools rsync steps as RFantibody (ensures remote has the fresh prep data and tools/ scripts).
@@ -140,17 +140,16 @@ bash tools/launchers/launch_pipeline_6M17_20251011_221530.sh
        --protocol protein-anything \
        --scripts_dir tools/boltzgen \
        --launcher_dir tools/launchers \
-       --output_root targets/6M17/designs/_boltzgen/bg_test \
+       --output_root /pub/.../targets/6M17/designs/_boltzgen/bg_test \
        --partition gpu \
        --account ccl_lab_gpu \
        --gpus A100:1 \
        --cpus 8 \
-       --mem 64G \
-       --time_h 12 \
-       --conda_activate "conda activate boltzgen" \
-       --spec targets/6M17/designs/_boltzgen/bg_test/Receptor-Binding_Motif_Core_hsA.yaml \
-       --spec ... \
-       --submit
+     --mem 64G \
+     --time_h 12 \
+     --conda_activate "conda activate boltzgen" \
+     --spec /pub/.../targets/6M17/designs/_boltzgen/bg_test/full_target.yaml \
+     --submit
      ```
 4. **Launcher Output**
    - `tools/boltzgen/pipeline.py` writes per-spec sbatch scripts under `tools/boltzgen/` and a launcher under `tools/launchers/`.
@@ -170,7 +169,7 @@ python tools/boltzgen/pipeline.py pipeline 6M17 \
   --protocol protein-anything \
   --scripts_dir tools/boltzgen \
   --launcher_dir tools/launchers \
-  --output_root targets/6M17/designs/_boltzgen/bg_test \
+  --output_root /pub/.../targets/6M17/designs/_boltzgen/bg_test \
   --partition gpu \
   --account ccl_lab_gpu \
   --gpus A100:1 \
@@ -178,8 +177,7 @@ python tools/boltzgen/pipeline.py pipeline 6M17 \
   --mem 64G \
   --time_h 12 \
   --conda_activate "conda activate boltzgen" \
-  --spec targets/6M17/designs/_boltzgen/bg_test/Receptor-Binding_Motif_Core_hsA.yaml \
-  ... \
+  --spec /pub/.../targets/6M17/designs/_boltzgen/bg_test/full_target.yaml \
   --submit
 ```
 

@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import yaml
 
@@ -816,8 +816,8 @@ class BoltzGenEngine(DesignEngine):
         ui_fields=[
             DesignEngineField(
                 field_id="total_designs",
-                label="Designs per arm",
-                description="Approximate designs per hotspot arm (multiplied by detected arms).",
+                label="Total designs",
+                description="Total BoltzGen designs (single spec; no epitope splitting).",
             ),
             DesignEngineField(
                 field_id="num_sequences",
@@ -872,25 +872,37 @@ class BoltzGenEngine(DesignEngine):
         cfg = load_config()
         workspace = cfg.paths.workspace_root or cfg.paths.project_root
         run_label = request.run_label or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        arms = RFAntibodyEngine._discover_arms(workspace, request.pdb_id)
-        if not arms:
-            raise ValueError(
-                "Failed to determine design arms; ensure prep-target has completed successfully."
+        try:
+            arms = RFAntibodyEngine._discover_arms(workspace, request.pdb_id)
+        except Exception as exc:
+            arms = []
+            job_store.append_log(
+                job_id,
+                f"[boltzgen] warn: unable to enumerate prep arms ({exc}); proceeding without epitope constraints.",
             )
-        designs_per_arm = max(1, math.ceil(request.total_designs / max(len(arms), 1)))
+        total_designs = max(1, request.total_designs)
+        if arms:
+            job_store.append_log(
+                job_id,
+                f"[boltzgen] detected {len(arms)} prep arm(s); generating a single full-target spec without epitope filters.",
+            )
+        else:
+            job_store.append_log(
+                job_id,
+                "[boltzgen] no prep arms detected; generating a full-target BoltzGen spec.",
+            )
 
         spec_infos = self._prepare_specs(
             workspace=workspace,
             pdb_id=request.pdb_id,
-            arms=arms,
             run_label=run_label,
-            designs_per_arm=designs_per_arm,
+            num_designs=total_designs,
         )
         details = {
             "model_engine": self.metadata.engine_id,
             "arms": arms,
             "run_label": run_label,
-            "designs_per_arm": designs_per_arm,
+            "num_designs": total_designs,
             "spec_paths": [str(info.rel_spec_path) for info in spec_infos],
             "spec_outputs": [str(info.output_rel) for info in spec_infos],
         }
@@ -945,8 +957,9 @@ class BoltzGenEngine(DesignEngine):
         binder_root = cluster.remote_root
         if binder_root is None:
             raise RuntimeError("Cluster remote_root not configured; cannot launch BoltzGen pipeline")
+        remote_root_path = Path(binder_root)
 
-        env_vars = {"INITBINDER_ROOT": Path(binder_root)}
+        env_vars = {"INITBINDER_ROOT": remote_root_path}
         target_base: Optional[Path] = None
         if cluster.target_root:
             target_base = Path(cluster.target_root)
@@ -969,11 +982,13 @@ class BoltzGenEngine(DesignEngine):
             % (partition, bg_cfg.account or "-", gpus, cpus, mem_gb, time_h),
         )
         if bg_cfg.output_root:
-            output_root_value = str(bg_cfg.output_root)
+            output_root_path = Path(bg_cfg.output_root)
         else:
-            output_root_value = str(
-                Path("targets") / request.pdb_id.upper() / "designs" / "_boltzgen" / run_label
-            )
+            output_root_path = Path("targets") / request.pdb_id.upper() / "designs" / "_boltzgen" / run_label
+        remote_output_root = self._resolve_remote_workspace_path(
+            output_root_path, remote_root=remote_root_path, target_base=target_base
+        )
+        output_root_value = str(remote_output_root)
         remote_cmd_parts: List[str] = [
             "python",
             "tools/boltzgen/pipeline.py",
@@ -982,7 +997,7 @@ class BoltzGenEngine(DesignEngine):
             "--run_label",
             run_label,
             "--num_designs",
-            str(designs_per_arm),
+            str(total_designs),
             "--protocol",
             self._resolve_protocol(bg_cfg),
             "--scripts_dir",
@@ -1010,7 +1025,10 @@ class BoltzGenEngine(DesignEngine):
         if bg_cfg.cache_dir:
             remote_cmd_parts.extend(["--cache_dir", str(bg_cfg.cache_dir)])
         for info in spec_infos:
-            remote_cmd_parts.extend(["--spec", str(info.rel_spec_path)])
+            remote_spec_path = self._resolve_remote_workspace_path(
+                info.rel_spec_path, remote_root=remote_root_path, target_base=target_base
+            )
+            remote_cmd_parts.extend(["--spec", str(remote_spec_path)])
         remote_cmd_parts.append("--submit")
         extra_args = list(bg_cfg.extra_run_args or [])
         if extra_args:
@@ -1080,9 +1098,8 @@ class BoltzGenEngine(DesignEngine):
         *,
         workspace: Path,
         pdb_id: str,
-        arms: List[str],
         run_label: str,
-        designs_per_arm: int,
+        num_designs: int,
     ) -> List[BoltzGenSpecInfo]:
         target_dir = workspace / "targets" / pdb_id.upper()
         prep_dir = target_dir / "prep"
@@ -1092,32 +1109,23 @@ class BoltzGenEngine(DesignEngine):
         if not prepared_pdb.exists():
             raise FileNotFoundError(f"Missing prepared.pdb for {pdb_id.upper()} (expected {prepared_pdb})")
 
-        target_yaml = target_dir / "target.yaml"
-        epitope_map = self._load_epitope_residue_map(target_yaml)
         spec_root = target_dir / "designs" / "_boltzgen" / run_label
         spec_root.mkdir(parents=True, exist_ok=True)
 
-        spec_infos: List[BoltzGenSpecInfo] = []
-        for arm in arms:
-            ep_name, variant = self._split_arm(arm)
-            sanitized = RFAntibodyEngine._sanitize_epitope_name(ep_name)
-            spec_filename = f"{sanitized}_hs{variant}.yaml"
-            spec_path = spec_root / spec_filename
-            hotspots = self._load_hotspots(prep_dir, sanitized, variant)
-            epitope_residues = epitope_map.get(ep_name, [])
-            info = self._write_spec(
-                workspace=workspace,
-                spec_path=spec_path,
-                prepared_pdb=prepared_pdb,
-                pdb_id=pdb_id,
-                run_label=run_label,
-                arm=arm,
-                hotspot_keys=hotspots,
-                epitope_residues=epitope_residues,
-                designs_per_arm=designs_per_arm,
-            )
-            spec_infos.append(info)
-        return spec_infos
+        spec_filename = "full_target.yaml"
+        spec_path = spec_root / spec_filename
+        info = self._write_spec(
+            workspace=workspace,
+            spec_path=spec_path,
+            prepared_pdb=prepared_pdb,
+            pdb_id=pdb_id,
+            run_label=run_label,
+            arm="FULL_TARGET",
+            hotspot_keys=[],
+            epitope_residues=[],
+            num_designs=num_designs,
+        )
+        return [info]
 
     @staticmethod
     def _resolve_protocol(bg_cfg) -> str:
@@ -1127,28 +1135,20 @@ class BoltzGenEngine(DesignEngine):
         return value or "protein-anything"
 
     @staticmethod
-    def _split_arm(arm: str) -> tuple[str, str]:
-        if "@" in arm:
-            name, variant = arm.rsplit("@", 1)
-        else:
-            name, variant = arm, "A"
-        variant = (variant or "A").upper()
-        return name.strip(), variant
-
-    @staticmethod
-    def _load_hotspots(prep_dir: Path, sanitized: str, variant: str) -> List[str]:
-        candidates = [
-            prep_dir / f"epitope_{sanitized}_hotspots{variant}.json",
-            prep_dir / f"epitope_{sanitized}_hotspots.json",
-        ]
-        for path in candidates:
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text()) or []
-                    return [str(entry).strip() for entry in data if entry]
-                except Exception:
-                    return []
-        return []
+    def _resolve_remote_workspace_path(
+        path: Path | str,
+        *,
+        remote_root: Path,
+        target_base: Optional[Path],
+    ) -> Path:
+        candidate = Path(path)
+        if candidate.is_absolute():
+            return candidate
+        parts = candidate.parts
+        if target_base and parts and parts[0].lower() == "targets":
+            remainder = Path(*parts[1:]) if len(parts) > 1 else Path()
+            return target_base / remainder if remainder.parts else target_base
+        return remote_root / candidate
 
     @staticmethod
     def _load_epitope_residue_map(target_yaml: Path) -> Dict[str, List[str]]:
@@ -1227,7 +1227,7 @@ class BoltzGenEngine(DesignEngine):
         arm: str,
         hotspot_keys: List[str],
         epitope_residues: List[str],
-        designs_per_arm: int,
+        num_designs: int,
     ) -> BoltzGenSpecInfo:
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         hotspot_map = self._parse_hotspot_map(hotspot_keys)
@@ -1257,13 +1257,6 @@ class BoltzGenEngine(DesignEngine):
             file_block["binding_types"] = binding_entries
 
         spec_data: Dict[str, object] = {
-            "metadata": {
-                "engine": self.metadata.engine_id,
-                "pdb_id": pdb_id.upper(),
-                "run_label": run_label,
-                "arm": arm,
-                "designs_per_arm": designs_per_arm,
-            },
             "entities": [
                 {"file": file_block},
                 {
@@ -1291,7 +1284,7 @@ class BoltzGenEngine(DesignEngine):
             spec_path=spec_path,
             rel_spec_path=rel_spec,
             output_rel=output_rel,
-            num_designs=designs_per_arm,
+            num_designs=num_designs,
             hotspot_count=hotspot_count,
         )
 

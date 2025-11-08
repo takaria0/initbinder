@@ -114,8 +114,8 @@ const DEFAULT_ENGINE_OPTIONS = [
       if (field.field_id === 'total_designs') {
         return {
           ...field,
-          label: 'Designs per arm',
-          description: 'Approximate designs per hotspot arm (multiplied by detected arms).',
+          label: 'Total designs',
+          description: 'Total BoltzGen designs (single spec; no epitope splitting).',
           visible: true,
           debug_only: false,
         };
