@@ -180,14 +180,27 @@
           <div class="results-controls">
             <span class="run-pill">Run <strong id="active-run-name">—</strong></span>
             <label>
+              Source
+              <select id="results-source">
+                <option value="af3">AF3 assessments</option>
+                <option value="boltzgen">BoltzGen metrics</option>
+              </select>
+            </label>
+            <label id="boltz-spec-wrapper" hidden>
+              Spec
+              <input type="text" id="boltz-spec" placeholder="full_target">
+            </label>
+            <label>
               Row Limit
               <input type="number" id="results-limit" value="2000" min="1">
             </label>
             <button type="button" id="sync-results">Download assessments</button>
+            <button type="button" id="sync-boltz-results" hidden>Sync BoltzGen results</button>
           </div>
         </div>
         <datalist id="run-label-options"></datalist>
         <div id="run-history" class="run-history"></div>
+        <div id="boltz-run-list" class="run-history" hidden></div>
         <div id="results-meta" class="badge" hidden></div>
         <div id="binder-detail" class="alert success" hidden></div>
         <div id="plot-container" class="scatter-panel" hidden>

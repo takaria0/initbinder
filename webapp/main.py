@@ -24,10 +24,14 @@ from .job_store import JobRecord, JobStatus, get_job_store
 from . import preferences
 from .models import (
     AlignmentResponse,
+    AntigenDMSRequest,
+    AntigenDMSResponse,
     AssessmentRunRequest,
     AssessmentRunResponse,
     AssessmentRunSummary,
     AssessmentSyncResponse,
+    BoltzGenRunListResponse,
+    BoltzGenSyncResponse,
     DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
@@ -39,12 +43,12 @@ from .models import (
     GoldenGateResponse,
     JobStatusResponse,
     JobSummary,
+    PyMolDMSRequest,
+    PyMolDMSResponse,
     PyMolGalleryMovieRequest,
     PyMolGalleryMovieResponse,
     PyMolHotspotRequest,
     PyMolHotspotResponse,
-    PyMolDMSRequest,
-    PyMolDMSResponse,
     PyMolTopBindersRequest,
     PyMolTopBindersResponse,
     RankingAnalysisRequest,
@@ -52,20 +56,18 @@ from .models import (
     RankingPlot,
     RankingResponse,
     RankingRow,
-    SequenceSimilarityMatrix,
     ScatterPoint,
+    SequenceSimilarityMatrix,
     TargetCatalogFile,
-    TargetPresetListResponse,
-    TargetPresetRequest,
-    TargetPresetResponse,
-    TargetInitRequest,
-    TargetInitResponse,
     TargetCatalogListResponse,
     TargetCatalogPreviewResponse,
     TargetGenerationRequest,
     TargetGenerationResponse,
-    AntigenDMSRequest,
-    AntigenDMSResponse,
+    TargetInitRequest,
+    TargetInitResponse,
+    TargetPresetListResponse,
+    TargetPresetRequest,
+    TargetPresetResponse,
 )
 from .designs import list_design_engines
 from .pipeline import get_target_status
@@ -76,7 +78,14 @@ from .pymol import (
     launch_dms_library,
     render_gallery_movie,
 )
-from .result_collectors import RankingsNotFoundError, load_rankings, list_assessment_runs
+from .result_collectors import (
+    RankingsNotFoundError,
+    list_assessment_runs,
+    list_boltzgen_runs,
+    RankingPayload,
+    load_boltzgen_metrics,
+    load_rankings,
+)
 from .workflows import (
     submit_assessment_run,
     submit_assessment_sync,
@@ -115,6 +124,41 @@ def _template_path(filename: str) -> Path:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"{filename} not found")
     return path
+
+
+def _ranking_payload_to_response(payload: RankingPayload) -> RankingResponse:
+    rows = [
+        RankingRow(
+            index=row.index,
+            design_name=row.design_name,
+            iptm=row.iptm,
+            rmsd_diego=row.rmsd_diego,
+            tm_score=row.tm_score,
+            ipsae_min=row.ipsae_min,
+            hotspot_min_distance=row.hotspot_min_distance,
+            metadata=row.metadata,
+        )
+        for row in payload.rows
+    ]
+    scatter = [
+        ScatterPoint(
+            design_name=point["design_name"],
+            iptm=point.get("iptm"),
+            rmsd_diego=point.get("rmsd_diego"),
+            ipsae_min=point.get("ipsae_min"),
+            metadata=point.get("metadata", {}),
+        )
+        for point in payload.scatter_points()
+    ]
+    return RankingResponse(
+        pdb_id=payload.pdb_id,
+        run_label=payload.run_label,
+        rows=rows,
+        scatter=scatter,
+        source_path=str(payload.source_path),
+        gallery_path=str(payload.gallery_path) if payload.gallery_path else None,
+        engine_id=payload.engine_id,
+    )
 
 
 @app.on_event("startup")
@@ -402,37 +446,7 @@ async def api_rankings(
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    rows = [
-        RankingRow(
-            index=row.index,
-            design_name=row.design_name,
-            iptm=row.iptm,
-            rmsd_diego=row.rmsd_diego,
-            tm_score=row.tm_score,
-            ipsae_min=row.ipsae_min,
-            hotspot_min_distance=row.hotspot_min_distance,
-            metadata=row.metadata,
-        )
-        for row in payload.rows
-    ]
-    scatter = [
-        ScatterPoint(
-            design_name=point["design_name"],
-            iptm=point.get("iptm"),
-            rmsd_diego=point.get("rmsd_diego"),
-            ipsae_min=point.get("ipsae_min"),
-            metadata=point.get("metadata", {}),
-        )
-        for point in payload.scatter_points()
-    ]
-    return RankingResponse(
-        pdb_id=payload.pdb_id,
-        run_label=payload.run_label,
-        rows=rows,
-        scatter=scatter,
-        source_path=str(payload.source_path),
-        gallery_path=str(payload.gallery_path) if payload.gallery_path else None,
-    )
+    return _ranking_payload_to_response(payload)
 
 
 @app.post("/api/targets/{pdb_id}/rankings/analysis", response_model=RankingAnalysisResponse)
@@ -470,6 +484,39 @@ async def api_rankings_analysis(
     return RankingAnalysisResponse(plots=plot_models, similarity=similarity_model, logs=logs)
 
 
+@app.get("/api/targets/{pdb_id}/boltzgen/runs", response_model=BoltzGenRunListResponse)
+async def api_boltzgen_runs(pdb_id: str) -> BoltzGenRunListResponse:
+    runs = list_boltzgen_runs(pdb_id)
+    return BoltzGenRunListResponse(runs=runs)
+
+
+@app.post("/api/targets/{pdb_id}/boltzgen/sync", response_model=BoltzGenSyncResponse)
+async def api_boltzgen_sync(pdb_id: str, run_label: str | None = None) -> BoltzGenSyncResponse:
+    client = ClusterClient()
+    try:
+        result = await run_in_threadpool(client.sync_boltzgen_results, pdb_id, run_label=run_label)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    message = (result.stdout or result.stderr or "").strip() or f"BoltzGen results synced for {pdb_id.upper()}"
+    return BoltzGenSyncResponse(message=message, run_label=run_label)
+
+
+@app.get("/api/targets/{pdb_id}/boltzgen/results", response_model=RankingResponse)
+async def api_boltzgen_results(
+    pdb_id: str,
+    run_label: str | None = None,
+    spec: str | None = None,
+    limit: int | None = Query(default=None, ge=1),
+) -> RankingResponse:
+    try:
+        payload = load_boltzgen_metrics(pdb_id, run_label=run_label, spec_name=spec, limit=limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _ranking_payload_to_response(payload)
+
+
 @app.get("/api/targets/{pdb_id}/runs", response_model=list[AssessmentRunSummary])
 async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
     local_runs = list_assessment_runs(pdb_id)
@@ -477,7 +524,6 @@ async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
 
     client = ClusterClient()
     try:
-        raise RuntimeError("test")
         remote_entries = await run_in_threadpool(client.list_remote_assessments, pdb_id)
     except Exception as exc:  # pragma: no cover - cluster access may fail
         print(f"[runs] warn: unable to list remote assessments for {pdb_id}: {exc}")

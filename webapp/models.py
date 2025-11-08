@@ -108,6 +108,11 @@ class AssessmentSyncResponse(BaseModel):
     run_label: Optional[str] = None
 
 
+class BoltzGenSyncResponse(BaseModel):
+    message: str
+    run_label: Optional[str] = None
+
+
 class TargetCatalogFile(BaseModel):
     name: str
     size_bytes: int
@@ -239,6 +244,7 @@ class RankingResponse(BaseModel):
     scatter: List[ScatterPoint] = Field(default_factory=list)
     source_path: Optional[str] = None
     gallery_path: Optional[str] = None
+    engine_id: Optional[str] = None
 
 
 class RankingAnalysisRequest(BaseModel):
@@ -262,6 +268,23 @@ class RankingAnalysisResponse(BaseModel):
     plots: List[RankingPlot] = Field(default_factory=list)
     similarity: Optional[SequenceSimilarityMatrix] = None
     logs: List[str] = Field(default_factory=list)
+
+
+class BoltzGenSpecSummary(BaseModel):
+    name: str
+    has_metrics: bool = False
+    metrics_path: Optional[str] = None
+
+
+class BoltzGenRunSummary(BaseModel):
+    run_label: str
+    updated_at: float
+    specs: List[BoltzGenSpecSummary] = Field(default_factory=list)
+    local_path: Optional[str] = None
+
+
+class BoltzGenRunListResponse(BaseModel):
+    runs: List[BoltzGenRunSummary] = Field(default_factory=list)
 
 
 class DMSLibraryDesignRow(BaseModel):

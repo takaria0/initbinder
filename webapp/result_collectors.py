@@ -35,6 +35,7 @@ class RankingPayload:
     source_path: Path
     rows: List[RankingRowData]
     gallery_path: Optional[Path] = None
+    engine_id: str = "rfantibody"
 
     def scatter_points(self) -> List[Dict[str, object]]:
         points: List[Dict[str, object]] = []
@@ -202,6 +203,7 @@ def load_rankings(pdb_id: str, *, run_label: Optional[str] = None, limit: Option
         source_path=rankings_path,
         rows=parsed,
         gallery_path=_discover_gallery_script(rankings_path.parent),
+        engine_id="rfantibody",
     )
 
 
@@ -255,10 +257,155 @@ def _estimate_row_count(path: Path, *, limit: int = 20000) -> int:
     return count
 
 
+def _boltzgen_root(pdb_id: str) -> Path:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    return (targets_dir / pdb_id.upper() / "designs" / "_boltzgen").resolve()
+
+
+def _discover_boltzgen_run_dir(pdb_id: str, run_label: Optional[str]) -> tuple[Path, Optional[str]]:
+    root = _boltzgen_root(pdb_id)
+    if not root.exists():
+        raise FileNotFoundError(f"No BoltzGen runs found under {root}")
+    if run_label:
+        run_dir = root / run_label
+        if not run_dir.exists():
+            raise FileNotFoundError(f"BoltzGen run '{run_label}' not found under {root}")
+        return run_dir, run_label
+    runs = [p for p in root.iterdir() if p.is_dir()]
+    if not runs:
+        raise FileNotFoundError(f"No BoltzGen runs found under {root}")
+    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    selected = runs[0]
+    return selected, selected.name
+
+
+def _load_csv(path: Path) -> List[Dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        return [{(k or "").strip(): (v or "").strip() for k, v in row.items()} for row in reader]
+
+
+def list_boltzgen_runs(pdb_id: str) -> List[Dict[str, object]]:
+    try:
+        root = _boltzgen_root(pdb_id)
+    except Exception:
+        return []
+    if not root.exists():
+        return []
+    runs: List[Dict[str, object]] = []
+    for run_dir in root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        specs: List[Dict[str, object]] = []
+        for spec_dir in run_dir.iterdir():
+            if not spec_dir.is_dir():
+                continue
+            metrics = spec_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+            specs.append(
+                {
+                    "name": spec_dir.name,
+                    "has_metrics": metrics.exists(),
+                    "metrics_path": str(metrics) if metrics.exists() else None,
+                }
+            )
+        try:
+            mtime = run_dir.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        specs.sort(key=lambda item: item["name"])
+        runs.append(
+            {
+                "run_label": run_dir.name,
+                "specs": specs,
+                "updated_at": mtime,
+                "local_path": str(run_dir),
+            }
+        )
+    runs.sort(key=lambda item: item["updated_at"], reverse=True)
+    return runs
+
+
+def load_boltzgen_metrics(
+    pdb_id: str,
+    *,
+    run_label: Optional[str] = None,
+    spec_name: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> RankingPayload:
+    run_dir, resolved_label = _discover_boltzgen_run_dir(pdb_id, run_label)
+    spec_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
+    if not spec_dirs:
+        raise FileNotFoundError(f"No BoltzGen specs found under {run_dir}")
+    selected_spec: Optional[Path] = None
+    if spec_name:
+        for candidate in spec_dirs:
+            if candidate.name == spec_name:
+                selected_spec = candidate
+                break
+        if selected_spec is None:
+            raise FileNotFoundError(f"Spec '{spec_name}' not found under {run_dir}")
+    else:
+        spec_dirs.sort(key=lambda p: p.name)
+        selected_spec = spec_dirs[0]
+    metrics_path = selected_spec / "final_ranked_designs" / "all_designs_metrics.csv"
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"BoltzGen metrics CSV not found: {metrics_path}")
+
+    rows = _load_csv(metrics_path)
+    parsed: List[RankingRowData] = []
+    for idx, raw in enumerate(rows, start=1):
+        if limit and idx > limit:
+            break
+        design_name = raw.get("id") or raw.get("design_name") or f"design_{idx}"
+        iptm_val = _lookup(
+            raw,
+            [
+                "design_to_target_iptm",
+                "iptm",
+                "design_iptm",
+            ],
+        )
+        rmsd_val = _lookup(
+            raw,
+            [
+                "filter_rmsd",
+                "filter_rmsd_design",
+                "bb_rmsd",
+                "bb_target_aligned_rmsd_design",
+            ],
+        )
+        metadata = dict(raw)
+        metadata["spec"] = selected_spec.name
+        parsed.append(
+            RankingRowData(
+                index=idx,
+                design_name=design_name,
+                iptm=_coerce_float(iptm_val),
+                rmsd_diego=_coerce_float(rmsd_val),
+                tm_score=None,
+                ipsae_min=None,
+                hotspot_min_distance=None,
+                metadata=metadata,
+            )
+        )
+
+    return RankingPayload(
+        pdb_id=pdb_id.upper(),
+        run_label=resolved_label,
+        source_path=metrics_path,
+        rows=parsed,
+        gallery_path=None,
+        engine_id="boltzgen",
+    )
+
+
 __all__ = [
     "RankingRowData",
     "RankingPayload",
     "RankingNotFoundError",
+    "list_boltzgen_runs",
+    "load_boltzgen_metrics",
     "load_rankings",
     "list_assessment_runs",
 ]

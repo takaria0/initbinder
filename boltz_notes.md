@@ -210,7 +210,20 @@ python tools/boltzgen/pipeline.py pipeline 6M17 \
 
 ---
 
-## 6. Job Store & UI Updates
+## 6. Viewing BoltzGen Results in the UI
+
+1. **Sync outputs** – Click *Sync BoltzGen results* (or call `POST /api/targets/{PDB}/boltzgen/sync`) to rsync `targets/<PDB>/designs/_boltzgen/<run_label>` back from the cluster. Pass `run_label` to limit the transfer, otherwise the entire `_boltzgen/` tree is mirrored.
+2. **Choose the source** – In the Results panel select *BoltzGen metrics*. A dedicated run list appears below the AF3 history, showing every run/spec combo along with a ✔ if `final_ranked_designs/all_designs_metrics.csv` exists locally.
+3. **Load metrics** – Enter the run label (and optional spec name) and press *Refresh*. The backend parses the `all_designs_metrics.csv` file, maps `design_to_target_iptm → ipTM` and `filter_rmsd → RMSD`, and feeds the rows into the existing table + scatter plot so you can inspect ipTM vs RMSD immediately.
+4. **Feature scope** – AF3-specific tools (plot generation, Golden Gate planner, PyMOL launchers, exports) stay disabled while the BoltzGen source is active. The sortable table, scatter plot, metadata drawer, and job history continue to function.
+
+| Handy reference | Path / Action |
+| --- | --- |
+| Cluster metrics CSV | `/pub/.../targets/<PDB>/designs/_boltzgen/<run>/<spec>/final_ranked_designs/all_designs_metrics.csv` |
+| Local mirror | `<repo>/targets/<PDB>/designs/_boltzgen/<run>/<spec>/final_ranked_designs/all_designs_metrics.csv` |
+| UI controls | Results → Source dropdown + *Sync BoltzGen results* |
+
+## 7. Job Store & UI Updates
 
 1. All engines write log lines via `job_store.append_log(job_id, message)` (FastAPI streams them to the UI via polling).
 2. Additional metadata is stored in job details for downstream panels:
@@ -219,7 +232,7 @@ python tools/boltzgen/pipeline.py pipeline 6M17 \
 
 ---
 
-## Quick Reference of Key Modules
+## 8. Quick Reference of Key Modules
 
 | Component | Responsibility |
 | --- | --- |
@@ -234,7 +247,7 @@ python tools/boltzgen/pipeline.py pipeline 6M17 \
 
 ---
 
-## Summary
+## 9. Summary
 
 - The GUI simply posts structured JSON to a single endpoint. All pipeline specificity is handled server-side via pluggable engines.
 - RFantibody continues to drive the legacy `manage_rfa.py` pipeline, while BoltzGen uses new YAML specs and a concise cluster helper script.

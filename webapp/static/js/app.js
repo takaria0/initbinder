@@ -282,6 +282,7 @@ const state = {
   rankingsTotal: 0,
   rankingsShowAll: false,
   rankingsDisplayLimit: RESULTS_TABLE_DISPLAY_LIMIT,
+  resultsSource: 'af3',
   tableSort: { ...DEFAULT_TABLE_SORT },
   scatterLayout: [],
   scatterPoints: [],
@@ -293,6 +294,7 @@ const state = {
   jobs: [],
   selectedJobId: null,
   runHistory: {},
+  boltzRunHistory: {},
   jobRefreshTimer: null,
   presets: [],
   activePresetId: null,
@@ -335,6 +337,41 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function getResultsSource() {
+  if (el.resultsSource) {
+    const value = (el.resultsSource.value || '').trim().toLowerCase();
+    if (value === 'boltzgen' || value === 'af3') {
+      state.resultsSource = value;
+      return value;
+    }
+  }
+  return state.resultsSource || 'af3';
+}
+
+function setResultsSource(source) {
+  const normalized = source === 'boltzgen' ? 'boltzgen' : 'af3';
+  state.resultsSource = normalized;
+  if (el.resultsSource) {
+    el.resultsSource.value = normalized;
+  }
+  const isBoltz = normalized === 'boltzgen';
+  if (el.boltzSpecWrapper) {
+    el.boltzSpecWrapper.hidden = !isBoltz;
+  }
+  if (el.syncResultsBtn) {
+    el.syncResultsBtn.hidden = isBoltz;
+  }
+  if (el.syncBoltzResultsBtn) {
+    el.syncBoltzResultsBtn.hidden = !isBoltz;
+  }
+  if (el.boltzRunList) {
+    el.boltzRunList.hidden = !isBoltz;
+  }
+  if (isBoltz && state.currentPdb) {
+    fetchBoltzRunHistory(state.currentPdb);
+  }
 }
 
 const el = {
@@ -404,14 +441,19 @@ const el = {
   exportSuffix: document.querySelector('#export-suffix'),
   exportDnac: document.querySelector('#export-dnachisel'),
   resultsRunLabel: document.querySelector('#results-run-label'),
+  resultsSource: document.querySelector('#results-source'),
+  boltzSpec: document.querySelector('#boltz-spec'),
+  boltzSpecWrapper: document.querySelector('#boltz-spec-wrapper'),
   resultsLimit: document.querySelector('#results-limit'),
   pymolTop: document.querySelector('#pymol-top'),
   pymolMovie: document.querySelector('#pymol-movie'),
   syncResultsBtn: document.querySelector('#sync-results'),
+  syncBoltzResultsBtn: document.querySelector('#sync-boltz-results'),
   assessSubmit: document.querySelector('#assess-submit'),
   jobList: document.querySelector('#job-list'),
   refreshJobsBtn: document.querySelector('#refresh-jobs'),
   runHistory: document.querySelector('#run-history'),
+  boltzRunList: document.querySelector('#boltz-run-list'),
   runLabelOptions: document.querySelector('#run-label-options'),
   activeRunName: document.querySelector('#active-run-name'),
   selectionCard: document.querySelector('#current-selection-card'),
@@ -1412,6 +1454,7 @@ function stopRankingsPolling() {
 function scheduleRankingsPolling() {
   stopRankingsPolling();
   if (!state.currentPdb) return;
+  if (getResultsSource() === 'boltzgen') return;
   state.rankingsPollTimer = setInterval(() => {
     if (!state.currentPdb || state.rankingsFetching) return;
     fetchRankings({ silent: true }).catch(() => {});
@@ -1783,7 +1826,9 @@ function setCurrentPdb(pdbId, options = {}) {
   syncActivePreset();
   renderCurrentSelection();
   renderRunHistory(upper);
+  renderBoltzRunHistory(upper);
   fetchRunHistory(upper);
+  fetchBoltzRunHistory(upper);
   if (options.loadAlignment) {
     loadAlignment(upper);
   }
@@ -1846,6 +1891,7 @@ async function fetchJobList() {
     renderJobList();
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
+      fetchBoltzRunHistory(state.currentPdb);
     }
   } catch (err) {
     console.error('Failed to fetch jobs', err);
@@ -1872,6 +1918,30 @@ async function fetchRunHistory(pdbId) {
     }
     if (state.currentPdb === upper) {
       renderRunHistory(upper);
+    }
+  }
+}
+
+async function fetchBoltzRunHistory(pdbId) {
+  if (!pdbId || !el.boltzRunList) return;
+  const upper = pdbId.toUpperCase();
+  try {
+    const res = await fetch(`/api/targets/${upper}/boltzgen/runs`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const payload = await res.json();
+    state.boltzRunHistory[upper] = Array.isArray(payload?.runs) ? payload.runs : [];
+    if (state.currentPdb === upper) {
+      renderBoltzRunHistory(upper);
+    }
+  } catch (err) {
+    console.warn('Failed to fetch BoltzGen runs', err);
+    if (!state.boltzRunHistory[upper]) {
+      state.boltzRunHistory[upper] = [];
+    }
+    if (state.currentPdb === upper) {
+      renderBoltzRunHistory(upper);
     }
   }
 }
@@ -2005,6 +2075,49 @@ function renderRunHistory(pdbId) {
       el.assessSubmit.disabled = false;
     }
   }
+}
+
+function renderBoltzRunHistory(pdbId) {
+  if (!el.boltzRunList) return;
+  const isBoltz = getResultsSource() === 'boltzgen';
+  el.boltzRunList.hidden = !isBoltz;
+  if (!isBoltz) return;
+  const upper = pdbId ? pdbId.toUpperCase() : state.currentPdb;
+  const runs = (upper && state.boltzRunHistory[upper]) || [];
+  el.boltzRunList.innerHTML = '';
+  if (!runs.length) {
+    el.boltzRunList.textContent = 'No BoltzGen runs found locally. Sync results to populate this list.';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  runs.forEach((run) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'run-chip';
+    btn.dataset.runLabel = run.run_label;
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = run.run_label;
+    const specs = document.createElement('span');
+    specs.className = 'origin';
+    const specText = (run.specs || [])
+      .map((spec) => (spec.has_metrics ? `✔ ${spec.name}` : `… ${spec.name}`))
+      .join(', ');
+    specs.textContent = specText || 'no specs detected';
+    btn.title = `Updated ${new Date(run.updated_at * 1000).toLocaleString()}`;
+    btn.append(label, specs);
+    btn.addEventListener('click', () => {
+      if (el.resultsRunLabel) {
+        el.resultsRunLabel.value = run.run_label;
+      }
+      if (el.boltzSpec && Array.isArray(run.specs) && run.specs.length === 1) {
+        el.boltzSpec.value = run.specs[0].name;
+      }
+      highlightRunChip(run.run_label);
+    });
+    frag.appendChild(btn);
+  });
+  el.boltzRunList.appendChild(frag);
 }
 
 function renderJobList() {
@@ -2254,6 +2367,9 @@ async function runExport() {
     showAlert('Load rankings before exporting.');
     return;
   }
+  if (!ensureAf3Results('Exporting sequences')) {
+    return;
+  }
   const payload = {
     pdb_id: state.currentPdb,
     rankings_path: state.rankingsResponse.source_path,
@@ -2296,6 +2412,9 @@ async function runExport() {
 async function runGoldenGatePlanner() {
   if (!state.currentPdb || !state.rankingsResponse) {
     showAlert('Load rankings before building the Golden Gate plan.');
+    return;
+  }
+  if (!ensureAf3Results('Golden Gate planning')) {
     return;
   }
 
@@ -2361,16 +2480,22 @@ async function fetchRankings(options = {}) {
   if (!runLabel && state.activeRunLabel) {
     runLabel = state.activeRunLabel;
   }
+  const source = getResultsSource();
   const limitVal = Number(el.resultsLimit?.value) || null;
   const params = new URLSearchParams();
   if (runLabel) params.append('run_label', runLabel);
   if (limitVal) params.append('limit', String(limitVal));
+  if (source === 'boltzgen') {
+    const specValue = el.boltzSpec?.value.trim();
+    if (specValue) params.append('spec', specValue);
+  }
 
   if (!silent && el.refreshResultsBtn) {
     el.refreshResultsBtn.disabled = true;
   }
   if (!silent) {
-    setBadge(el.resultsMeta, `Loading rankings for ${state.currentPdb}…`);
+    const label = source === 'boltzgen' ? 'Loading BoltzGen metrics' : 'Loading rankings';
+    setBadge(el.resultsMeta, `${label} for ${state.currentPdb}…`);
     el.resultsMeta.hidden = false;
   }
 
@@ -2378,6 +2503,7 @@ async function fetchRankings(options = {}) {
     state.currentPdb,
     runLabel || '',
     state.rankingsResponse?.source_path || '',
+    state.rankingsResponse?.engine_id || 'rfantibody',
   );
   const shouldPreserveAnalysis =
     state.analysisContext && state.analysisContext.signature === requestedSignature;
@@ -2389,7 +2515,11 @@ async function fetchRankings(options = {}) {
   }
 
   try {
-    const res = await fetch(`/api/targets/${state.currentPdb}/rankings?${params.toString()}`);
+    const endpoint =
+      source === 'boltzgen'
+        ? `/api/targets/${state.currentPdb}/boltzgen/results?${params.toString()}`
+        : `/api/targets/${state.currentPdb}/rankings?${params.toString()}`;
+    const res = await fetch(endpoint);
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.detail || `Failed with ${res.status}`);
@@ -2399,6 +2529,7 @@ async function fetchRankings(options = {}) {
       state.currentPdb,
       payload.run_label || '',
       payload.source_path || '',
+      payload.engine_id || 'rfantibody',
     );
     const contextMatches =
       state.analysisContext && state.analysisContext.signature === newSignature;
@@ -2428,17 +2559,28 @@ async function fetchRankings(options = {}) {
     if (!contextMatches) {
       resetAnalysisPanel();
     }
+    state.resultsSource = source;
     renderResults();
     if (!silent) {
       const label = state.activeRunLabel || 'latest';
-      setBadge(el.resultsMeta, `${payload.rows.length} designs · run ${label}`);
+      const suffix = source === 'boltzgen' ? 'BoltzGen metrics' : 'designs';
+      setBadge(el.resultsMeta, `${payload.rows.length} ${suffix} · run ${label}`);
     }
     highlightRunChip(state.activeRunLabel);
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
+      if (source === 'boltzgen') {
+        fetchBoltzRunHistory(state.currentPdb);
+      }
     }
     renderPresets();
-    scheduleRankingsPolling();
+    applyResultsEngineCapabilities();
+    if (source === 'boltzgen') {
+      stopRankingsPolling();
+    } else {
+      scheduleRankingsPolling();
+    }
+    renderBoltzRunHistory(state.currentPdb);
   } catch (err) {
     if (!silent) {
       setBadge(el.resultsMeta, `Rankings failed: ${err.message || err}`, 'rgba(248, 113, 113, 0.2)');
@@ -2449,9 +2591,7 @@ async function fetchRankings(options = {}) {
     if (!silent && el.refreshResultsBtn) {
       el.refreshResultsBtn.disabled = false;
     }
-    if (el.analysisRun && !state.analysisRunning) {
-      el.analysisRun.disabled = state.rankings.length === 0;
-    }
+    applyResultsEngineCapabilities();
     state.rankingsFetching = false;
   }
 }
@@ -3113,8 +3253,8 @@ function handleScatterThresholdChange(axis, rawValue) {
   renderScatter();
 }
 
-function analysisSignature(pdbId, runLabel, sourcePath) {
-  return [pdbId || '', runLabel || '', sourcePath || ''].join('::');
+function analysisSignature(pdbId, runLabel, sourcePath, engineId = 'rfantibody') {
+  return [pdbId || '', runLabel || '', sourcePath || '', engineId || ''].join('::');
 }
 
 function resetResultsPanel(options = {}) {
@@ -3142,6 +3282,7 @@ function resetResultsPanel(options = {}) {
     el.binderDetail.hidden = true;
   }
   renderResults();
+  applyResultsEngineCapabilities();
 }
 
 function resetAnalysisPanel(options = {}) {
@@ -3164,6 +3305,51 @@ function resetAnalysisPanel(options = {}) {
       el.analysisRun.disabled = state.rankings.length === 0 || state.analysisRunning;
     }
   }
+}
+
+function applyResultsEngineCapabilities() {
+  const engine = state.rankingsResponse?.engine_id || 'rfantibody';
+  const isBoltz = engine === 'boltzgen';
+  const hasRows = state.rankings.length > 0;
+  if (el.analysisRun) {
+    el.analysisRun.textContent = 'Analyze rankings';
+    el.analysisRun.disabled = isBoltz || !hasRows || state.analysisRunning;
+  }
+  if (el.exportButton) {
+    el.exportButton.disabled = isBoltz || !hasRows;
+  }
+  if (el.exportOpen) {
+    el.exportOpen.disabled = isBoltz || !hasRows;
+  }
+  if (el.libraryRun) {
+    el.libraryRun.disabled = isBoltz || !hasRows;
+  }
+  if (el.pymolTop) {
+    el.pymolTop.disabled = isBoltz || !hasRows;
+  }
+  if (el.pymolHotspots) {
+    el.pymolHotspots.disabled = isBoltz || !hasRows;
+  }
+  if (el.pymolMovie) {
+    el.pymolMovie.disabled = isBoltz || !state.galleryAvailable;
+  }
+  if (el.syncResultsBtn) {
+    el.syncResultsBtn.hidden = isBoltz;
+  }
+  if (el.syncBoltzResultsBtn) {
+    el.syncBoltzResultsBtn.hidden = !isBoltz;
+  }
+  if (el.resultsMeta && isBoltz && state.rankingsResponse) {
+    el.resultsMeta.hidden = false;
+  }
+}
+
+function ensureAf3Results(featureDescription) {
+  if (state.rankingsResponse?.engine_id === 'boltzgen') {
+    showAlert(`${featureDescription} is only available for AF3 assessment runs.`);
+    return false;
+  }
+  return true;
 }
 
 function similarityColor(value) {
@@ -3374,6 +3560,9 @@ async function runRankingsAnalysis() {
     showAlert('Initialize and load rankings before running the analysis.');
     return;
   }
+  if (!ensureAf3Results('Rankings analysis')) {
+    return;
+  }
   if (state.analysisRunning) return;
   if (!state.rankings || state.rankings.length === 0) {
     showAlert('Load rankings first.');
@@ -3428,6 +3617,7 @@ async function runRankingsAnalysis() {
         state.currentPdb,
         state.activeRunLabel || '',
         state.rankingsResponse?.source_path || '',
+        state.rankingsResponse?.engine_id || 'rfantibody',
       ),
     };
     renderAnalysis();
@@ -4167,6 +4357,9 @@ async function launchHotspots() {
     showAlert('Initialize target before launching PyMOL.');
     return;
   }
+  if (!ensureAf3Results('PyMOL hotspot export')) {
+    return;
+  }
   el.pymolHotspots.disabled = true;
   try {
     const res = await fetch(`/api/targets/${state.currentPdb}/pymol/hotspots`, {
@@ -4194,6 +4387,9 @@ async function launchHotspots() {
 async function launchTopBinders() {
   if (!state.currentPdb || !state.rankingsResponse) {
     showAlert('Load rankings before launching PyMOL.');
+    return;
+  }
+  if (!ensureAf3Results('PyMOL launcher')) {
     return;
   }
   el.pymolTop.disabled = true;
@@ -4224,6 +4420,9 @@ async function launchTopBinders() {
 async function renderPymolMovie() {
   if (!state.currentPdb || !state.rankingsResponse) {
     showAlert('Load rankings before rendering a movie.');
+    return;
+  }
+  if (!ensureAf3Results('PyMOL movie rendering')) {
     return;
   }
   if (!state.galleryAvailable) {
@@ -4377,6 +4576,54 @@ async function syncResultsFromCluster(options = {}) {
   }
 }
 
+async function syncBoltzResultsFromCluster(options = {}) {
+  const { runLabel: explicitRunLabel, silent = false } = options;
+  if (!state.currentPdb) {
+    if (!silent) showAlert('Initialize target first.');
+    return;
+  }
+  const source = getResultsSource();
+  if (source !== 'boltzgen') {
+    if (!silent) showAlert('Switch the results source to BoltzGen to sync these outputs.');
+    return;
+  }
+  let runLabel = '';
+  if (explicitRunLabel !== undefined) {
+    runLabel = (explicitRunLabel || '').trim();
+  } else if (el.resultsRunLabel) {
+    runLabel = el.resultsRunLabel.value.trim();
+  }
+  const params = new URLSearchParams();
+  if (runLabel) params.append('run_label', runLabel);
+  if (el.syncBoltzResultsBtn) {
+    el.syncBoltzResultsBtn.disabled = true;
+  }
+  try {
+    const res = await fetch(`/api/targets/${state.currentPdb}/boltzgen/sync${params.size ? `?${params}` : ''}`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed with ${res.status}`);
+    }
+    const payload = await res.json();
+    if (!silent) {
+      showAlert(payload.message || 'BoltzGen results synced.', false);
+    }
+    fetchBoltzRunHistory(state.currentPdb);
+    return payload;
+  } catch (err) {
+    if (!silent) {
+      showAlert(err.message || String(err));
+    }
+    throw err;
+  } finally {
+    if (el.syncBoltzResultsBtn) {
+      el.syncBoltzResultsBtn.disabled = false;
+    }
+  }
+}
+
 function registerScatterClick() {
   if (!el.scatterCanvas) return;
   el.scatterCanvas.addEventListener('click', (event) => {
@@ -4495,6 +4742,23 @@ function initEventHandlers() {
       updateActiveRunDisplay();
       highlightRunChip(event.target.value || '');
     });
+  }
+  if (el.resultsSource) {
+    setResultsSource(el.resultsSource.value || state.resultsSource);
+    el.resultsSource.addEventListener('change', (event) => {
+      setResultsSource(event.target.value || 'af3');
+      renderBoltzRunHistory(state.currentPdb);
+      if (getResultsSource() === 'boltzgen') {
+        stopRankingsPolling();
+      } else {
+        scheduleRankingsPolling();
+      }
+    });
+  } else {
+    setResultsSource(state.resultsSource);
+  }
+  if (el.syncBoltzResultsBtn) {
+    el.syncBoltzResultsBtn.addEventListener('click', () => syncBoltzResultsFromCluster({}));
   }
   if (el.resultsLimit) {
     el.resultsLimit.addEventListener('change', () => {

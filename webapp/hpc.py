@@ -576,6 +576,28 @@ class ClusterClient:
         )
         return result
 
+    def sync_boltzgen_results(self, pdb_id: str, run_label: Optional[str] = None) -> CommandResult:
+        base = self.target_root or self.remote_root
+        if not base:
+            raise RuntimeError("Neither target_root nor remote_root configured; cannot sync BoltzGen outputs")
+        remote_base = Path(base)
+        rel = Path("targets") / pdb_id.upper() / "designs" / "_boltzgen"
+        local_dest = (self.local_root / rel).resolve()
+        if run_label:
+            rel = rel / run_label
+            local_dest = local_dest / run_label
+        local_dest.parent.mkdir(parents=True, exist_ok=True)
+        self._emit(
+            f"[cluster] sync_boltzgen_results -> remote {remote_base / rel} to local {local_dest}",
+            always_print=True,
+        )
+        result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
+        self._emit(
+            f"[cluster] sync_boltzgen_results completed with exit {result.exit_code}",
+            always_print=True,
+        )
+        return result
+
     def list_remote_assessments(self, pdb_id: str) -> list[dict[str, object]]:
         remote_root = self.target_root or self.remote_root
         if self.cfg.mock:

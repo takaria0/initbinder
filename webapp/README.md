@@ -6,7 +6,7 @@ End-to-end FastAPI + Vanilla JS interface for orchestrating the InitBinder antib
 
 - **Target bootstrap** – queue `init-target`, `decide-scope`, and `prep-target` in a single click; live log streaming with job status.
 - **Design orchestration** – push local inputs to the cluster, run `manage_rfa.py pipeline` remotely, submit RFdiffusion → ProteinMPNN → AlphaFold3 SLURM jobs, and auto-schedule `assess-rfa-all` once AF3 completes.
-- **Results dashboard** – fetch latest AF3 rankings, explore sortable tables, and inspect ipTM vs RMSD scatter plots with interactive highlighting.
+- **Results dashboard** – fetch AF3 rankings or BoltzGen metric CSVs, explore sortable tables, and inspect ipTM vs RMSD scatter plots with interactive highlighting.
 - **PyMOL automation** – generate hotspot bundles and top-binder galleries (local or remote `pymol-remote` modes supported).
 - **Export utilities** – drive `export_files.py` directly from the UI to create FASTA/CSV/Excel order packets.
 - **Cluster sync** – rsync assessment outputs back from the HPC and rehydrate the UI for post-run analysis.
@@ -116,6 +116,13 @@ Environment overrides:
 ssh hpc3.rcic.uci.edu -MNf
   ```
 
+### How to completely remove SSH control master
+If you need to reset the control master (e.g. after a network change), run:
+```bash
+cd ~/.ssh
+rm cm-initbinder-*
+```
+
   All subsequent `ssh`/`rsync` calls from the UI reuse this connection automatically.
 - **Password-based logins** – if you cannot use keys, rely on the control master above so you only enter your password once per session. Tools like `sshpass` are discouraged; prefer SSH keys or control sockets.
 - **Conda environment** – set `cluster.conda_activate` (e.g. `"source ~/.bashrc && conda activate takashi"`). Every remote Python command and assessment job prepends this snippet so the correct environment is active.
@@ -164,8 +171,8 @@ pyright webapp
 
 1. **Target setup** – Enter PDB ID + antigen URL, click *Queue Pipeline*. Watch logs for `init-target`, `decide-scope`, and `prep-target` completion. Once done, PyMOL hotspots become available.
 2. **Design submission** – Paste epitope arms (`<Epitope>@<Variant>`), adjust counts, set run label, and submit. The backend writes/patches the launcher, syncs to the cluster, and executes via SSH.
-3. **Monitor runs** – Use SLURM tools externally or wait until results land. When ready, *Sync from cluster* and *Refresh* to pull the latest AF3 ranking TSV.
-4. **Analyze** – Sort/filter the rankings table, click designs to highlight scatter points, and review metadata (epitope, PyMOL script path, etc.).
+3. **Monitor runs** – Use SLURM tools externally or wait until results land. When ready, choose the result source (AF3 vs. BoltzGen), click the matching sync button (*Download assessments* or *Sync BoltzGen results*), then *Refresh* to pull the latest files.
+4. **Analyze** – Sort/filter the table, click designs to highlight scatter points, and review metadata (epitope, PyMOL script path, CSV columns, etc.). When viewing BoltzGen metrics the scatter defaults to `design_to_target_iptm` vs. `filter_rmsd`.
 5. **PyMOL review** – Launch hotspot bundles or top binders (96 by default, adjustable via Export Top N).
 6. **Export** – Set FASTA/CSV options (codon host, GC target, prefix/suffix) and generate full ordering packets.
 
@@ -179,6 +186,9 @@ pyright webapp
 | `GET` | `/api/jobs/{id}` | Retrieve latest job logs/status. |
 | `GET` | `/api/targets/{pdb}/alignment` | Sequence alignment summary from `target.yaml`. |
 | `GET` | `/api/targets/{pdb}/rankings` | Load parsed AF3 rankings TSV. |
+| `GET` | `/api/targets/{pdb}/boltzgen/runs` | List local BoltzGen run/spec directories and CSV availability. |
+| `POST` | `/api/targets/{pdb}/boltzgen/sync` | Rsync BoltzGen outputs from the cluster. |
+| `GET` | `/api/targets/{pdb}/boltzgen/results` | Load BoltzGen `all_designs_metrics.csv` as a ranking payload. |
 | `POST` | `/api/targets/{pdb}/pymol/hotspots` | Build (and optionally launch) hotspot bundle. |
 | `POST` | `/api/targets/{pdb}/pymol/top-binders` | Build Multi-binder PyMOL session from rankings. |
 | `POST` | `/api/targets/{pdb}/sync` | Rsync assessments from cluster to local workspace. |
