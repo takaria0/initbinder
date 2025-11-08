@@ -73,6 +73,7 @@ from .designs import list_design_engines
 from .pipeline import get_target_status
 from .pymol import (
     PyMolLaunchError,
+    launch_boltzgen_top_binders,
     launch_hotspots,
     launch_top_binders,
     launch_dms_library,
@@ -727,13 +728,24 @@ async def api_pymol_hotspots(pdb_id: str, payload: PyMolHotspotRequest) -> PyMol
 
 @app.post("/api/targets/{pdb_id}/pymol/top-binders", response_model=PyMolTopBindersResponse)
 async def api_pymol_top_binders(pdb_id: str, payload: PyMolTopBindersRequest) -> PyMolTopBindersResponse:
+    engine_id = payload.engine_id or "rfantibody"
+    launch = payload.launch and not payload.bundle_only
     try:
-        aggregate_path, launched = launch_top_binders(
-            pdb_id,
-            top_n=payload.top_n,
-            run_label=payload.run_label,
-            launch=payload.launch and not payload.bundle_only,
-        )
+        if engine_id == "boltzgen":
+            aggregate_path, launched = launch_boltzgen_top_binders(
+                pdb_id,
+                top_n=payload.top_n,
+                run_label=payload.run_label,
+                spec_name=payload.spec,
+                launch=launch,
+            )
+        else:
+            aggregate_path, launched = launch_top_binders(
+                pdb_id,
+                top_n=payload.top_n,
+                run_label=payload.run_label,
+                launch=launch,
+            )
     except PyMolLaunchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return PyMolTopBindersResponse(

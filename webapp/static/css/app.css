@@ -900,6 +900,12 @@ section {
   align-items: center;
 }
 
+.scatter-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
 .scatter-grid {
   display: grid;
   grid-template-columns: 600px 120px;
@@ -1107,6 +1113,12 @@ button.ghost {
 
 button.ghost:hover:not(:disabled) {
   background: rgba(148, 163, 184, 0.16);
+}
+
+.scatter-actions button.ghost {
+  border-color: var(--color-border);
+  border-radius: 8px;
+  padding: 8px 16px;
 }
 
 .preset-strip {

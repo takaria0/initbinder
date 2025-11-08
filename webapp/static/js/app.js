@@ -295,6 +295,7 @@ const state = {
   selectedJobId: null,
   runHistory: {},
   boltzRunHistory: {},
+  boltzActiveSpec: null,
   jobRefreshTimer: null,
   presets: [],
   activePresetId: null,
@@ -427,6 +428,7 @@ const el = {
   scatterThresholdYLabel: document.querySelector('#scatter-threshold-y-label'),
   scatterThresholdCount: document.querySelector('#scatter-threshold-count'),
   scatterLegend: document.querySelector('#scatter-legend'),
+  scatterRefresh: document.querySelector('#scatter-refresh'),
   plotContainer: document.querySelector('#plot-container'),
   exportOpen: document.querySelector('#export-open'),
   exportModal: document.querySelector('#export-modal'),
@@ -587,6 +589,75 @@ function getActiveScatterAxes() {
   const x = getScatterFieldConfig(axes.x) ? axes.x : 'rmsd_diego';
   const y = getScatterFieldConfig(axes.y) ? axes.y : 'iptm';
   return { x, y };
+}
+
+function coerceScatterNumber(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : Number.NaN;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return Number.NaN;
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+  return Number.NaN;
+}
+
+function buildScatterPointsFromRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => {
+      if (!row || typeof row !== 'object') return null;
+      const iptm = coerceScatterNumber(row.iptm);
+      const rmsd = coerceScatterNumber(row.rmsd_diego);
+      const ipsae = coerceScatterNumber(row.ipsae_min);
+      if (!Number.isFinite(iptm) && !Number.isFinite(rmsd) && !Number.isFinite(ipsae)) {
+        return null;
+      }
+      const hotspot = coerceScatterNumber(row.hotspot_min_distance);
+      const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+      return {
+        design_name: row.design_name || metadata.design_name || '',
+        iptm: Number.isFinite(iptm) ? iptm : null,
+        rmsd_diego: Number.isFinite(rmsd) ? rmsd : null,
+        ipsae_min: Number.isFinite(ipsae) ? ipsae : null,
+        hotspot_min_distance: Number.isFinite(hotspot) ? hotspot : null,
+        metadata,
+      };
+    })
+    .filter(Boolean);
+}
+
+function resolveScatterPoints() {
+  const scatter = state.rankingsResponse?.scatter;
+  if (Array.isArray(scatter) && scatter.length > 0) {
+    return scatter;
+  }
+  return buildScatterPointsFromRows(state.rankings);
+}
+
+function inferBoltzSpecName(payload) {
+  if (!payload) return null;
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const meta = rows[i]?.metadata;
+    if (meta && typeof meta.spec === 'string' && meta.spec.trim()) {
+      return meta.spec.trim();
+    }
+  }
+  const sourcePath = payload.source_path || payload.sourcePath;
+  if (typeof sourcePath === 'string' && sourcePath) {
+    const parts = sourcePath.split(/[\\/]+/).filter(Boolean);
+    const idx = parts.lastIndexOf('final_ranked_designs');
+    if (idx > 0 && idx - 1 < parts.length) {
+      return parts[idx - 1];
+    }
+    if (parts.length >= 3) {
+      return parts[parts.length - 3];
+    }
+  }
+  return null;
 }
 
 function getScatterFieldValue(row, key) {
@@ -2485,9 +2556,13 @@ async function fetchRankings(options = {}) {
   const params = new URLSearchParams();
   if (runLabel) params.append('run_label', runLabel);
   if (limitVal) params.append('limit', String(limitVal));
+  let requestedSpec = null;
   if (source === 'boltzgen') {
     const specValue = el.boltzSpec?.value.trim();
-    if (specValue) params.append('spec', specValue);
+    if (specValue) {
+      params.append('spec', specValue);
+      requestedSpec = specValue;
+    }
   }
 
   if (!silent && el.refreshResultsBtn) {
@@ -2551,6 +2626,15 @@ async function fetchRankings(options = {}) {
     state.selectedDesign = null;
     state.activeRunLabel = payload.run_label || '';
     state.galleryAvailable = Boolean(payload.gallery_path);
+    if (source === 'boltzgen') {
+      const inferred = inferBoltzSpecName(payload) || requestedSpec || null;
+      state.boltzActiveSpec = inferred;
+      if (inferred && el.boltzSpec && el.boltzSpec.value.trim() !== inferred) {
+        el.boltzSpec.value = inferred;
+      }
+    } else {
+      state.boltzActiveSpec = null;
+    }
     updateActiveRunDisplay();
     if (el.resultsRunLabel) {
       el.resultsRunLabel.value = state.activeRunLabel;
@@ -3271,6 +3355,7 @@ function resetResultsPanel(options = {}) {
   state.scatterColorMap = new Map();
   state.selectedDesign = null;
   state.galleryAvailable = false;
+  state.boltzActiveSpec = null;
   state.librarySummary = null;
   if (!preserveRunLabel && el.resultsRunLabel) {
     el.resultsRunLabel.value = '';
@@ -3325,7 +3410,13 @@ function applyResultsEngineCapabilities() {
     el.libraryRun.disabled = isBoltz || !hasRows;
   }
   if (el.pymolTop) {
-    el.pymolTop.disabled = isBoltz || !hasRows;
+    const boltzReady = isBoltz ? Boolean(hasRows && state.rankingsResponse?.source_path) : hasRows;
+    el.pymolTop.disabled = !boltzReady;
+    if (isBoltz) {
+      el.pymolTop.textContent = 'PyMOL BoltzGen bundle';
+    } else {
+      el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
+    }
   }
   if (el.pymolHotspots) {
     el.pymolHotspots.disabled = isBoltz || !hasRows;
@@ -3642,7 +3733,7 @@ async function runRankingsAnalysis() {
 function renderResults() {
   sortRankings();
   renderResultsTable();
-  const scatterPoints = state.rankingsResponse?.scatter || [];
+  const scatterPoints = resolveScatterPoints();
   state.scatterPoints = scatterPoints;
   updateScatterControls();
   computeScatterLayout(scatterPoints);
@@ -3654,8 +3745,14 @@ function renderResults() {
   if (el.exportOpen) el.exportOpen.disabled = !hasRows;
   if (el.libraryRun) el.libraryRun.disabled = !hasRows;
   if (el.pymolTop) {
-    el.pymolTop.disabled = !hasRows;
-    el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
+    const engine = state.rankingsResponse?.engine_id || 'rfantibody';
+    const boltzReady = engine === 'boltzgen' ? Boolean(hasRows && state.rankingsResponse?.source_path) : hasRows;
+    el.pymolTop.disabled = !boltzReady;
+    if (engine === 'boltzgen') {
+      el.pymolTop.textContent = 'PyMOL BoltzGen bundle';
+    } else {
+      el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
+    }
   }
   if (el.pymolMovie) {
     const canRenderMovie = state.galleryAvailable && hasRows;
@@ -3675,6 +3772,41 @@ function renderResults() {
     renderAnalysis();
   }
   renderLibrarySummary(state.librarySummary);
+}
+
+async function refreshScatterPlot() {
+  if (!el.scatterRefresh) return;
+  if (!state.currentPdb) {
+    showAlert('Load results before refreshing the scatter plot.');
+    return;
+  }
+  if (state.rankingsFetching) {
+    showAlert('Results are still loading. Try again in a moment.');
+    return;
+  }
+  const previousLabel = el.scatterRefresh.textContent || 'Refresh scatter';
+  el.scatterRefresh.disabled = true;
+  el.scatterRefresh.textContent = 'Refreshing…';
+  try {
+    const initialPoints = resolveScatterPoints();
+    if (!state.rankingsResponse || initialPoints.length === 0) {
+      await fetchRankings({ silent: true });
+    }
+    const scatterPoints = resolveScatterPoints();
+    if (!scatterPoints.length) {
+      throw new Error('No scatter metrics are available for this run.');
+    }
+    state.scatterPoints = scatterPoints;
+    computeScatterLayout(scatterPoints);
+    renderScatter();
+    if (el.plotContainer) el.plotContainer.hidden = state.scatterLayout.length === 0;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    showAlert(message);
+  } finally {
+    el.scatterRefresh.disabled = false;
+    el.scatterRefresh.textContent = previousLabel;
+  }
 }
 
 function renderLibrarySummary(summary) {
@@ -4389,20 +4521,30 @@ async function launchTopBinders() {
     showAlert('Load rankings before launching PyMOL.');
     return;
   }
-  if (!ensureAf3Results('PyMOL launcher')) {
+  const engineId = state.rankingsResponse.engine_id || 'rfantibody';
+  if (engineId !== 'boltzgen' && !ensureAf3Results('PyMOL launcher')) {
     return;
   }
   el.pymolTop.disabled = true;
   try {
+    const topN = Number(el.exportTopN?.value || 0) || 96;
+    const payload = {
+      run_label: state.rankingsResponse.run_label,
+      top_n: topN,
+      launch: true,
+      bundle_only: false,
+      engine_id: engineId,
+    };
+    if (engineId === 'boltzgen') {
+      const specName = state.boltzActiveSpec || el.boltzSpec?.value.trim() || '';
+      if (specName) {
+        payload.spec = specName;
+      }
+    }
     const res = await fetch(`/api/targets/${state.currentPdb}/pymol/top-binders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        run_label: state.rankingsResponse.run_label,
-        top_n: Number(el.exportTopN.value) || 96,
-        launch: true,
-        bundle_only: false,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -4836,6 +4978,11 @@ function initEventHandlers() {
     };
     el.scatterThresholdY.addEventListener('change', handler);
     el.scatterThresholdY.addEventListener('input', handler);
+  }
+  if (el.scatterRefresh) {
+    el.scatterRefresh.addEventListener('click', () => {
+      refreshScatterPlot();
+    });
   }
   registerScatterClick();
   handleTableHeaderClicks();

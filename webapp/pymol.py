@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,13 @@ from typing import Dict, List, Optional
 
 from .config import load_config
 from .dms import DMSLibraryMetadata, DMSResidueSummary, build_residue_selection
-from .result_collectors import RankingPayload, RankingRowData, RankingsNotFoundError, load_rankings
+from .result_collectors import (
+    RankingPayload,
+    RankingRowData,
+    RankingsNotFoundError,
+    load_boltzgen_metrics,
+    load_rankings,
+)
 
 try:
     from scripts.pymol_utils import export_design_bundle, export_hotspot_bundle
@@ -36,6 +43,19 @@ GALLERY_OBJECTS = [
     "binder_gallery_rfdiff",
     "epi_mask_gallery",
     "epi_hot_gallery",
+]
+
+BOLTZ_PYMOL_COLORS = [
+    "tv_blue",
+    "tv_red",
+    "tv_green",
+    "tv_orange",
+    "deepteal",
+    "violet",
+    "marine",
+    "forest",
+    "wheat",
+    "density",
 ]
 
 
@@ -229,6 +249,67 @@ def _write_aggregate_pml(bundles: List[Path], output: Path) -> None:
     output.write_text("\n".join(lines) + "\n")
 
 
+def _sanitize_design_token(text: str) -> str:
+    clean = re.sub(r"[^0-9A-Za-z._-]+", "_", (text or "").strip())
+    clean = clean.strip("._-")
+    if not clean:
+        return "design"
+    if len(clean) > 60:
+        return clean[:60]
+    return clean
+
+
+def _resolve_boltz_design_path(spec_dir: Path, metadata: Dict[str, object]) -> Optional[Path]:
+    if not metadata:
+        return None
+    name_candidates: list[str] = []
+    seen: set[str] = set()
+    for key in ("file_name", "design_file", "binder_file", "cif_path", "id", "design_name"):
+        value = metadata.get(key)
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        for variant in (text, f"{text}.cif"):
+            normalized = Path(variant).name
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            name_candidates.append(normalized)
+    if not name_candidates:
+        return None
+
+    rank_value = metadata.get("final_rank") or metadata.get("rank")
+    prefixes: list[str] = []
+    try:
+        rank_int = int(float(rank_value))
+    except (TypeError, ValueError):
+        rank_int = None
+    if rank_int is not None:
+        prefixes.extend([f"rank{rank_int}", f"rank{rank_int:02d}"])
+
+    search_roots = [
+        spec_dir / "final_ranked_designs" / "final_30_designs",
+        spec_dir / "final_ranked_designs" / "final_30_designs" / "before_refolding",
+        spec_dir / "intermediate_designs",
+        spec_dir / "intermediate_designs_inverse_folded",
+        spec_dir,
+    ]
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for name in name_candidates:
+            candidates = [root / name]
+            if prefixes:
+                candidates = [root / f"{prefix}_{name}" for prefix in prefixes] + candidates
+            for candidate in candidates:
+                if candidate.exists():
+                    return candidate
+    return None
+
+
 def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str] = None,
                        launch: bool = True) -> tuple[Optional[Path], bool]:
     _require_pymol_utils()
@@ -277,6 +358,107 @@ def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str]
         _launch_pymol(aggregate_path)
         launched = True
     return aggregate_path, launched
+
+
+def launch_boltzgen_top_binders(
+    pdb_id: str,
+    *,
+    top_n: int = 30,
+    run_label: Optional[str] = None,
+    spec_name: Optional[str] = None,
+    launch: bool = True,
+) -> tuple[Optional[Path], bool]:
+    _ensure_env()
+    try:
+        payload = load_boltzgen_metrics(
+            pdb_id,
+            run_label=run_label,
+            spec_name=spec_name,
+            limit=top_n,
+        )
+    except FileNotFoundError as exc:
+        raise PyMolLaunchError(str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise PyMolLaunchError(str(exc)) from exc
+
+    rows = _collect_top_rows(payload, top_n)
+    if not rows:
+        raise PyMolLaunchError("No BoltzGen designs available for visualization.")
+
+    spec_dir = payload.source_path.parent.parent
+    dest_root = _cache_dir("pymol_boltzgen_top")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_token = (payload.run_label or "latest").replace(" ", "_")
+    spec_token = spec_dir.name.replace(" ", "_")
+    session_dir = dest_root / f"{pdb_id.upper()}_{run_token}_{spec_token}_{timestamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    script_lines = [
+        "reinitialize",
+        "bg_color white",
+        "set ray_opaque_background, off",
+        "set cartoon_fancy_helices, on",
+        "set cartoon_smooth_loops, on",
+    ]
+
+    target_source = spec_dir / "full_target.cif"
+    target_loaded = False
+    if target_source.exists():
+        target_dest = session_dir / target_source.name
+        shutil.copy2(target_source, target_dest)
+        script_lines.extend(
+            [
+                f"load {target_dest.name}, target",
+                "hide everything, target",
+                "show cartoon, target",
+                "color lightgrey, target",
+                "set cartoon_transparency, 0.35, target",
+            ]
+        )
+        target_loaded = True
+
+    loaded = 0
+    for idx, row in enumerate(rows, start=1):
+        metadata = row.metadata or {}
+        design_path = _resolve_boltz_design_path(spec_dir, metadata)
+        if not design_path:
+            continue
+        suffix = design_path.suffix or ".cif"
+        safe_name = _sanitize_design_token(row.design_name or design_path.stem)
+        dest_name = f"{idx:02d}_{safe_name}{suffix}"
+        dest_path = session_dir / dest_name
+        shutil.copy2(design_path, dest_path)
+        obj_name = f"binder_{idx:02d}"
+        color = BOLTZ_PYMOL_COLORS[(idx - 1) % len(BOLTZ_PYMOL_COLORS)]
+        script_lines.extend(
+            [
+                f"load {dest_path.name}, {obj_name}",
+                f"hide everything, {obj_name}",
+                f"show cartoon, {obj_name}",
+                f"color {color}, {obj_name}",
+            ]
+        )
+        if target_loaded:
+            script_lines.append(f"hide everything, {obj_name} and chain A")
+        script_lines.append(f"set cartoon_transparency, 0.05, {obj_name}")
+        loaded += 1
+
+    if not loaded:
+        raise PyMolLaunchError(
+            "BoltzGen design CIFs not found; sync the run and ensure final_ranked_designs is complete."
+        )
+
+    script_lines.append("zoom")
+    script_lines.append("orient")
+
+    script_path = session_dir / "boltzgen_top_binders.pml"
+    script_path.write_text("\n".join(script_lines) + "\n", encoding="utf-8")
+
+    launched = False
+    if launch:
+        _launch_pymol(script_path)
+        launched = True
+    return script_path, launched
 
 
 def render_gallery_movie(
@@ -588,6 +770,7 @@ def launch_dms_library(
 __all__ = [
     "launch_hotspots",
     "launch_top_binders",
+    "launch_boltzgen_top_binders",
     "render_gallery_movie",
     "launch_dms_library",
     "PyMolLaunchError",

@@ -460,6 +460,8 @@ class PyMolTopBindersRequest(BaseModel):
     top_n: int = Field(96, ge=1, le=500)
     launch: bool = Field(True)
     bundle_only: bool = Field(False)
+    engine_id: Literal["rfantibody", "boltzgen"] = "rfantibody"
+    spec: Optional[str] = None
 
 
 class PyMolTopBindersResponse(BaseModel):
