@@ -19,14 +19,14 @@ cluster:
   assess_cpus: 1
   debug: false
   boltzgen:
-    conda_activate: "conda activate boltzgen"
+    conda_activate: "conda activate bg"
     partition: gpu
     account: ccl_lab_gpu
-    gpus: A100:1
+    gpus: A30:1
     cpus: 8
     mem_gb: 64
     time_hours: 12
-    protocol: protein-anything
+    protocol: nanobody-anything
     cache_dir: null
     output_root: null
     extra_run_args: []
