@@ -28,6 +28,7 @@ class BoltzGenClusterConfig:
     output_root: Optional[Path] = None
     protocol: Optional[str] = None
     extra_run_args: List[str] = field(default_factory=list)
+    nanobody_scaffolds: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if isinstance(self.cache_dir, str) and self.cache_dir:
@@ -46,6 +47,12 @@ class BoltzGenClusterConfig:
             self.extra_run_args = [str(arg) for arg in self.extra_run_args]
         else:
             self.extra_run_args = []
+        if isinstance(self.nanobody_scaffolds, str):
+            self.nanobody_scaffolds = [self.nanobody_scaffolds]
+        elif isinstance(self.nanobody_scaffolds, list):
+            self.nanobody_scaffolds = [str(entry) for entry in self.nanobody_scaffolds if str(entry).strip()]
+        else:
+            self.nanobody_scaffolds = []
 
 
 @dataclass(slots=True)

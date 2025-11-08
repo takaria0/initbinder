@@ -1114,6 +1114,7 @@ class BoltzGenEngine(DesignEngine):
 
         spec_filename = "full_target.yaml"
         spec_path = spec_root / spec_filename
+        scaffold_paths = self._resolve_nanobody_scaffolds()
         info = self._write_spec(
             workspace=workspace,
             spec_path=spec_path,
@@ -1124,6 +1125,7 @@ class BoltzGenEngine(DesignEngine):
             hotspot_keys=[],
             epitope_residues=[],
             num_designs=num_designs,
+            scaffold_paths=scaffold_paths,
         )
         return [info]
 
@@ -1133,6 +1135,17 @@ class BoltzGenEngine(DesignEngine):
         if value:
             value = str(value).strip()
         return value or "protein-anything"
+
+    @staticmethod
+    def _resolve_nanobody_scaffolds() -> List[str]:
+        cfg = load_config()
+        bg_cfg = getattr(cfg.cluster, "boltzgen", None)
+        if not bg_cfg:
+            return []
+        candidates = getattr(bg_cfg, "nanobody_scaffolds", None) or []
+        if not isinstance(candidates, list):
+            return []
+        return [str(entry).strip() for entry in candidates if str(entry).strip()]
 
     @staticmethod
     def _resolve_remote_workspace_path(
@@ -1228,6 +1241,7 @@ class BoltzGenEngine(DesignEngine):
         hotspot_keys: List[str],
         epitope_residues: List[str],
         num_designs: int,
+        scaffold_paths: Optional[List[str]] = None,
     ) -> BoltzGenSpecInfo:
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         hotspot_map = self._parse_hotspot_map(hotspot_keys)
@@ -1256,17 +1270,21 @@ class BoltzGenEngine(DesignEngine):
         if binding_entries:
             file_block["binding_types"] = binding_entries
 
-        spec_data: Dict[str, object] = {
-            "entities": [
-                {"file": file_block},
+        entities: List[Dict[str, object]] = [{"file": file_block}]
+        scaffold_entries = [str(path).strip() for path in (scaffold_paths or []) if str(path).strip()]
+        if scaffold_entries:
+            entities.append({"file": {"path": scaffold_entries}})
+        else:
+            entities.append(
                 {
                     "protein": {
                         "id": "DES",
                         "sequence": f"{self.DEFAULT_SEQUENCE_MIN}..{self.DEFAULT_SEQUENCE_MAX}",
                     }
-                },
-            ],
-        }
+                }
+            )
+
+        spec_data: Dict[str, object] = {"entities": entities}
 
         spec_path.write_text(yaml.safe_dump(spec_data, sort_keys=False))
         rel_spec = spec_path.relative_to(workspace)
