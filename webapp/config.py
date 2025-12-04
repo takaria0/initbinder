@@ -78,6 +78,7 @@ class ClusterConfig:
     ensure_master: bool = True
     conda_activate: Optional[str] = None
     debug: bool = False
+    enable_remote_assessment_listing: bool = False
     boltzgen: BoltzGenClusterConfig = field(default_factory=BoltzGenClusterConfig)
 
     def as_ssh_target(self) -> Optional[str]:
@@ -103,6 +104,12 @@ class ClusterConfig:
                 self.control_persist = int(self.control_persist)
             except ValueError:
                 pass
+        if isinstance(self.enable_remote_assessment_listing, str):
+            self.enable_remote_assessment_listing = self.enable_remote_assessment_listing.lower() in {
+                "1",
+                "true",
+                "yes",
+            }
         if isinstance(self.boltzgen, dict):
             self.boltzgen = BoltzGenClusterConfig(**self.boltzgen)
 
@@ -219,6 +226,12 @@ def load_config() -> WebAppConfig:
         env_overrides.setdefault("cluster", {})["control_persist"] = control_persist
     if ensure_master := os.getenv("INITBINDER_SSH_ENSURE_MASTER"):
         env_overrides.setdefault("cluster", {})["ensure_master"] = ensure_master.lower() in {"1", "true", "yes"}
+    if enable_remote := os.getenv("INITBINDER_ENABLE_REMOTE_ASSESSMENTS"):
+        env_overrides.setdefault("cluster", {})["enable_remote_assessment_listing"] = enable_remote.lower() in {
+            "1",
+            "true",
+            "yes",
+        }
     if conda_activate := os.getenv("INITBINDER_CONDA_ACTIVATE"):
         env_overrides.setdefault("cluster", {})["conda_activate"] = conda_activate
 

@@ -1486,7 +1486,6 @@ function selectPreset(preset) {
   setCurrentPdb(preset.pdb_id, { loadAlignment: true });
   touchPreset(preset);
   renderPresets();
-  fetchRankings({ silent: true }).catch(() => {});
 }
 
 async function loadPresets() {
@@ -1524,12 +1523,6 @@ function stopRankingsPolling() {
 
 function scheduleRankingsPolling() {
   stopRankingsPolling();
-  if (!state.currentPdb) return;
-  if (getResultsSource() === 'boltzgen') return;
-  state.rankingsPollTimer = setInterval(() => {
-    if (!state.currentPdb || state.rankingsFetching) return;
-    fetchRankings({ silent: true }).catch(() => {});
-  }, 8000);
 }
 
 function updateCatalogStatus(message, color = null) {
@@ -1885,8 +1878,12 @@ function setCurrentPdb(pdbId, options = {}) {
   const upper = pdbId.toUpperCase();
   const changed = state.currentPdb !== upper;
   state.currentPdb = upper;
+  state.targetStatus = null;
   if (options.updateInput !== false && el.pdbInput) {
     el.pdbInput.value = upper;
+  }
+  if (el.pymolHotspots) {
+    el.pymolHotspots.disabled = true;
   }
   state.activeRunLabel = '';
   if (changed || options.forceReset) {
@@ -1899,7 +1896,9 @@ function setCurrentPdb(pdbId, options = {}) {
   renderRunHistory(upper);
   renderBoltzRunHistory(upper);
   fetchRunHistory(upper);
-  fetchBoltzRunHistory(upper);
+  if (getResultsSource() === 'boltzgen') {
+    fetchBoltzRunHistory(upper);
+  }
   if (options.loadAlignment) {
     loadAlignment(upper);
   }
@@ -1962,7 +1961,9 @@ async function fetchJobList() {
     renderJobList();
     if (state.currentPdb) {
       fetchRunHistory(state.currentPdb);
-      fetchBoltzRunHistory(state.currentPdb);
+      if (getResultsSource() === 'boltzgen') {
+        fetchBoltzRunHistory(state.currentPdb);
+      }
     }
   } catch (err) {
     console.error('Failed to fetch jobs', err);
@@ -2087,25 +2088,18 @@ function renderRunHistory(pdbId) {
       btn.title = infoParts.join(' · ');
 
       btn.append(labelSpan, originSpan);
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         state.activeRunLabel = run.run_label || '';
         updateActiveRunDisplay();
         if (el.resultsRunLabel) {
           el.resultsRunLabel.value = run.run_label || '';
         }
         highlightRunChip(run.run_label);
-        try {
-          if (run.available_local) {
-            await fetchRankings();
-          } else if (run.available_remote) {
-            await syncResultsFromCluster({ runLabel: run.run_label, disableButton: false });
-            await fetchRankings();
-          } else {
-            showAlert('No rankings available yet for this run.');
-          }
-          scheduleRankingsPolling();
-        } catch (err) {
-          console.warn('[run-history] action failed', err);
+        if (!run.available_local) {
+          const originHint = run.available_remote
+            ? 'Use “Download assessments” to copy this run locally before reloading.'
+            : 'No rankings available for this run yet.';
+          showAlert(originHint);
         }
       });
       frag.appendChild(btn);
@@ -2659,11 +2653,7 @@ async function fetchRankings(options = {}) {
     }
     renderPresets();
     applyResultsEngineCapabilities();
-    if (source === 'boltzgen') {
-      stopRankingsPolling();
-    } else {
-      scheduleRankingsPolling();
-    }
+    stopRankingsPolling();
     renderBoltzRunHistory(state.currentPdb);
   } catch (err) {
     if (!silent) {
@@ -3418,9 +3408,6 @@ function applyResultsEngineCapabilities() {
       el.pymolTop.textContent = state.galleryAvailable && hasRows ? 'Launch PyMOL Gallery' : 'PyMOL top 96';
     }
   }
-  if (el.pymolHotspots) {
-    el.pymolHotspots.disabled = isBoltz || !hasRows;
-  }
   if (el.pymolMovie) {
     el.pymolMovie.disabled = isBoltz || !state.galleryAvailable;
   }
@@ -3790,7 +3777,7 @@ async function refreshScatterPlot() {
   try {
     const initialPoints = resolveScatterPoints();
     if (!state.rankingsResponse || initialPoints.length === 0) {
-      await fetchRankings({ silent: true });
+      throw new Error('Load rankings before refreshing the scatter plot.');
     }
     const scatterPoints = resolveScatterPoints();
     if (!scatterPoints.length) {
@@ -4381,9 +4368,6 @@ function updateJobUI(job) {
       showAlert(alertMsg, false);
       if (state.currentPdb) {
         fetchRunHistory(state.currentPdb);
-        if (state.activeRunLabel) {
-          fetchRankings({ silent: true });
-        }
       }
     } else {
       if (el.syncResultsBtn) el.syncResultsBtn.disabled = false;
@@ -4528,7 +4512,7 @@ async function launchTopBinders() {
   el.pymolTop.disabled = true;
   try {
     const topN = Number(el.exportTopN?.value || 0) || 96;
-    const payload = {
+    const requestPayload = {
       run_label: state.rankingsResponse.run_label,
       top_n: topN,
       launch: true,
@@ -4538,20 +4522,20 @@ async function launchTopBinders() {
     if (engineId === 'boltzgen') {
       const specName = state.boltzActiveSpec || el.boltzSpec?.value.trim() || '';
       if (specName) {
-        payload.spec = specName;
+        requestPayload.spec = specName;
       }
     }
     const res = await fetch(`/api/targets/${state.currentPdb}/pymol/top-binders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(requestPayload),
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.detail || `Failed with ${res.status}`);
     }
-    const payload = await res.json();
-    showAlert(`PyMOL aggregate script: ${payload.bundle_path || 'generated'}`, false);
+    const responsePayload = await res.json();
+    showAlert(`PyMOL aggregate script: ${responsePayload.bundle_path || 'generated'}`, false);
   } catch (err) {
     showAlert(err.message || String(err));
   } finally {
@@ -4890,11 +4874,7 @@ function initEventHandlers() {
     el.resultsSource.addEventListener('change', (event) => {
       setResultsSource(event.target.value || 'af3');
       renderBoltzRunHistory(state.currentPdb);
-      if (getResultsSource() === 'boltzgen') {
-        stopRankingsPolling();
-      } else {
-        scheduleRankingsPolling();
-      }
+      stopRankingsPolling();
     });
   } else {
     setResultsSource(state.resultsSource);
@@ -4902,11 +4882,7 @@ function initEventHandlers() {
   if (el.syncBoltzResultsBtn) {
     el.syncBoltzResultsBtn.addEventListener('click', () => syncBoltzResultsFromCluster({}));
   }
-  if (el.resultsLimit) {
-    el.resultsLimit.addEventListener('change', () => {
-      fetchRankings({ silent: false });
-    });
-  }
+  // resultsLimit is read when reload is requested.
   if (el.resultsTruncateToggle) {
     el.resultsTruncateToggle.addEventListener('click', () => {
       const total = state.rankingsTotal || state.rankings.length;

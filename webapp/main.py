@@ -523,12 +523,14 @@ async def api_target_run_history(pdb_id: str) -> list[AssessmentRunSummary]:
     local_runs = list_assessment_runs(pdb_id)
     runs_by_label: dict[str, AssessmentRunSummary] = {run.run_label: run for run in local_runs}
 
-    client = ClusterClient()
-    try:
-        remote_entries = await run_in_threadpool(client.list_remote_assessments, pdb_id)
-    except Exception as exc:  # pragma: no cover - cluster access may fail
-        print(f"[runs] warn: unable to list remote assessments for {pdb_id}: {exc}")
-        remote_entries = []
+    remote_entries: list[dict[str, object]] = []
+    if cfg.cluster.enable_remote_assessment_listing:
+        client = ClusterClient()
+        try:
+            remote_entries = await run_in_threadpool(client.list_remote_assessments, pdb_id)
+        except Exception as exc:  # pragma: no cover - cluster access may fail
+            print(f"[runs] warn: unable to list remote assessments for {pdb_id}: {exc}")
+            remote_entries = []
 
     for entry in remote_entries:
         label = str(entry.get("run_label"))
