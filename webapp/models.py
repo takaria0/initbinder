@@ -178,6 +178,11 @@ class BulkDesignSettings(BaseModel):
     run_assess: bool = True
     rfdiff_crop_radius: Optional[float] = Field(None, ge=0.0)
     run_label_prefix: Optional[str] = Field(None, max_length=80)
+    boltz_binding: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Optional BoltzGen binding_types override, e.g. A:142,151,229;B:10..30",
+    )
 
 
 class BulkPreviewRequest(BaseModel):
@@ -251,6 +256,11 @@ class DesignRunRequest(BaseModel):
         description=(
             "Optional crop radius (Å) for RFdiffusion; when omitted the full prepared target is used."
         ),
+    )
+    boltz_binding: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Optional chain:residue list for BoltzGen binding_types (e.g., A:142,151,229;B:10..30)",
     )
 
 

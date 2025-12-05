@@ -17,6 +17,7 @@
             <nav class="page-nav">
               <a href="/target-generation">Open target generation workspace</a>
               <a href="/antigen-dms">Antigen DMS library</a>
+              <a href="/bulk">Bulk processing</a>
             </nav>
           </div>
           <label class="debug-toggle">
@@ -66,79 +67,11 @@
             <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>
             <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
           </div>
-          <div class="flex-row" style="margin-top: 16px;">
-            <button type="submit" id="target-submit">Run again</button>
-            <span class="badge" id="target-status-badge" hidden>Idle</span>
-          </div>
-        </form>
-      </section>
-
-      <section id="bulk-section">
-        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
-          <h2>Bulk Processing</h2>
-          <span class="badge" id="bulk-status" hidden>Idle</span>
+        <div class="flex-row" style="margin-top: 16px;">
+          <button type="submit" id="target-submit">Run again</button>
+          <span class="badge" id="target-status-badge" hidden>Idle</span>
         </div>
-        <p class="help-text" style="margin-top: 0;">Paste a CSV with <code>Preset name</code> and <code>Antigen URL</code> columns (optional <code>PDB ID</code>). Design settings reuse the current Design Run Configuration.</p>
-        <div class="form-row">
-          <label>CSV rows
-            <textarea id="bulk-csv-input" rows="4" placeholder="Preset name,Antigen URL[,PDB ID]&#10;Example Preset,https://vendor/item,6M17"></textarea>
-          </label>
-        </div>
-        <div class="form-row">
-          <label>Number of epitopes (optional override)
-            <input type="number" id="bulk-epitopes" min="1" max="32" placeholder="leave blank to use target default">
-          </label>
-          <label>Epitope guidance (optional)
-            <textarea id="bulk-epitope-prompt" rows="2" placeholder="Guidance forwarded to decide-scope for this batch."></textarea>
-          </label>
-        </div>
-        <div class="form-row">
-          <label class="checkbox-inline"><input type="checkbox" id="bulk-launch-pymol" checked> Launch PyMOL hotspots per target</label>
-          <label class="checkbox-inline"><input type="checkbox" id="bulk-export-insights" checked> Export insights + alignment CSV</label>
-          <label class="checkbox-inline"><input type="checkbox" id="bulk-export-designs" checked> Export design configs</label>
-          <label class="checkbox-inline"><input type="checkbox" id="bulk-submit-designs"> Queue design runs sequentially</label>
-          <label class="checkbox-inline"><input type="checkbox" id="bulk-force-init"> Force init-target</label>
-        </div>
-        <div class="form-row">
-          <label>Design run label prefix
-            <input type="text" id="bulk-run-prefix" placeholder="bulk">
-          </label>
-          <label>Submission throttle (seconds)
-            <input type="number" id="bulk-throttle" step="0.5" min="0" value="3">
-          </label>
-        </div>
-        <p class="help-text">Bulk design exports/imports mirror the current Design Run Configuration above. Update engine, totals, temperature, and other options first.</p>
-        <div class="flex-row" style="gap: 8px; margin-top: 8px;">
-          <button type="button" id="bulk-preview">Preview CSV</button>
-          <button type="button" id="bulk-run" class="secondary">Start bulk run</button>
-        </div>
-        <div id="bulk-preview-panel" class="table-scroll" hidden>
-          <div class="table-toolbar" style="justify-content: space-between;">
-            <div id="bulk-preview-summary" class="badge"></div>
-            <button type="button" id="bulk-preview-refresh" class="ghost">Refresh preview</button>
-          </div>
-          <table id="bulk-preview-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Preset</th>
-                <th>Antigen URL</th>
-                <th>PDB ID</th>
-                <th>Matched preset</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="form-row" style="margin-top: 12px;">
-          <label>Import design configs (CSV)
-            <textarea id="bulk-design-import" rows="3" placeholder="Paste design config CSV to queue design submissions in bulk."></textarea>
-          </label>
-          <div class="flex-row" style="gap: 8px; align-items: flex-end;">
-            <button type="button" id="bulk-import-queue">Queue design submissions</button>
-          </div>
-        </div>
+      </form>
       </section>
 
         <section id="target-insights">
@@ -212,6 +145,12 @@
               <input type="number" id="design-af3-seed" value="1" min="0">
               <span class="help-text" data-engine-help="af3_seed" hidden></span>
             </label>
+          </div>
+          <div class="form-row" id="design-boltz-binding-row" hidden>
+            <label>BoltzGen binding (chain:res list)
+              <input type="text" id="design-boltz-binding" placeholder="e.g. A:142,151,229;B:10..30">
+            </label>
+            <span class="help-text">Optional binding_types override for BoltzGen runs.</span>
           </div>
           <div class="flex-row advanced-row debug-only" data-engine-field-container="rfdiff_crop_radius">
             <label data-engine-field="rfdiff_crop_radius">

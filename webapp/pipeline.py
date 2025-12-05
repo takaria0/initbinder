@@ -171,10 +171,8 @@ def init_decide_prep(
         run_manage_rfa("decide-scope", decide_args, log=_log)
     if run_prep:
         job_store.update(job_id, message="Running prep-target")
-        prep_args = [pdb_id]
-        if force:
-            prep_args.append("--force")
-        run_manage_rfa("prep-target", prep_args, log=_log)
+        # prep-target does not accept --force; init-target already cleared prep when force=True.
+        run_manage_rfa("prep-target", [pdb_id], log=_log)
 
     if num_epitopes is not None:
         try:

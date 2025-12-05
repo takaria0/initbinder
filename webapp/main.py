@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -148,6 +149,56 @@ def _template_path(filename: str) -> Path:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"{filename} not found")
     return path
+
+
+def _snapshot_dir() -> Path:
+    path = Path(cfg.paths.cache_dir or (cfg.paths.workspace_root / "cache")) / "webapp" / "pymol_hotspots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_snapshot_file(name: str) -> Path:
+    base = _snapshot_dir().resolve()
+    rel = Path(name)
+    candidate = (base / rel).resolve()
+    if not str(candidate).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="Invalid snapshot path")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return candidate
+
+
+def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
+    prep_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper() / "prep"
+    meta_path = prep_dir / "epitopes_metadata.json"
+    if not meta_path.exists():
+        return []
+    try:
+        data = json.loads(meta_path.read_text())
+    except Exception:
+        return []
+    epitopes = data.get("epitopes") or []
+    output: list[dict[str, object]] = []
+    for ep in epitopes:
+        if not isinstance(ep, dict):
+            continue
+        name = (ep.get("name") or "").strip()
+        if not name:
+            continue
+        hotspots = [str(h).strip() for h in ep.get("hotspots") or [] if str(h).strip()]
+        mask_residues: list[str] = []
+        mask = ep.get("files", {}).get("mask_json") if isinstance(ep.get("files"), dict) else None
+        if mask:
+            mask_path = prep_dir / mask
+            if mask_path.exists():
+                try:
+                    mask_data = json.loads(mask_path.read_text())
+                    if isinstance(mask_data, list):
+                        mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
+                except Exception:
+                    mask_residues = []
+        output.append({"name": name, "hotspots": hotspots, "mask_residues": mask_residues})
+    return output
 
 
 def _ranking_payload_to_response(payload: RankingPayload) -> RankingResponse:
@@ -432,6 +483,52 @@ async def api_bulk_design_import(payload: BulkDesignImportRequest) -> BulkRunRes
     job_id = submit_bulk_design_import(payload, job_store=store)
     message = "Queued bulk design submissions"
     return BulkRunResponse(job_id=job_id, message=message)
+
+
+@app.get("/api/bulk/file")
+async def api_bulk_file(name: str) -> FileResponse:
+    base = Path(cfg.log_dir) / "webapp" / "bulk"
+    safe_name = Path(name).name
+    candidate = (base / safe_name).resolve()
+    if not str(candidate).startswith(str(base.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(candidate, filename=candidate.name)
+
+
+@app.get("/api/pymol/snapshot")
+async def api_pymol_snapshot(name: str) -> FileResponse:
+    path = _resolve_snapshot_file(name)
+    return FileResponse(path, filename=path.name, media_type="image/png")
+
+
+@app.get("/api/pymol/snapshots/metadata")
+async def api_pymol_snapshot_meta(names: str = Query(..., description="Comma-separated snapshot filenames")) -> list[dict]:
+    items = [n for n in names.split(",") if n.strip()]
+    results: list[dict] = []
+    for name in items:
+        rel = Path(name)
+        path = _resolve_snapshot_file(str(rel))
+        parent = rel.parent.name if rel.parent else ""
+        pdb_id = ""
+        if parent:
+            pdb_id = parent.split("_")[0].upper()
+        if not pdb_id:
+            pdb_id = rel.stem.split("_")[0].upper()
+        filename = path.name
+        epitopes = _load_epitope_meta(pdb_id) if pdb_id else []
+        results.append(
+            {
+                "filename": str(rel),
+                "pdb_id": pdb_id,
+                "url": f"/api/pymol/snapshot?name={rel.as_posix()}",
+                "path": str(path),
+                "created_at": path.stat().st_mtime,
+                "epitopes": epitopes,
+            }
+        )
+    return results
 
 
 @app.get("/api/targets/presets", response_model=TargetPresetListResponse)
@@ -873,6 +970,11 @@ async def target_generation_page() -> FileResponse:
 @app.get("/antigen-dms")
 async def antigen_dms_page() -> FileResponse:
     return FileResponse(_template_path("dms_library.html"))
+
+
+@app.get("/bulk")
+async def bulk_page() -> FileResponse:
+    return FileResponse(_template_path("bulk.html"))
 
 
 @app.exception_handler(AlignmentNotFoundError)

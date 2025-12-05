@@ -214,6 +214,70 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True) -> tuple[Optional[Path]
     return dest, launched
 
 
+def render_hotspot_snapshot(pdb_id: str) -> Path:
+    """Generate a headless PyMOL PNG for hotspot visualization."""
+    _require_pymol_utils()
+    _ensure_env()
+    cfg = load_config()
+    workspace = cfg.paths.workspace_root or cfg.paths.project_root
+    prep_dir = workspace / "targets" / pdb_id.upper() / "prep"
+    if not (prep_dir / "prepared.pdb").exists():
+        raise PyMolLaunchError("prepared.pdb not found; run prep-target first")
+
+    bundle = export_hotspot_bundle(pdb_id)
+    if bundle is None:
+        raise PyMolLaunchError("Unable to generate hotspot bundle; ensure prep-target has been run")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    dest = _cache_dir("pymol_hotspots") / f"{pdb_id.upper()}_{timestamp}"
+    _copy_bundle(Path(bundle), dest)
+
+    base_pml = dest / "hotspot_visualization.pml"
+    if not base_pml.exists():
+        raise PyMolLaunchError("Hotspot visualization script missing in bundle")
+
+    snapshot_path = dest / "hotspot_snapshot.png"
+    render_script = dest / "render_snapshot.pml"
+    render_script.write_text(
+        textwrap.dedent(
+            f"""
+            reinitialize
+            @hotspot_visualization.pml
+            hide everything
+            show surface, target
+            show sticks, hotspots
+            bg_color white
+            set ray_opaque_background, off
+            png {snapshot_path.name}, dpi=300, ray=1
+            quit
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    pymol_cmd = _resolve_pymol_cli()
+    script_rel = os.path.relpath(render_script, start=dest)
+    log_path = dest / "render_snapshot.log"
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write("Running PyMOL hotspot snapshot render\n")
+        log_file.write("Command: " + " ".join([*pymol_cmd, "-cq", script_rel]) + "\n\n")
+        log_file.flush()
+        try:
+            subprocess.run(
+                [*pymol_cmd, "-cq", script_rel],
+                cwd=dest,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise PyMolLaunchError(f"PyMOL snapshot failed; see {log_path}") from exc
+
+    if not snapshot_path.exists():
+        raise PyMolLaunchError(f"Snapshot not produced; check {log_path}")
+    return snapshot_path
+
+
 def _collect_top_rows(payload: RankingPayload, top_n: int) -> List[RankingRowData]:
     rows = payload.rows
     if top_n >= len(rows):

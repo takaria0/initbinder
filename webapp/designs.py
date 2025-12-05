@@ -897,6 +897,7 @@ class BoltzGenEngine(DesignEngine):
             pdb_id=request.pdb_id,
             run_label=run_label,
             num_designs=total_designs,
+            binding_override=request.boltz_binding,
         )
         details = {
             "model_engine": self.metadata.engine_id,
@@ -1093,6 +1094,54 @@ class BoltzGenEngine(DesignEngine):
             message="BoltzGen pipeline submitted to cluster",
         )
 
+    @staticmethod
+    def _load_epitope_metadata(prep_dir: Path) -> List[dict]:
+        meta_path = prep_dir / "epitopes_metadata.json"
+        if not meta_path.exists():
+            return []
+        try:
+            data = json.loads(meta_path.read_text())
+            epitopes = data.get("epitopes") or []
+            output: List[dict] = []
+            for ep in epitopes:
+                name = (ep.get("name") or "").strip()
+                if not name:
+                    continue
+                mask = ep.get("files", {}).get("mask_json")
+                mask_residues: List[str] = []
+                if mask:
+                    mask_path = prep_dir / mask
+                    if mask_path.exists():
+                        try:
+                            mask_data = json.loads(mask_path.read_text())
+                            if isinstance(mask_data, list):
+                                mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
+                        except Exception:
+                            mask_residues = []
+                hotspots = ep.get("hotspots") or []
+                hotspots = [str(h).strip() for h in hotspots if str(h).strip()]
+                output.append(
+                    {
+                        "name": name,
+                        "hotspots": hotspots,
+                        "mask_residues": mask_residues,
+                    }
+                )
+            return output
+        except Exception:
+            return []
+
+    @staticmethod
+    def _distribute_designs(total: int, count: int) -> List[int]:
+        if count <= 0:
+            return []
+        base = total // count
+        remainder = total % count
+        designs = [base + (1 if i < remainder else 0) for i in range(count)]
+        # Ensure no zero-design specs; allow slight over-allocation if total < count.
+        designs = [d if d > 0 else 1 for d in designs]
+        return designs
+
     def _prepare_specs(
         self,
         *,
@@ -1100,6 +1149,7 @@ class BoltzGenEngine(DesignEngine):
         pdb_id: str,
         run_label: str,
         num_designs: int,
+        binding_override: Optional[str] = None,
     ) -> List[BoltzGenSpecInfo]:
         target_dir = workspace / "targets" / pdb_id.upper()
         prep_dir = target_dir / "prep"
@@ -1115,6 +1165,34 @@ class BoltzGenEngine(DesignEngine):
         spec_filename = "full_target.yaml"
         spec_path = spec_root / spec_filename
         scaffold_paths = self._resolve_nanobody_scaffolds()
+
+        binding_override_map: Optional[Dict[str, List[int]]] = None
+        if binding_override:
+            binding_override_map = self._expand_epitope_residues([binding_override])
+        ep_meta = self._load_epitope_metadata(prep_dir) if not binding_override_map else []
+
+        if ep_meta:
+            specs: List[BoltzGenSpecInfo] = []
+            designs_split = self._distribute_designs(num_designs, len(ep_meta))
+            for idx, ep in enumerate(ep_meta):
+                san = RFAntibodyEngine._sanitize_epitope_name(ep["name"])
+                ep_spec = spec_root / f"{san or f'epitope{idx+1}'}.yaml"
+                info = self._write_spec(
+                    workspace=workspace,
+                    spec_path=ep_spec,
+                    prepared_pdb=prepared_pdb,
+                    pdb_id=pdb_id,
+                    run_label=run_label,
+                    arm=ep["name"],
+                    hotspot_keys=ep.get("hotspots") or [],
+                    epitope_residues=ep.get("mask_residues") or [],
+                    num_designs=designs_split[idx],
+                    scaffold_paths=scaffold_paths,
+                    binding_override=None,
+                )
+                specs.append(info)
+            return specs
+
         info = self._write_spec(
             workspace=workspace,
             spec_path=spec_path,
@@ -1126,6 +1204,7 @@ class BoltzGenEngine(DesignEngine):
             epitope_residues=[],
             num_designs=num_designs,
             scaffold_paths=scaffold_paths,
+            binding_override=binding_override_map,
         )
         return [info]
 
@@ -1242,11 +1321,14 @@ class BoltzGenEngine(DesignEngine):
         epitope_residues: List[str],
         num_designs: int,
         scaffold_paths: Optional[List[str]] = None,
+        binding_override: Optional[Dict[str, List[int]]] = None,
     ) -> BoltzGenSpecInfo:
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         hotspot_map = self._parse_hotspot_map(hotspot_keys)
         include_map = self._expand_epitope_residues(epitope_residues)
-        binding_map = hotspot_map if hotspot_map else include_map
+        binding_map = binding_override if binding_override else (hotspot_map if hotspot_map else include_map)
+        if binding_override and not include_map:
+            include_map = binding_override
 
         rel_prepared = os.path.relpath(prepared_pdb, spec_path.parent)
 

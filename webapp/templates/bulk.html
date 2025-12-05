@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>InitBinder Bulk Processing</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="main-content">
+        <header class="page-header">
+          <div>
+            <h1>Bulk Processing</h1>
+            <p>Run init/decide/prep, PyMOL exports, insights CSV, and design config exports across many targets.</p>
+            <nav class="page-nav">
+              <a href="/">Back to dashboard</a>
+              <a href="/target-generation">Target generation</a>
+              <a href="/antigen-dms">Antigen DMS</a>
+            </nav>
+          </div>
+          <div id="bulk-status" class="badge" hidden>Idle</div>
+        </header>
+
+        <section>
+          <h2>Inputs</h2>
+          <p class="help-text" style="margin-top: 0;">Paste TSV/CSV from target_generation (columns such as rank/selection/uniprot/gene/chosen_pdb/antigen_url) or your own CSV with Preset name, Antigen URL, and optional PDB ID.</p>
+          <div class="form-row">
+            <label>CSV / TSV rows
+              <textarea id="bulk-csv-input" rows="6" placeholder="rank	selection	uniprot	gene	...&#10;1	biotin	Q15116	PDCD1	..."></textarea>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Number of epitopes (optional)
+              <input type="number" id="bulk-epitopes" min="1" max="32" placeholder="leave blank">
+            </label>
+            <label>Epitope guidance (optional)
+              <textarea id="bulk-epitope-prompt" rows="2" placeholder="Guidance forwarded to decide-scope."></textarea>
+            </label>
+          </div>
+          <div class="form-row">
+            <label class="checkbox-inline"><input type="checkbox" id="bulk-launch-pymol" checked> Launch PyMOL hotspots</label>
+            <label class="checkbox-inline"><input type="checkbox" id="bulk-export-insights" checked> Export insights + alignment CSV</label>
+            <label class="checkbox-inline"><input type="checkbox" id="bulk-export-designs" checked> Export design configs</label>
+            <label class="checkbox-inline"><input type="checkbox" id="bulk-submit-designs"> Queue design runs</label>
+            <label class="checkbox-inline"><input type="checkbox" id="bulk-force-init"> Force init/decide/prep</label>
+          </div>
+          <div class="form-row">
+            <label>Design engine
+              <select id="design-engine">
+                <option value="rfantibody">RFantibody</option>
+                <option value="boltzgen">BoltzGen</option>
+              </select>
+            </label>
+            <label>Total designs
+              <input type="number" id="design-total" value="90" min="1">
+            </label>
+            <label>Sequences per backbone
+              <input type="number" id="design-num-seq" value="1" min="1">
+            </label>
+            <label>Temperature
+              <input type="number" id="design-temp" value="0.1" step="0.05" min="0" max="1">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Binder chain ID
+              <input type="text" id="design-binder-chain" value="H" maxlength="1">
+            </label>
+            <label>AF3 seed
+              <input type="number" id="design-af3-seed" value="1" min="0">
+            </label>
+            <label class="checkbox-inline" style="align-self: center;"><input type="checkbox" id="design-enable-rfdiff-crop"> RFdiffusion crop</label>
+            <label>Run label prefix
+              <input type="text" id="bulk-run-prefix" value="bulk">
+            </label>
+            <label>Submission throttle (sec)
+              <input type="number" id="bulk-throttle" value="3" step="0.5" min="0">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>BoltzGen binding (chain:res list)
+              <input type="text" id="design-boltz-binding" placeholder="e.g. A:142,151,229;B:10..30">
+            </label>
+            <span class="help-text">Optional binding_types override for BoltzGen runs.</span>
+          </div>
+          <div class="flex-row" style="gap: 8px; margin-top: 8px;">
+            <button type="button" id="bulk-preview">Preview CSV</button>
+            <button type="button" id="bulk-run" class="secondary">Start bulk run</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Import design configs</h2>
+          <p class="help-text" style="margin-top: 0;">Paste a design config CSV (pdb_id, preset_name, run_label, etc.) to queue design submissions in bulk.</p>
+          <div class="form-row">
+            <label>Design config CSV
+              <textarea id="bulk-design-import" rows="3" placeholder="pdb_id,preset_name,run_label,total_designs,..."></textarea>
+            </label>
+          </div>
+          <div class="flex-row" style="gap: 8px;">
+            <button type="button" id="bulk-import-queue">Queue design submissions</button>
+          </div>
+        </section>
+
+        <section id="bulk-preview-panel" class="table-scroll" hidden>
+          <div class="table-toolbar" style="justify-content: space-between;">
+            <div id="bulk-preview-summary" class="badge"></div>
+            <button type="button" id="bulk-preview-refresh" class="ghost">Refresh preview</button>
+          </div>
+          <table id="bulk-preview-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Preset</th>
+                <th>Antigen URL</th>
+                <th>PDB ID</th>
+                <th>Matched preset</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Job log</h2>
+          <div class="alert" id="job-alert" hidden></div>
+          <div class="status-log" id="job-log">Waiting for commands...</div>
+          <div class="badge" id="job-meta" hidden></div>
+        </section>
+
+        <section id="snapshot-section" hidden>
+          <h2>Hotspot snapshots</h2>
+          <div id="snapshot-grid" class="catalog-viewer"></div>
+        </section>
+      </div>
+    </main>
+
+    <script type="module" src="/static/js/bulk.js"></script>
+  </body>
+</html>

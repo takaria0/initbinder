@@ -24,7 +24,7 @@ from .models import (
 )
 from .pipeline import get_target_status, init_decide_prep
 from .preferences import list_presets
-from .pymol import PyMolLaunchError, launch_hotspots
+from .pymol import PyMolLaunchError, launch_hotspots, render_hotspot_snapshot
 
 
 DesignSubmitter = Callable[[DesignRunRequest, JobStore | None], str]
@@ -109,6 +109,108 @@ def _find_index(headers: Sequence[str], candidates: Iterable[str]) -> Optional[i
             if name == cand:
                 return idx
     return None
+
+
+def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
+    if not ep or not isinstance(ep, dict):
+        return None
+    name = (ep.get("name") or "").strip()
+    if not name:
+        return None
+    mask = ep.get("files", {}).get("mask_json")
+    mask_residues: List[str] = []
+    if mask:
+        mask_path = prep_dir / mask
+        if mask_path.exists():
+            try:
+                mask_data = json.loads(mask_path.read_text())
+                if isinstance(mask_data, list):
+                    mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
+            except Exception:
+                mask_residues = []
+    hotspots = ep.get("hotspots") or []
+    hotspots = [str(h).strip() for h in hotspots if str(h).strip()]
+    return {
+        "name": name,
+        "hotspots": hotspots,
+        "mask_residues": mask_residues,
+    }
+
+
+def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
+    cfg = load_config()
+    prep_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper() / "prep"
+    meta_path = prep_dir / "epitopes_metadata.json"
+    if not meta_path.exists():
+        return []
+    try:
+        data = json.loads(meta_path.read_text())
+    except Exception:
+        return []
+    epitopes = data.get("epitopes") or []
+    output = []
+    for ep in epitopes:
+        parsed = _parse_epitope_metadata(ep, prep_dir)
+        if parsed:
+            output.append(parsed)
+    return output
+
+
+def _format_ranges(numbers: Iterable[int]) -> str:
+    seq = sorted(set(int(n) for n in numbers))
+    if not seq:
+        return ""
+    ranges: List[tuple[int, int]] = []
+    start = prev = seq[0]
+    for n in seq[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        ranges.append((start, prev))
+        start = prev = n
+    ranges.append((start, prev))
+    parts = []
+    for lo, hi in ranges:
+        parts.append(str(lo) if lo == hi else f"{lo}..{hi}")
+    return ",".join(parts)
+
+
+def _format_binding_from_ep(ep: dict) -> Optional[str]:
+    hotspots = [h for h in ep.get("hotspots") or [] if h]
+    mask = [m for m in ep.get("mask_residues") or [] if m]
+    source = hotspots or mask
+    if not source:
+        return None
+    mapping: Dict[str, List[int]] = {}
+    for token in source:
+        if not isinstance(token, str):
+            continue
+        token = token.strip()
+        if not token:
+            continue
+        chain = "".join(ch for ch in token if ch.isalpha()).upper()
+        resnum = "".join(ch for ch in token if ch.isdigit())
+        if not chain or not resnum:
+            continue
+        mapping.setdefault(chain, []).append(int(resnum))
+    if not mapping:
+        return None
+    segments = []
+    for chain, residues in sorted(mapping.items()):
+        formatted = _format_ranges(residues)
+        if formatted:
+            segments.append(f"{chain}:{formatted}")
+    return ";".join(segments) if segments else None
+
+
+def _distribute_designs(total: int, count: int) -> List[int]:
+    if count <= 0:
+        return []
+    base = total // count
+    remainder = total % count
+    designs = [base + (1 if i < remainder else 0) for i in range(count)]
+    designs = [d if d > 0 else 1 for d in designs]
+    return designs
 
 
 def _parse_bulk_csv(csv_text: str) -> List[dict]:
@@ -265,6 +367,14 @@ def _output_dir() -> Path:
     return out
 
 
+def _snapshot_root() -> Path:
+    cfg = load_config()
+    cache_root = cfg.paths.cache_dir or (cfg.paths.workspace_root / "cache")
+    path = cache_root / "webapp" / "pymol_hotspots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _open_log(path: Path) -> Callable[[str], None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a", encoding="utf-8")
@@ -378,6 +488,7 @@ def run_bulk_workflow(
     insights_rows: List[Dict[str, object]] = []
     design_rows: List[Dict[str, object]] = []
     design_jobs: List[Dict[str, object]] = []
+    snapshots: List[str] = []
 
     design_settings = request.design_settings
     insights_path = out_dir / f"bulk_insights_{timestamp}.csv"
@@ -396,7 +507,8 @@ def run_bulk_workflow(
         except Exception as exc:  # pragma: no cover - defensive
             log(f"  ! Target status unavailable: {exc}")
 
-        if request.prepare_targets and (not status or not status.get("has_prep")):
+        should_prep = request.prepare_targets and (request.force_init or not status or not status.get("has_prep"))
+        if should_prep:
             log(f"  Running init/decide/prep{' with --force' if request.force_init else ''}…")
             try:
                 init_decide_prep(
@@ -417,11 +529,24 @@ def run_bulk_workflow(
                     status = get_target_status(pdb_id)
                 except Exception:
                     status = None
+        else:
+            log("  Prep already present; skipping init/decide/prep.")
 
         if request.launch_pymol:
             if status and status.get("has_prep"):
                 try:
                     bundle_path, launched = launch_hotspots(pdb_id, launch=True)
+                    try:
+                        log("  Rendering hotspot snapshot…")
+                        snap = render_hotspot_snapshot(pdb_id)
+                        try:
+                            rel_snap = snap.relative_to(_snapshot_root())
+                        except Exception:
+                            rel_snap = snap
+                        snapshots.append(str(rel_snap))
+                        log(f"  Snapshot saved → {snap} (dir: {snap.parent})")
+                    except Exception as exc:
+                        log(f"  ! Snapshot failed: {exc}")
                 except PyMolLaunchError as exc:
                     log(f"  ! PyMOL launch failed: {exc}")
                 else:
@@ -455,11 +580,52 @@ def run_bulk_workflow(
 
         if request.export_designs or request.submit_designs:
             run_label = _default_run_label(design_settings.run_label_prefix, row, idx)
+        if design_settings.model_engine == "boltzgen":
+            epitopes = _load_epitopes_for_target(pdb_id)
+            if epitopes and not design_settings.boltz_binding:
+                splits = _distribute_designs(design_settings.total_designs, len(epitopes))
+                for ep_idx, ep in enumerate(epitopes):
+                    binding_str = _format_binding_from_ep(ep)
+                    design_rows.append({
+                        "pdb_id": pdb_id,
+                        "preset_name": row.preset_name,
+                        "antigen_url": row.antigen_url,
+                        "model_engine": design_settings.model_engine,
+                        "epitope": ep.get("name"),
+                        "total_designs": splits[ep_idx],
+                        "num_sequences": design_settings.num_sequences,
+                        "temperature": design_settings.temperature,
+                        "binder_chain_id": design_settings.binder_chain_id,
+                        "af3_seed": design_settings.af3_seed,
+                        "run_assess": design_settings.run_assess,
+                        "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
+                        "run_label": run_label,
+                        "boltz_binding": binding_str,
+                    })
+            else:
+                design_rows.append({
+                    "pdb_id": pdb_id,
+                    "preset_name": row.preset_name,
+                    "antigen_url": row.antigen_url,
+                    "model_engine": design_settings.model_engine,
+                    "epitope": "",
+                    "total_designs": design_settings.total_designs,
+                    "num_sequences": design_settings.num_sequences,
+                    "temperature": design_settings.temperature,
+                    "binder_chain_id": design_settings.binder_chain_id,
+                    "af3_seed": design_settings.af3_seed,
+                    "run_assess": design_settings.run_assess,
+                    "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
+                    "run_label": run_label,
+                    "boltz_binding": design_settings.boltz_binding,
+                })
+        else:
             design_rows.append({
                 "pdb_id": pdb_id,
                 "preset_name": row.preset_name,
                 "antigen_url": row.antigen_url,
                 "model_engine": design_settings.model_engine,
+                "epitope": "",
                 "total_designs": design_settings.total_designs,
                 "num_sequences": design_settings.num_sequences,
                 "temperature": design_settings.temperature,
@@ -468,6 +634,7 @@ def run_bulk_workflow(
                 "run_assess": design_settings.run_assess,
                 "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
                 "run_label": run_label,
+                "boltz_binding": design_settings.boltz_binding,
             })
             if request.submit_designs:
                 design_request = DesignRunRequest(
@@ -481,6 +648,7 @@ def run_bulk_workflow(
                     run_label=run_label,
                     run_assess=design_settings.run_assess,
                     rfdiff_crop_radius=design_settings.rfdiff_crop_radius,
+                    boltz_binding=design_settings.boltz_binding,
                 )
                 try:
                     design_job_id = design_submitter(design_request, job_store=job_store)
@@ -522,6 +690,7 @@ def run_bulk_workflow(
             "preset_name",
             "antigen_url",
             "model_engine",
+            "epitope",
             "total_designs",
             "num_sequences",
             "temperature",
@@ -530,6 +699,7 @@ def run_bulk_workflow(
             "run_assess",
             "rfdiff_crop_radius",
             "run_label",
+            "boltz_binding",
         ]
         _write_csv(design_path, headers, design_rows)
         log(f"[design-config] saved → {design_path}")
@@ -541,12 +711,18 @@ def run_bulk_workflow(
         details={
             "resolved_rows": len(rows),
             "insights_csv": str(insights_path) if insights_rows else None,
+            "insights_filename": insights_path.name if insights_rows else None,
             "design_config_csv": str(design_path) if design_rows else None,
+            "design_config_filename": design_path.name if design_rows else None,
             "design_jobs": design_jobs,
             "submitted_designs": len(design_jobs),
             "log_path": str(log_path),
+            "snapshots": snapshots,
         },
     )
+    if snapshots:
+        base_dirs = sorted({Path(path).parent for path in snapshots})
+        log(f"[snapshots] saved {len(snapshots)} image(s) under: " + ", ".join(str(p) for p in base_dirs))
 
 
 def _parse_bool(value: object, default: bool = True) -> bool:
@@ -620,6 +796,7 @@ def import_design_configs(
             run_label=run_label,
             run_assess=_parse_bool(row.get("run_assess"), default=True),
             rfdiff_crop_radius=_safe_float(row.get("rfdiff_crop_radius"), 0.0) or None,
+            boltz_binding=_normalize(row.get("boltz_binding")),
         )
         try:
             design_job_id = design_submitter(design_request, job_store=job_store)
