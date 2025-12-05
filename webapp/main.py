@@ -32,6 +32,11 @@ from .models import (
     AssessmentSyncResponse,
     BoltzGenRunListResponse,
     BoltzGenSyncResponse,
+    BulkDesignImportRequest,
+    BulkPreviewRequest,
+    BulkPreviewResponse,
+    BulkRunRequest,
+    BulkRunResponse,
     DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
@@ -71,6 +76,7 @@ from .models import (
 )
 from .designs import list_design_engines
 from .pipeline import get_target_status
+from .bulk import preview_bulk_targets
 from .pymol import (
     PyMolLaunchError,
     launch_boltzgen_top_binders,
@@ -90,6 +96,8 @@ from .result_collectors import (
 from .workflows import (
     submit_assessment_run,
     submit_assessment_sync,
+    submit_bulk_design_import,
+    submit_bulk_run,
     submit_design_run,
     submit_export,
     submit_golden_gate_plan,
@@ -102,6 +110,8 @@ app = FastAPI(title="InitBinder UI API", version="0.1.0")
 cfg = load_config()
 store = get_job_store(cfg.log_dir)
 
+_CATALOG_SUFFIXES = {".tsv", ".csv"}
+
 
 def _catalog_dir() -> Path:
     path = Path(cfg.paths.project_root) / "targets_catalog"
@@ -109,15 +119,28 @@ def _catalog_dir() -> Path:
     return path
 
 
+def _is_catalog_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in _CATALOG_SUFFIXES
+
+
 def _resolve_catalog_file(name: str) -> Path:
     safe_name = Path(name).name
-    if safe_name != name or not safe_name.endswith(".tsv"):
-        raise HTTPException(status_code=400, detail="Invalid TSV file name")
+    suffix = Path(name).suffix.lower()
+    if safe_name != name or suffix not in _CATALOG_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Invalid catalog file name")
     root = _catalog_dir().resolve()
     candidate = (root / safe_name).resolve()
     if not str(candidate).startswith(str(root)):
-        raise HTTPException(status_code=400, detail="Invalid TSV file path")
+        raise HTTPException(status_code=400, detail="Invalid catalog file path")
     return candidate
+
+
+def _catalog_delimiter(path: Path) -> str:
+    return "," if path.suffix.lower() == ".csv" else "\t"
+
+
+def _catalog_media_type(path: Path) -> str:
+    return "text/csv" if path.suffix.lower() == ".csv" else "text/tab-separated-values"
 
 
 def _template_path(filename: str) -> Path:
@@ -320,7 +343,12 @@ async def api_target_generation_catalog() -> TargetCatalogListResponse:
     root = _catalog_dir()
     files: list[TargetCatalogFile] = []
     if root.exists():
-        for path in sorted(root.glob("*.tsv"), key=lambda item: item.stat().st_mtime, reverse=True):
+        catalog_paths = sorted(
+            (path for path in root.iterdir() if _is_catalog_file(path)),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for path in catalog_paths:
             stat = path.stat()
             files.append(
                 TargetCatalogFile(
@@ -345,8 +373,9 @@ async def api_target_generation_preview(
     rows: list[list[str]] = []
     total_rows = 0
 
+    delimiter = _catalog_delimiter(path)
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle, delimiter="\t")
+        reader = csv.reader(handle, delimiter=delimiter)
         for index, row in enumerate(reader):
             if index == 0:
                 headers = [str(cell) for cell in row]
@@ -373,7 +402,7 @@ async def api_target_generation_download(filename: str) -> FileResponse:
     path = _resolve_catalog_file(filename)
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(path, filename=path.name, media_type="text/tab-separated-values")
+    return FileResponse(path, filename=path.name, media_type=_catalog_media_type(path))
 
 
 @app.post("/api/target-generation/run", response_model=TargetGenerationResponse)
@@ -381,6 +410,28 @@ async def api_target_generation_run(payload: TargetGenerationRequest) -> TargetG
     job_id = submit_target_generation(payload, job_store=store)
     message = "Queued target_generation.py run"
     return TargetGenerationResponse(job_id=job_id, message=message)
+
+
+@app.post("/api/bulk/preview", response_model=BulkPreviewResponse)
+async def api_bulk_preview(payload: BulkPreviewRequest) -> BulkPreviewResponse:
+    try:
+        return preview_bulk_targets(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/bulk/run", response_model=BulkRunResponse)
+async def api_bulk_run(payload: BulkRunRequest) -> BulkRunResponse:
+    job_id = submit_bulk_run(payload, job_store=store)
+    message = "Queued bulk processing job"
+    return BulkRunResponse(job_id=job_id, message=message)
+
+
+@app.post("/api/bulk/designs/import", response_model=BulkRunResponse)
+async def api_bulk_design_import(payload: BulkDesignImportRequest) -> BulkRunResponse:
+    job_id = submit_bulk_design_import(payload, job_store=store)
+    message = "Queued bulk design submissions"
+    return BulkRunResponse(job_id=job_id, message=message)
 
 
 @app.get("/api/targets/presets", response_model=TargetPresetListResponse)

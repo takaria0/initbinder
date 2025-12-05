@@ -12,7 +12,7 @@
         <header class="page-header">
           <div>
             <h1>Target Generation</h1>
-            <p>Browse discovery TSVs and launch new target generation jobs.</p>
+            <p>Browse discovery TSV/CSV files and launch new target generation jobs.</p>
           </div>
           <nav class="page-nav">
             <a href="/">&#8592; Back to dashboard</a>
@@ -87,7 +87,7 @@
             <label class="form-span-2">
               Avoid TSVs
               <select id="tg-avoid" multiple size="6"></select>
-              <span class="help-text">Hold Cmd/Ctrl to choose multiple TSVs to avoid duplicates.</span>
+              <span class="help-text">Hold Cmd/Ctrl to choose multiple TSV outputs to avoid duplicates (CSV previews are browse-only).</span>
             </label>
             <div class="form-actions">
               <button type="submit" id="tg-submit">Run target_generation.py</button>

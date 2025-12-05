@@ -112,7 +112,7 @@
     if (!state.files.length) {
       const empty = document.createElement('li');
       empty.className = 'catalog-empty';
-      empty.textContent = 'No TSV files found yet.';
+      empty.textContent = 'No catalog files found yet.';
       catalogList.appendChild(empty);
       downloadBtn.disabled = true;
       return;
@@ -147,7 +147,10 @@
     }
     const currentSelection = new Set(Array.from(avoidSelect.selectedOptions).map((opt) => opt.value));
     avoidSelect.innerHTML = '';
-    state.files.forEach((file) => {
+    const tsvFiles = state.files.filter(
+      (file) => file && typeof file.name === 'string' && file.name.toLowerCase().endsWith('.tsv'),
+    );
+    tsvFiles.forEach((file) => {
       const option = document.createElement('option');
       option.value = file.name;
       option.textContent = file.name;

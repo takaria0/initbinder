@@ -158,6 +158,67 @@ class TargetGenerationResponse(BaseModel):
     message: str
 
 
+class BulkCsvRow(BaseModel):
+    raw_index: int
+    preset_name: str
+    antigen_url: Optional[str] = None
+    pdb_id: Optional[str] = Field(None, max_length=32)
+    resolved_pdb_id: Optional[str] = None
+    preset_id: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+
+class BulkDesignSettings(BaseModel):
+    model_engine: Literal["rfantibody", "boltzgen"] = "rfantibody"
+    total_designs: int = Field(90, ge=1, le=50000)
+    num_sequences: int = Field(1, ge=1, le=32)
+    temperature: float = Field(0.1, ge=0.0, le=1.0)
+    binder_chain_id: Optional[str] = Field(None, min_length=1, max_length=1)
+    af3_seed: int = Field(1, ge=0)
+    run_assess: bool = True
+    rfdiff_crop_radius: Optional[float] = Field(None, ge=0.0)
+    run_label_prefix: Optional[str] = Field(None, max_length=80)
+
+
+class BulkPreviewRequest(BaseModel):
+    csv_text: str = Field(..., min_length=3, max_length=200000)
+    num_epitopes: Optional[int] = Field(None, ge=1, le=32)
+    decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
+
+
+class BulkPreviewResponse(BaseModel):
+    rows: List[BulkCsvRow] = Field(default_factory=list)
+    total_rows: int
+    resolved: int
+    unresolved: int
+    message: str
+
+
+class BulkRunRequest(BaseModel):
+    csv_text: str = Field(..., min_length=3, max_length=200000)
+    num_epitopes: Optional[int] = Field(None, ge=1, le=32)
+    decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
+    launch_pymol: bool = True
+    export_insights: bool = True
+    export_designs: bool = True
+    submit_designs: bool = False
+    prepare_targets: bool = True
+    force_init: bool = False
+    design_settings: BulkDesignSettings = Field(default_factory=BulkDesignSettings)
+    throttle_seconds: float = Field(3.0, ge=0.0, le=300.0)
+    limit: Optional[int] = Field(None, ge=1, le=2000)
+
+
+class BulkDesignImportRequest(BaseModel):
+    csv_text: str = Field(..., min_length=3, max_length=200000)
+    throttle_seconds: float = Field(3.0, ge=0.0, le=300.0)
+
+
+class BulkRunResponse(BaseModel):
+    job_id: str
+    message: str
+
+
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]

@@ -17,6 +17,8 @@ from .hpc import ClusterClient
 from .job_store import JobStatus, JobStore, get_job_store
 from .models import (
     AssessmentRunRequest,
+    BulkDesignImportRequest,
+    BulkRunRequest,
     DesignRunRequest,
     ExportRequest,
     GoldenGateRequest,
@@ -27,6 +29,7 @@ from .pipeline import PipelineError, init_decide_prep
 from .designs import run_design_workflow
 from .exporter import ExportError, run_export
 from .golden_gate import GoldenGateError, run_golden_gate_plan
+from .bulk import import_design_configs, run_bulk_workflow
 
 
 _executor: ThreadPoolExecutor | None = None
@@ -392,6 +395,40 @@ def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
     return job.job_id
 
 
+def submit_bulk_run(request: BulkRunRequest, *, job_store: JobStore | None = None) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    label = "Bulk pipeline"
+    job = store.create_job("bulk_run", label, details={"csv_bytes": len(request.csv_text)})
+
+    def _run() -> None:
+        try:
+            run_bulk_workflow(request, job_store=store, job_id=job.job_id, design_submitter=submit_design_run)
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
+def submit_bulk_design_import(request: BulkDesignImportRequest, *,
+                              job_store: JobStore | None = None) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    job = store.create_job("bulk_design_import", "Bulk design submissions", details={"csv_bytes": len(request.csv_text)})
+
+    def _run() -> None:
+        try:
+            import_design_configs(request, job_store=store, job_id=job.job_id, design_submitter=submit_design_run)
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
 async def wait_for_job(job_id: str, *, job_store: JobStore | None = None,
                        poll_interval: float = 0.5) -> None:
     store = job_store or get_job_store()
@@ -410,5 +447,7 @@ __all__ = [
     "submit_target_generation",
     "submit_assessment_run",
     "submit_assessment_sync",
+    "submit_bulk_run",
+    "submit_bulk_design_import",
     "wait_for_job",
 ]
