@@ -7,6 +7,7 @@
   --color-accent: #2563eb;
   --color-accent-muted: #93c5fd;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --catalog-sidebar-width: 360px;
   font-family: "Inter", system-ui, -apple-system, sans-serif;
 }
 
@@ -87,6 +88,24 @@ main.app-shell {
   display: flex;
   align-items: flex-start;
   gap: 24px;
+}
+
+/* Target generation pages should use the full canvas instead of a narrow column */
+main.app-shell.target-generation-shell {
+  width: 100%;
+  max-width: none;
+}
+
+.target-generation-shell #target-generation-content,
+.target-generation-shell #dms-library-content {
+  flex: 1 1 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+/* Give target catalog sidebar more breathing room on wide screens */
+.target-generation-shell {
+  --catalog-sidebar-width: 520px;
 }
 
 #main-content {
@@ -223,8 +242,16 @@ section {
 
 .catalog-layout {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) 1fr;
   gap: 24px;
+}
+
+.catalog-layout:not(.has-resizer) {
+  grid-template-columns: minmax(320px, 420px) 1fr;
+}
+
+.catalog-layout.has-resizer {
+  grid-template-columns: minmax(260px, var(--catalog-sidebar-width)) 12px minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .catalog-column {
@@ -261,6 +288,35 @@ section {
   color: #475569;
 }
 
+.catalog-resizer {
+  display: none;
+}
+
+.catalog-layout.has-resizer .catalog-resizer {
+  display: block;
+  width: 100%;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #cbd5f5, #94a3b8);
+  cursor: col-resize;
+  position: relative;
+}
+
+.catalog-layout.has-resizer .catalog-resizer::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 4px;
+  height: 48px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.catalog-layout.has-resizer .catalog-resizer.dragging {
+  background: linear-gradient(180deg, #94a3b8, #475569);
+}
+
 .catalog-list {
   list-style: none;
   margin: 0;
@@ -292,6 +348,7 @@ section {
   cursor: pointer;
   color: var(--color-accent);
   font-weight: 600;
+  word-break: break-word;
 }
 
 .catalog-item button.catalog-button:hover,
@@ -426,6 +483,12 @@ section {
 @media (max-width: 960px) {
   .catalog-layout {
     grid-template-columns: 1fr;
+  }
+  .catalog-layout.has-resizer {
+    grid-template-columns: 1fr;
+  }
+  .catalog-layout.has-resizer .catalog-resizer {
+    display: none;
   }
 
   .catalog-controls {
@@ -1115,6 +1178,18 @@ button.ghost:hover:not(:disabled) {
   background: rgba(148, 163, 184, 0.16);
 }
 
+/* Make the catalog copy button blue so it matches primary CTAs */
+#catalog-copy {
+  background: var(--color-accent);
+  color: #fff;
+  border: 1px solid var(--color-accent);
+}
+
+#catalog-copy:hover:not(:disabled) {
+  background: #1e4fd1;
+  color: #fff;
+}
+
 .scatter-actions button.ghost {
   border-color: var(--color-border);
   border-radius: 8px;
@@ -1444,6 +1519,50 @@ body.modal-open {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 16px;
+}
+
+.bulk-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(320px, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.bulk-main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.visualize-btn {
+  background: var(--color-accent, #2563eb);
+  color: #0f172a;
+  border: 1px solid var(--color-accent, #2563eb);
+}
+
+.visualize-btn:hover {
+  background: #1d4ed8;
+  color: #f8fafc;
+}
+
+.visualize-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.job-sidebar {
+  position: sticky;
+  top: 20px;
+  align-self: start;
+}
+
+@media (max-width: 960px) {
+  .bulk-layout {
+    grid-template-columns: 1fr;
+  }
+  .job-sidebar {
+    position: static;
+  }
 }
 
 .form-row {

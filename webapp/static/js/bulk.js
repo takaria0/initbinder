@@ -12,26 +12,18 @@ const el = {
   bulkLaunchPymol: document.querySelector('#bulk-launch-pymol'),
   bulkExportInsights: document.querySelector('#bulk-export-insights'),
   bulkExportDesigns: document.querySelector('#bulk-export-designs'),
-  bulkSubmitDesigns: document.querySelector('#bulk-submit-designs'),
   bulkForceInit: document.querySelector('#bulk-force-init'),
   designEngine: document.querySelector('#design-engine'),
   designTotal: document.querySelector('#design-total'),
-  designNumSeq: document.querySelector('#design-num-seq'),
-  designTemp: document.querySelector('#design-temp'),
-  designBinderChain: document.querySelector('#design-binder-chain'),
-  designAf3Seed: document.querySelector('#design-af3-seed'),
-  designEnableRfdiffCrop: document.querySelector('#design-enable-rfdiff-crop'),
-  designBoltzBinding: document.querySelector('#design-boltz-binding'),
   bulkRunPrefix: document.querySelector('#bulk-run-prefix'),
   bulkThrottle: document.querySelector('#bulk-throttle'),
   bulkPreviewBtn: document.querySelector('#bulk-preview'),
   bulkRunBtn: document.querySelector('#bulk-run'),
-  bulkImportQueue: document.querySelector('#bulk-import-queue'),
-  bulkImportInput: document.querySelector('#bulk-design-import'),
   bulkPreviewPanel: document.querySelector('#bulk-preview-panel'),
   bulkPreviewTable: document.querySelector('#bulk-preview-table tbody'),
   bulkPreviewSummary: document.querySelector('#bulk-preview-summary'),
   bulkPreviewRefresh: document.querySelector('#bulk-preview-refresh'),
+  bulkVisualizeEpitopes: document.querySelector('#bulk-visualize-epitopes'),
   jobAlert: document.querySelector('#job-alert'),
   jobLog: document.querySelector('#job-log'),
   jobMeta: document.querySelector('#job-meta'),
@@ -49,6 +41,12 @@ function setBadge(badge, text, color = null) {
   badge.textContent = text;
   badge.style.background = color || 'rgba(37, 99, 235, 0.12)';
   badge.style.color = color ? '#0f172a' : 'var(--color-accent)';
+}
+
+function setActionButtonsDisabled(disabled) {
+  [el.bulkRunBtn, el.bulkVisualizeEpitopes].forEach((btn) => {
+    if (btn) btn.disabled = disabled;
+  });
 }
 
 function showAlert(message, isError = true) {
@@ -214,25 +212,16 @@ async function previewBulkCsv(options = {}) {
 
 function collectDesignSettings() {
   const settings = {
-    model_engine: (el.designEngine?.value || 'rfantibody').trim() || 'rfantibody',
+    model_engine: (el.designEngine?.value || 'boltzgen').trim() || 'boltzgen',
     total_designs: Number(el.designTotal?.value || 0) || 90,
-    num_sequences: Number(el.designNumSeq?.value || 0) || 1,
-    temperature: Number(el.designTemp?.value || 0.1),
-    binder_chain_id: (el.designBinderChain?.value || '').trim() || null,
-    af3_seed: Number(el.designAf3Seed?.value || 1) || 1,
     run_assess: true,
-    rfdiff_crop_radius: null,
     run_label_prefix: (el.bulkRunPrefix?.value || '').trim() || null,
-    boltz_binding: (el.designBoltzBinding?.value || '').trim() || null,
   };
-  if (!Number.isFinite(settings.temperature)) settings.temperature = 0.1;
-  if (el.designEnableRfdiffCrop && el.designEnableRfdiffCrop.checked) {
-    settings.rfdiff_crop_radius = 14;
-  }
   return settings;
 }
 
-async function startBulkRun() {
+async function startBulkRun(options = {}) {
+  const { submitDesignsOverride = null, triggerEl = null } = options;
   const csvText = el.bulkCsvInput?.value || '';
   if (!csvText.trim()) {
     showAlert('Paste a CSV/TSV payload first.');
@@ -255,13 +244,13 @@ async function startBulkRun() {
     launch_pymol: el.bulkLaunchPymol ? el.bulkLaunchPymol.checked : true,
     export_insights: el.bulkExportInsights ? el.bulkExportInsights.checked : true,
     export_designs: el.bulkExportDesigns ? el.bulkExportDesigns.checked : true,
-    submit_designs: el.bulkSubmitDesigns ? el.bulkSubmitDesigns.checked : false,
+    submit_designs: submitDesignsOverride ?? true,
     force_init: el.bulkForceInit ? el.bulkForceInit.checked : false,
     prepare_targets: true,
     design_settings: collectDesignSettings(),
     throttle_seconds: throttle,
   };
-  if (el.bulkRunBtn) el.bulkRunBtn.disabled = true;
+  setActionButtonsDisabled(true);
   setBadge(el.bulkStatus, 'Queuing…');
   resetJobLog('Waiting for commands...');
   try {
@@ -278,51 +267,13 @@ async function startBulkRun() {
     showAlert(body.message || 'Bulk job queued.', false);
     if (body.job_id) {
       startJobPolling(body.job_id);
-    } else if (el.bulkRunBtn) {
-      el.bulkRunBtn.disabled = false;
+    } else {
+      setActionButtonsDisabled(false);
     }
   } catch (err) {
     showAlert(err.message || String(err));
-    if (el.bulkRunBtn) el.bulkRunBtn.disabled = false;
+    setActionButtonsDisabled(false);
     setBadge(el.bulkStatus, 'Bulk submission failed', 'rgba(248, 113, 113, 0.25)');
-  }
-}
-
-async function importBulkDesigns() {
-  const csvText = el.bulkImportInput?.value || '';
-  if (!csvText.trim()) {
-    showAlert('Paste a design configuration CSV to import.');
-    return;
-  }
-  const throttle = (() => {
-    const raw = Number(el.bulkThrottle?.value || 0);
-    if (!Number.isFinite(raw) || raw < 0) return 0;
-    return raw;
-  })();
-  if (el.bulkImportQueue) el.bulkImportQueue.disabled = true;
-  setBadge(el.bulkStatus, 'Queuing design submissions…');
-  resetJobLog('Waiting for commands...');
-  try {
-    const res = await fetch('/api/bulk/designs/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ csv_text: csvText, throttle_seconds: throttle }),
-    });
-    if (!res.ok) {
-      const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Import failed with ${res.status}`);
-    }
-    const body = await res.json();
-    showAlert(body.message || 'Bulk design submissions queued.', false);
-    if (body.job_id) {
-      startJobPolling(body.job_id);
-    } else if (el.bulkImportQueue) {
-      el.bulkImportQueue.disabled = false;
-    }
-  } catch (err) {
-    showAlert(err.message || String(err));
-    if (el.bulkImportQueue) el.bulkImportQueue.disabled = false;
-    setBadge(el.bulkStatus, 'Bulk design import failed', 'rgba(248, 113, 113, 0.25)');
   }
 }
 
@@ -385,13 +336,11 @@ function updateJobUI(job) {
 
   if (job.status === 'running' || job.status === 'pending') {
     setBadge(el.bulkStatus, job.status === 'running' ? 'Running…' : 'Queued…');
-    if (el.bulkRunBtn) el.bulkRunBtn.disabled = true;
-    if (el.bulkImportQueue) el.bulkImportQueue.disabled = true;
+    setActionButtonsDisabled(true);
   } else if (job.status === 'success') {
     setBadge(el.bulkStatus, 'Bulk complete', 'rgba(134, 239, 172, 0.25)');
     showAlert(job.message || 'Bulk job finished.', false);
-    if (el.bulkRunBtn) el.bulkRunBtn.disabled = false;
-    if (el.bulkImportQueue) el.bulkImportQueue.disabled = false;
+    setActionButtonsDisabled(false);
     if (job.details?.design_config_filename) {
       const url = `/api/bulk/file?name=${encodeURIComponent(job.details.design_config_filename)}`;
       window.open(url, '_blank');
@@ -405,8 +354,7 @@ function updateJobUI(job) {
   } else {
     setBadge(el.bulkStatus, 'Bulk failed', 'rgba(248, 113, 113, 0.25)');
     showAlert(job.message || 'Bulk job failed.');
-    if (el.bulkRunBtn) el.bulkRunBtn.disabled = false;
-    if (el.bulkImportQueue) el.bulkImportQueue.disabled = false;
+    setActionButtonsDisabled(false);
     stopJobPolling();
   }
 }
@@ -421,31 +369,32 @@ function startJobPolling(jobId) {
     } catch (err) {
       appendLog(`Polling error: ${err.message || err}`);
       stopJobPolling();
-      if (el.bulkRunBtn) el.bulkRunBtn.disabled = false;
-      if (el.bulkImportQueue) el.bulkImportQueue.disabled = false;
+      setActionButtonsDisabled(false);
     }
   };
   poll();
   state.jobPoller = setInterval(poll, 2000);
 }
 
-function toggleBoltzBinding(show) {
-  if (!el.designBoltzBinding) return;
-  const row = el.designBoltzBinding.closest('.form-row');
-  if (row) row.hidden = !show;
+function scrollToSnapshots() {
+  if (!el.snapshotSection) return;
+  el.snapshotSection.hidden = false;
+  el.snapshotSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!el.snapshotGrid || el.snapshotGrid.childElementCount === 0) {
+    appendLog("No hotspot snapshots yet. Run a bulk job with PyMOL enabled to generate visualizations.");
+  }
+}
+
+async function handleVisualizeEpitopes() {
+  await startBulkRun({ submitDesignsOverride: false, triggerEl: el.bulkVisualizeEpitopes });
+  scrollToSnapshots();
 }
 
 function init() {
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
-  if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', startBulkRun);
-  if (el.bulkImportQueue) el.bulkImportQueue.addEventListener('click', importBulkDesigns);
-  if (el.designEngine) {
-    el.designEngine.addEventListener('change', () => {
-      toggleBoltzBinding((el.designEngine.value || '').trim() === 'boltzgen');
-    });
-    toggleBoltzBinding((el.designEngine.value || '').trim() === 'boltzgen');
-  }
+  if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
+  if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -131,6 +131,8 @@ class TargetCatalogPreviewResponse(BaseModel):
     total_rows: int = 0
     displayed_rows: int = 0
     truncated: bool = False
+    filtered_by_biotin: bool = False
+    deduped_by_gene: bool = False
 
 
 class TargetGenerationRequest(BaseModel):
@@ -169,7 +171,7 @@ class BulkCsvRow(BaseModel):
 
 
 class BulkDesignSettings(BaseModel):
-    model_engine: Literal["rfantibody", "boltzgen"] = "rfantibody"
+    model_engine: Literal["rfantibody", "boltzgen"] = "boltzgen"
     total_designs: int = Field(90, ge=1, le=50000)
     num_sequences: int = Field(1, ge=1, le=32)
     temperature: float = Field(0.1, ge=0.0, le=1.0)

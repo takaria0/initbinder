@@ -144,6 +144,43 @@ def _catalog_media_type(path: Path) -> str:
     return "text/csv" if path.suffix.lower() == ".csv" else "text/tab-separated-values"
 
 
+def _parse_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "t"}:
+        return True
+    if text in {"0", "false", "no", "n", "f"}:
+        return False
+    return default
+
+
+def _catalog_is_biotin_only(path: Path) -> bool:
+    name = path.name.lower()
+    if "debug" in name:
+        return False
+    delimiter = _catalog_delimiter(path)
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle, delimiter=delimiter)
+            header = next(reader, [])
+            lower_header = [str(cell).strip().lower() for cell in header]
+            try:
+                biotin_idx = next(
+                    idx for idx, cell in enumerate(lower_header) if cell in {"biotinylated", "biotin"}
+                )
+            except StopIteration:
+                return True
+            for row in reader:
+                if len(row) <= biotin_idx:
+                    continue
+                if not _parse_bool(row[biotin_idx], default=True):
+                    return False
+    except Exception:
+        return False
+    return True
+
+
 def _template_path(filename: str) -> Path:
     path = Path(cfg.paths.project_root) / "webapp" / "templates" / filename
     if not path.exists():
@@ -400,6 +437,8 @@ async def api_target_generation_catalog() -> TargetCatalogListResponse:
             reverse=True,
         )
         for path in catalog_paths:
+            if not _catalog_is_biotin_only(path):
+                continue
             stat = path.stat()
             files.append(
                 TargetCatalogFile(
@@ -427,10 +466,31 @@ async def api_target_generation_preview(
     delimiter = _catalog_delimiter(path)
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle, delimiter=delimiter)
+        gene_idx: int | None = None
+        biotin_idx: int | None = None
+        seen_genes: set[str] = set()
         for index, row in enumerate(reader):
             if index == 0:
                 headers = [str(cell) for cell in row]
+                lower_header = [cell.strip().lower() for cell in headers]
+                for idx, name in enumerate(lower_header):
+                    if gene_idx is None and name in {"gene", "gene_symbol", "genes"}:
+                        gene_idx = idx
+                    if biotin_idx is None and name in {"biotinylated", "biotin"}:
+                        biotin_idx = idx
                 continue
+            gene_value = None
+            if gene_idx is not None and len(row) > gene_idx:
+                gene_value = str(row[gene_idx]).strip()
+            biotin_ok = True
+            if biotin_idx is not None and len(row) > biotin_idx:
+                biotin_ok = _parse_bool(row[biotin_idx], default=False)
+            if not biotin_ok:
+                continue
+            if gene_value:
+                if gene_value in seen_genes:
+                    continue
+                seen_genes.add(gene_value)
             total_rows += 1
             if len(rows) < limit:
                 rows.append([str(cell) for cell in row])
@@ -445,6 +505,8 @@ async def api_target_generation_preview(
         total_rows=total_rows,
         displayed_rows=displayed_rows,
         truncated=truncated,
+        filtered_by_biotin=biotin_idx is not None,
+        deduped_by_gene=gene_idx is not None,
     )
 
 

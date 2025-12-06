@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import io
 import time
 from dataclasses import dataclass
@@ -455,6 +456,13 @@ def _default_run_label(prefix: Optional[str], row: BulkCsvRow, index: int) -> st
     return f"{safe_prefix}_{suffix}_{timestamp}"
 
 
+def _epitope_run_label(base_label: str, ep_name: Optional[str], index: int) -> str:
+    token = (ep_name or f"ep{index}").strip()
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in token)
+    safe = safe.strip("-_") or f"ep{index}"
+    return f"{base_label}_{safe}"
+
+
 def run_bulk_workflow(
     request: BulkRunRequest,
     *,
@@ -578,21 +586,58 @@ def run_bulk_workflow(
                 )
             )
 
-        if request.export_designs or request.submit_designs:
-            run_label = _default_run_label(design_settings.run_label_prefix, row, idx)
+        if not (request.export_designs or request.submit_designs):
+            continue
+
+        run_label_base = _default_run_label(design_settings.run_label_prefix, row, idx)
+
+        def queue_design_job(entry: Dict[str, object]) -> None:
+            design_rows.append(entry)
+            if not request.submit_designs:
+                return
+            design_request = DesignRunRequest(
+                pdb_id=pdb_id,
+                model_engine=str(entry.get("model_engine") or design_settings.model_engine),
+                total_designs=int(entry.get("total_designs") or design_settings.total_designs),
+                num_sequences=design_settings.num_sequences,
+                temperature=design_settings.temperature,
+                binder_chain_id=design_settings.binder_chain_id,
+                af3_seed=design_settings.af3_seed,
+                run_label=str(entry.get("run_label") or run_label_base),
+                run_assess=design_settings.run_assess,
+                rfdiff_crop_radius=design_settings.rfdiff_crop_radius,
+                boltz_binding=entry.get("boltz_binding"),
+            )
+            try:
+                design_job_id = design_submitter(design_request, job_store=job_store)
+                design_jobs.append({
+                    "pdb_id": pdb_id,
+                    "job_id": design_job_id,
+                    "run_label": design_request.run_label,
+                })
+                label_note = design_request.run_label
+                if entry.get("epitope"):
+                    label_note = f"{label_note} · {entry['epitope']}"
+                log(f"  Submitted design job {design_job_id} ({label_note})")
+            except Exception as exc:  # pragma: no cover - defensive
+                log(f"  ! Failed to submit design run: {exc}")
+            if request.throttle_seconds > 0:
+                time.sleep(request.throttle_seconds)
+
         if design_settings.model_engine == "boltzgen":
             epitopes = _load_epitopes_for_target(pdb_id)
             if epitopes and not design_settings.boltz_binding:
                 splits = _distribute_designs(design_settings.total_designs, len(epitopes))
-                for ep_idx, ep in enumerate(epitopes):
+                for ep_idx, ep in enumerate(epitopes, start=1):
                     binding_str = _format_binding_from_ep(ep)
-                    design_rows.append({
+                    run_label = _epitope_run_label(run_label_base, ep.get("name"), ep_idx)
+                    queue_design_job({
                         "pdb_id": pdb_id,
                         "preset_name": row.preset_name,
                         "antigen_url": row.antigen_url,
                         "model_engine": design_settings.model_engine,
                         "epitope": ep.get("name"),
-                        "total_designs": splits[ep_idx],
+                        "total_designs": splits[ep_idx - 1],
                         "num_sequences": design_settings.num_sequences,
                         "temperature": design_settings.temperature,
                         "binder_chain_id": design_settings.binder_chain_id,
@@ -603,7 +648,7 @@ def run_bulk_workflow(
                         "boltz_binding": binding_str,
                     })
             else:
-                design_rows.append({
+                queue_design_job({
                     "pdb_id": pdb_id,
                     "preset_name": row.preset_name,
                     "antigen_url": row.antigen_url,
@@ -616,11 +661,11 @@ def run_bulk_workflow(
                     "af3_seed": design_settings.af3_seed,
                     "run_assess": design_settings.run_assess,
                     "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
-                    "run_label": run_label,
+                    "run_label": run_label_base,
                     "boltz_binding": design_settings.boltz_binding,
                 })
         else:
-            design_rows.append({
+            queue_design_job({
                 "pdb_id": pdb_id,
                 "preset_name": row.preset_name,
                 "antigen_url": row.antigen_url,
@@ -633,31 +678,9 @@ def run_bulk_workflow(
                 "af3_seed": design_settings.af3_seed,
                 "run_assess": design_settings.run_assess,
                 "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
-                "run_label": run_label,
+                "run_label": run_label_base,
                 "boltz_binding": design_settings.boltz_binding,
             })
-            if request.submit_designs:
-                design_request = DesignRunRequest(
-                    pdb_id=pdb_id,
-                    model_engine=design_settings.model_engine,
-                    total_designs=design_settings.total_designs,
-                    num_sequences=design_settings.num_sequences,
-                    temperature=design_settings.temperature,
-                    binder_chain_id=design_settings.binder_chain_id,
-                    af3_seed=design_settings.af3_seed,
-                    run_label=run_label,
-                    run_assess=design_settings.run_assess,
-                    rfdiff_crop_radius=design_settings.rfdiff_crop_radius,
-                    boltz_binding=design_settings.boltz_binding,
-                )
-                try:
-                    design_job_id = design_submitter(design_request, job_store=job_store)
-                    design_jobs.append({"pdb_id": pdb_id, "job_id": design_job_id, "run_label": run_label})
-                    log(f"  Submitted design job {design_job_id} ({run_label})")
-                except Exception as exc:  # pragma: no cover - defensive
-                    log(f"  ! Failed to submit design run: {exc}")
-                if request.throttle_seconds > 0:
-                    time.sleep(request.throttle_seconds)
 
     if request.export_insights and insights_rows:
         headers = [

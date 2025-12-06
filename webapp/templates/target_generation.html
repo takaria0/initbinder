@@ -20,7 +20,7 @@
         </header>
 
         <section class="catalog-section">
-          <div class="catalog-layout">
+          <div class="catalog-layout has-resizer" id="tg-catalog-layout">
             <div class="catalog-column">
               <div class="catalog-header">
                 <h2>Catalog files</h2>
@@ -29,6 +29,14 @@
               <p class="help-text">Located in <code>targets_catalog/</code></p>
               <ul id="catalog-list" class="catalog-list" role="list"></ul>
             </div>
+            <div
+              class="catalog-resizer"
+              id="catalog-resizer"
+              role="separator"
+              aria-label="Resize catalog panels"
+              aria-orientation="vertical"
+              tabindex="0"
+            ></div>
             <div class="catalog-column">
               <div class="catalog-header">
                 <h2>Preview</h2>
@@ -42,6 +50,7 @@
                   Rows to preview
                   <input type="number" id="preview-limit" value="200" min="10" max="2000">
                 </label>
+                <button type="button" id="catalog-copy" class="ghost" disabled>Copy preview</button>
                 <button type="button" id="catalog-download" class="secondary" disabled>Download</button>
               </div>
               <div id="catalog-viewer" class="catalog-viewer" role="region" aria-live="polite"></div>

@@ -9,6 +9,8 @@
     selectedFile: null,
     jobId: null,
     pollingTimer: null,
+    previewText: '',
+    sidebarWidth: null,
   };
 
   const catalogViewer = document.querySelector('#catalog-viewer');
@@ -17,7 +19,10 @@
   const previewLimitInput = document.querySelector('#preview-limit');
   const refreshBtn = document.querySelector('#catalog-refresh');
   const downloadBtn = document.querySelector('#catalog-download');
+  const copyBtn = document.querySelector('#catalog-copy');
   const avoidSelect = document.querySelector('#tg-avoid');
+  const layoutEl = document.querySelector('#tg-catalog-layout');
+  const resizerEl = document.querySelector('#catalog-resizer');
 
   const form = document.querySelector('#target-generation-form');
   const instructionInput = document.querySelector('#tg-instruction');
@@ -36,6 +41,95 @@
   const jobLogEl = document.querySelector('#tg-log');
   const refreshStatusBtn = document.querySelector('#tg-refresh');
   const clearLogBtn = document.querySelector('#tg-clear-log');
+  const SIDEBAR_WIDTH_KEY = 'tgCatalogSidebarWidth';
+  const SIDEBAR_MIN = 240;
+  const SIDEBAR_MAX = 640;
+
+  function applySidebarWidth(width, persist = false) {
+    if (!layoutEl) {
+      return;
+    }
+    const clamped = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, width));
+    layoutEl.style.setProperty('--catalog-sidebar-width', `${clamped}px`);
+    state.sidebarWidth = clamped;
+    if (persist && window.localStorage) {
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(clamped)));
+      } catch (err) {
+        console.warn('Unable to persist catalog width', err);
+      }
+    }
+  }
+
+  if (layoutEl && window.localStorage) {
+    try {
+      const savedWidth = Number.parseInt(window.localStorage.getItem(SIDEBAR_WIDTH_KEY) || '', 10);
+      if (Number.isFinite(savedWidth)) {
+        applySidebarWidth(savedWidth);
+      }
+    } catch (err) {
+      console.warn('Unable to read saved catalog width', err);
+    }
+  }
+
+  if (layoutEl && resizerEl) {
+    let resizing = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    const stopResize = () => {
+      if (!resizing) {
+        return;
+      }
+      resizing = false;
+      resizerEl.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('pointermove', handlePointerMove);
+      document.removeEventListener('pointerup', stopResize);
+      if (state.sidebarWidth) {
+        applySidebarWidth(state.sidebarWidth, true);
+      }
+    };
+
+    const handlePointerMove = (event) => {
+      if (!resizing) {
+        return;
+      }
+      const delta = event.clientX - startX;
+      applySidebarWidth(startWidth + delta);
+    };
+
+    resizerEl.addEventListener('pointerdown', (event) => {
+      if (window.innerWidth <= 960) {
+        return;
+      }
+      const sidebar = layoutEl.querySelector('.catalog-column');
+      if (!sidebar) {
+        return;
+      }
+      event.preventDefault();
+      resizing = true;
+      startX = event.clientX;
+      startWidth = sidebar.getBoundingClientRect().width;
+      resizerEl.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'col-resize';
+      document.addEventListener('pointermove', handlePointerMove);
+      document.addEventListener('pointerup', stopResize);
+    });
+
+    resizerEl.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const sidebar = layoutEl.querySelector('.catalog-column');
+      const currentWidth = state.sidebarWidth || (sidebar ? sidebar.getBoundingClientRect().width : SIDEBAR_MIN);
+      const delta = event.key === 'ArrowLeft' ? -20 : 20;
+      applySidebarWidth(currentWidth + delta, true);
+    });
+  }
 
   function formatBytes(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -66,11 +160,24 @@
     }
   }
 
-  function clearViewer() {
+  function clearViewer(resetPreview = true) {
     catalogViewer.innerHTML = '';
+    if (resetPreview) {
+      state.previewText = '';
+      if (copyBtn) copyBtn.disabled = true;
+    }
   }
 
   function renderTable(headers, rows, truncated) {
+    const lines = [];
+    if (headers && headers.length) {
+      lines.push(headers.join('\t'));
+    }
+    rows.forEach((row) => {
+      lines.push(row.join('\t'));
+    });
+    state.previewText = lines.join('\n');
+
     const table = document.createElement('table');
     table.className = 'catalog-table';
     if (headers && headers.length) {
@@ -103,8 +210,11 @@
       table.appendChild(caption);
     }
 
-    clearViewer();
+    clearViewer(false);
     catalogViewer.appendChild(table);
+    if (copyBtn) {
+      copyBtn.disabled = !state.previewText;
+    }
   }
 
   function renderCatalogList() {
@@ -212,13 +322,22 @@
       if (Number.isFinite(payload.displayed_rows)) {
         extra.push(`${payload.displayed_rows} shown`);
       }
+      if (payload.filtered_by_biotin) {
+        extra.push('biotinylated only');
+      }
+      if (payload.deduped_by_gene) {
+        extra.push('unique genes');
+      }
       if (extra.length) {
         selectedInfoEl.textContent = extra.join(' • ');
         selectedInfoEl.hidden = false;
       } else {
         selectedInfoEl.hidden = true;
       }
-      downloadBtn.disabled = false;
+      if (downloadBtn) downloadBtn.disabled = false;
+      if (copyBtn) {
+        copyBtn.disabled = !state.previewText;
+      }
     } catch (err) {
       console.error(err);
       clearViewer();
@@ -226,6 +345,8 @@
       errorBox.className = 'catalog-error';
       errorBox.textContent = err.message || 'Failed to load preview.';
       catalogViewer.appendChild(errorBox);
+      if (downloadBtn) downloadBtn.disabled = true;
+      if (copyBtn) copyBtn.disabled = true;
     }
   }
 
@@ -338,11 +459,27 @@
     window.open(`/api/target-generation/catalog/${encodeURIComponent(state.selectedFile)}/file`, '_blank');
   }
 
+  async function handleCopy() {
+    if (!state.previewText) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(state.previewText);
+      selectedInfoEl.textContent = 'Preview copied to clipboard';
+      selectedInfoEl.hidden = false;
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   refreshBtn.addEventListener('click', () => {
     loadCatalog();
   });
 
   downloadBtn.addEventListener('click', handleDownload);
+  if (copyBtn) {
+    copyBtn.addEventListener('click', handleCopy);
+  }
   previewLimitInput.addEventListener('change', () => {
     if (state.selectedFile) {
       selectFile(state.selectedFile);
