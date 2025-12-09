@@ -2326,6 +2326,67 @@ th {
   color: #475569;
 }
 
+.snapshot-card {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.05);
+}
+
+.snapshot-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.snapshot-warnings {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #fed7aa;
+  background: #fff7ed;
+  color: #b45309;
+  font-size: 0.92rem;
+}
+
+.snapshot-align {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.snapshot-align strong {
+  color: #0f172a;
+}
+
+.snapshot-coverage {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  color: #0f172a;
+}
+
+.snapshot-coverage li {
+  margin: 4px 0;
+}
+
+.snapshot-coverage li.warn {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.snapshot-note {
+  margin-top: 6px;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
 @media (max-width: 1100px) {
   main.app-shell {
     flex-direction: column;

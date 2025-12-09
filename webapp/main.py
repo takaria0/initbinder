@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -236,6 +237,146 @@ def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
                     mask_residues = []
         output.append({"name": name, "hotspots": hotspots, "mask_residues": mask_residues})
     return output
+
+
+_RANGE_RE = re.compile(r"-?\d+")
+_RESIDUE_KEY_RE = re.compile(r"^\s*([A-Za-z]+)[\s:_-]*(-?\d+)")
+
+
+def _normalize_range_value(value: object) -> tuple[int, int] | None:
+    """Convert a range-like value (tuple/list/\"12-34\"/int) into a numeric span."""
+    if value is None:
+        return None
+    start = end = None
+    if isinstance(value, (list, tuple)) and value:
+        start = _extract_numeric(value[0])
+        if len(value) > 1:
+            end = _extract_numeric(value[1])
+        else:
+            end = start
+    elif isinstance(value, str):
+        cleaned = value.replace("..", "-").replace("\u2013", "-")
+        parts = _RANGE_RE.findall(cleaned)
+        if parts:
+            start = int(parts[0])
+            end = int(parts[1]) if len(parts) > 1 else start
+    elif isinstance(value, (int, float)):
+        start = end = int(value)
+    if start is None or end is None:
+        return None
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _extract_numeric(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    match = _RANGE_RE.search(text)
+    return int(match.group(0)) if match else None
+
+
+def _format_range_label(value: object) -> str | None:
+    span = _normalize_range_value(value)
+    if span:
+        return f"{span[0]}-{span[1]}"
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return None
+
+
+def _parse_residue_key(token: object) -> tuple[str, int] | None:
+    if token is None:
+        return None
+    text = str(token).strip()
+    if not text:
+        return None
+    match = _RESIDUE_KEY_RE.match(text)
+    if not match:
+        return None
+    chain = match.group(1).upper()
+    try:
+        resnum = int(match.group(2))
+    except ValueError:
+        return None
+    return chain, resnum
+
+
+def _summarize_alignment_for_snapshot(payload: dict) -> tuple[dict[str, object], dict[str, tuple[int, int]]]:
+    chain_map: dict[str, tuple[int, int]] = {}
+    chain_entries: list[dict[str, object]] = []
+    vendor_range_label = payload.get("vendor_range_label") or _format_range_label(payload.get("vendor_range"))
+
+    for res in payload.get("results") or []:
+        chain_ids = res.get("chain_ids") or []
+        chain_ranges = res.get("chain_ranges") or {}
+        vendor_overlap = res.get("vendor_overlap_range") or res.get("vendor_aligned_range")
+        vendor_overlap_label = _format_range_label(vendor_overlap)
+        for cid in chain_ids:
+            chain_range_raw = chain_ranges.get(cid)
+            chain_span = _normalize_range_value(chain_range_raw)
+            chain_label = _format_range_label(chain_range_raw)
+            chain_entries.append({
+                "chain": str(cid),
+                "range": chain_label,
+                "vendor_overlap": vendor_overlap_label,
+                "identity": res.get("identity"),
+                "coverage": res.get("coverage"),
+            })
+            if chain_span:
+                key = str(cid).upper()
+                current = chain_map.get(key)
+                if not current or (chain_span[1] - chain_span[0]) > (current[1] - current[0]):
+                    chain_map[key] = chain_span
+
+    summary = {
+        "vendor_range": vendor_range_label,
+        "chain_ranges": chain_entries,
+        "epitope_coverage": [],
+        "note": None,
+    }
+    if not vendor_range_label:
+        summary["note"] = "No recombinant product range recorded."
+    return summary, chain_map
+
+
+def _epitope_coverage_vs_product(
+    epitopes: list[dict[str, object]],
+    chain_ranges: dict[str, tuple[int, int]],
+) -> tuple[list[dict[str, object]], list[str]]:
+    coverage: list[dict[str, object]] = []
+    warnings: list[str] = []
+    for ep in epitopes or []:
+        name = (ep.get("name") or "Epitope").strip() or "Epitope"
+        residue_keys = (ep.get("hotspots") or []) + (ep.get("mask_residues") or [])
+        parsed = [val for val in (_parse_residue_key(tok) for tok in residue_keys) if val]
+        if not parsed:
+            coverage.append({"name": name, "status": "unknown", "outside": [], "total": 0, "covered": 0})
+            continue
+        if not chain_ranges:
+            coverage.append({"name": name, "status": "unknown", "outside": [], "total": len(parsed), "covered": 0})
+            continue
+        outside: list[str] = []
+        covered = 0
+        for chain, resnum in parsed:
+            span = chain_ranges.get(chain) or chain_ranges.get(chain.upper())
+            if not span:
+                outside.append(f"{chain}{resnum}")
+                continue
+            start, end = span
+            if start <= resnum <= end:
+                covered += 1
+            else:
+                outside.append(f"{chain}{resnum}")
+        status = "ok" if covered and not outside else ("outside" if outside else "unknown")
+        coverage.append({"name": name, "status": status, "outside": outside, "total": len(parsed), "covered": covered})
+        if outside:
+            warnings.append(f"{name} outside product range at {', '.join(outside)}")
+    return coverage, warnings
 
 
 def _ranking_payload_to_response(payload: RankingPayload) -> RankingResponse:
@@ -580,6 +721,34 @@ async def api_pymol_snapshot_meta(names: str = Query(..., description="Comma-sep
             pdb_id = rel.stem.split("_")[0].upper()
         filename = path.name
         epitopes = _load_epitope_meta(pdb_id) if pdb_id else []
+        alignment_summary: dict[str, object] | None = None
+        warnings: list[str] = []
+        if pdb_id:
+            try:
+                payload = compute_alignment(pdb_id, max_results=3)
+                summary, chain_map = _summarize_alignment_for_snapshot(payload)
+                coverage, cov_warnings = _epitope_coverage_vs_product(epitopes, chain_map)
+                summary["epitope_coverage"] = coverage
+                warnings.extend(cov_warnings)
+                alignment_summary = summary
+            except AlignmentNotFoundError as exc:
+                msg = str(exc)
+                alignment_summary = {
+                    "vendor_range": None,
+                    "chain_ranges": [],
+                    "epitope_coverage": [],
+                    "note": msg,
+                }
+                warnings.append(msg)
+            except Exception as exc:  # pragma: no cover - defensive
+                msg = f"Alignment error: {exc}"
+                alignment_summary = {
+                    "vendor_range": None,
+                    "chain_ranges": [],
+                    "epitope_coverage": [],
+                    "note": msg,
+                }
+                warnings.append(msg)
         results.append(
             {
                 "filename": str(rel),
@@ -588,6 +757,8 @@ async def api_pymol_snapshot_meta(names: str = Query(..., description="Comma-sep
                 "path": str(path),
                 "created_at": path.stat().st_mtime,
                 "epitopes": epitopes,
+                "alignment": alignment_summary,
+                "warnings": warnings,
             }
         )
     return results
@@ -630,6 +801,8 @@ async def api_alignment(pdb_id: str) -> AlignmentResponse:
     return AlignmentResponse(
         pdb_id=payload["pdb_id"],
         antigen_url=payload.get("antigen_url"),
+        vendor_range=payload.get("vendor_range"),
+        vendor_range_label=payload.get("vendor_range_label"),
         vendor_sequence_length=payload.get("vendor_sequence_length", 0),
         chain_results=payload.get("results", []),
     )

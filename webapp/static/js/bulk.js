@@ -31,6 +31,27 @@ const el = {
   snapshotGrid: document.querySelector('#snapshot-grid'),
 };
 
+function formatRangeLabel(value) {
+  if (Array.isArray(value) && value.length) {
+    const start = value[0];
+    const end = value.length > 1 ? value[1] : value[0];
+    if (start !== undefined && end !== undefined) return `${start}-${end}`;
+  }
+  if (value && typeof value === 'object' && 'start' in value && 'end' in value) {
+    return `${value.start}-${value.end}`;
+  }
+  if (value === 0) return '0';
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function formatPercent(value, decimals = 1) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return `${(num * 100).toFixed(decimals)}%`;
+}
+
 function setBadge(badge, text, color = null) {
   if (!badge) return;
   if (!text) {
@@ -90,6 +111,18 @@ function renderSnapshots(meta = []) {
     header.appendChild(title);
     card.appendChild(header);
 
+    const warnings = Array.isArray(item.warnings) ? item.warnings.filter(Boolean) : [];
+    if (warnings.length) {
+      const warnBox = document.createElement('div');
+      warnBox.className = 'snapshot-warnings';
+      warnings.forEach((msg) => {
+        const warnLine = document.createElement('div');
+        warnLine.textContent = msg;
+        warnBox.appendChild(warnLine);
+      });
+      card.appendChild(warnBox);
+    }
+
     const img = document.createElement('img');
     img.src = item.url;
     img.alt = `${item.pdb_id || 'Target'} hotspot snapshot`;
@@ -113,6 +146,74 @@ function renderSnapshots(meta = []) {
       epList.appendChild(li);
     });
     card.appendChild(epList);
+
+    const alignment = item.alignment || {};
+    const vendorRange = formatRangeLabel(alignment.vendor_range);
+    const chainRanges = Array.isArray(alignment.chain_ranges) ? alignment.chain_ranges : [];
+    const epCoverage = Array.isArray(alignment.epitope_coverage) ? alignment.epitope_coverage : [];
+    const alignNote = alignment.note;
+    const hasAlignment = vendorRange || chainRanges.length || epCoverage.length || alignNote;
+    if (hasAlignment) {
+      const alignBox = document.createElement('div');
+      alignBox.className = 'snapshot-align';
+
+      const vendorLine = document.createElement('div');
+      vendorLine.innerHTML = `<strong>Product range:</strong> ${vendorRange || 'Not recorded'}`;
+      alignBox.appendChild(vendorLine);
+
+      if (chainRanges.length) {
+        const chainLine = document.createElement('div');
+        const chainText = chainRanges.map((cr) => {
+          const chainLabel = cr.chain || '?';
+          const pdbRange = formatRangeLabel(cr.range || cr.chain_range) || '—';
+          const vendorOverlap = formatRangeLabel(cr.vendor_overlap);
+          const stats = [];
+          const idPct = formatPercent(cr.identity);
+          const covPct = formatPercent(cr.coverage);
+          if (idPct) stats.push(`${idPct} id`);
+          if (covPct) stats.push(`${covPct} cov`);
+          const statsText = stats.length ? ` [${stats.join(' · ')}]` : '';
+          const overlapText = vendorOverlap ? ` vs ${vendorOverlap}` : '';
+          return `${chainLabel}:${pdbRange}${overlapText}${statsText}`;
+        }).join(' · ');
+        chainLine.innerHTML = `<strong>PDB overlap:</strong> ${chainText || 'Not mapped'}`;
+        alignBox.appendChild(chainLine);
+      }
+
+      if (epCoverage.length) {
+        const covList = document.createElement('ul');
+        covList.className = 'snapshot-coverage';
+        epCoverage.forEach((cov) => {
+          const li = document.createElement('li');
+          const totalNum = Number(cov.total);
+          const coveredNum = Number(cov.covered);
+          const total = Number.isFinite(totalNum) ? totalNum : null;
+          const covered = Number.isFinite(coveredNum) ? coveredNum : null;
+          const status = cov.status === 'ok'
+            ? 'within product range'
+            : cov.status === 'outside'
+              ? 'outside product range'
+              : 'range unknown';
+          const countText = total ? ` (${covered ?? '?'} / ${total})` : '';
+          const outsideText = Array.isArray(cov.outside) && cov.outside.length
+            ? ` — outside: ${cov.outside.join(', ')}`
+            : '';
+          li.textContent = `${cov.name || 'Epitope'}: ${status}${countText}${outsideText}`;
+          if (cov.status === 'outside') li.classList.add('warn');
+          covList.appendChild(li);
+        });
+        alignBox.appendChild(covList);
+      }
+
+      if (alignNote) {
+        const noteEl = document.createElement('div');
+        noteEl.className = 'snapshot-note';
+        noteEl.textContent = alignNote;
+        alignBox.appendChild(noteEl);
+      }
+
+      card.appendChild(alignBox);
+    }
     el.snapshotGrid.appendChild(card);
   });
   el.snapshotSection.hidden = false;

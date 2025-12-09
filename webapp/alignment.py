@@ -41,8 +41,10 @@ def compute_alignment(pdb_id: str, *, max_results: Optional[int] = None) -> Dict
     vendor_full = accession_block.get("aa") or sequences.get("vendor")
     expressed_seq = accession_block.get("expressed_aa")
     expressed_range = accession_block.get("expressed_range")
+    vendor_range_label: Optional[str] = None
     vendor_range: Optional[Tuple[int, int]] = None
     if expressed_range and isinstance(expressed_range, str):
+        vendor_range_label = expressed_range.strip() or None
         try:
             start_s, end_s = expressed_range.split("-")
             vendor_range = (int(start_s), int(end_s))
@@ -83,9 +85,9 @@ def compute_alignment(pdb_id: str, *, max_results: Optional[int] = None) -> Dict
         except ValueError as exc:
             raise ValueError(f"Alignment failed for chain {chain_id}: {exc}") from exc
 
-        vendor_range = result.vendor_range or (1, len(clean_vendor))
-        aligned_range = result.vendor_aligned_range or vendor_range
-        base_start = vendor_range[0]
+        vendor_span = result.vendor_range or (1, len(clean_vendor))
+        aligned_range = result.vendor_aligned_range or vendor_span
+        base_start = vendor_span[0]
         align_start = max(0, aligned_range[0] - base_start)
         align_end = max(align_start - 1, aligned_range[1] - base_start)
         left_seq = clean_vendor[:align_start] if align_start > 0 else ""
@@ -115,6 +117,8 @@ def compute_alignment(pdb_id: str, *, max_results: Optional[int] = None) -> Dict
     return {
         "pdb_id": pdb_id.upper(),
         "antigen_url": data.get("antigen_catalog_url"),
+        "vendor_range": list(vendor_range) if vendor_range else None,
+        "vendor_range_label": vendor_range_label or (f"{vendor_range[0]}-{vendor_range[1]}" if vendor_range else None),
         "vendor_sequence_length": len(vendor_seq),
         "results": chain_results,
     }

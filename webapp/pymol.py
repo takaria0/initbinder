@@ -247,6 +247,20 @@ def render_hotspot_snapshot(pdb_id: str) -> Path:
             show sticks, hotspots
             bg_color white
             set ray_opaque_background, off
+            python
+from pymol import cmd
+atoms = [a for a in cmd.get_model("target and polymer.protein and name CA").atom]
+if atoms:
+    first_atom = min(atoms, key=lambda a: a.resv)
+    last_atom = max(atoms, key=lambda a: a.resv)
+    cmd.select("first_resi_label", "target and chain %s and resi %s" % (first_atom.chain, first_atom.resi))
+    cmd.select("last_resi_label", "target and chain %s and resi %s" % (last_atom.chain, last_atom.resi))
+    cmd.set("label_size", -0.6, "first_resi_label or last_resi_label")
+    cmd.set("label_color", "gray50", "first_resi_label or last_resi_label")
+    cmd.set("label_outline_color", "white", "first_resi_label or last_resi_label")
+    cmd.label("first_resi_label", "\"%s%s\" % (first_atom.chain, first_atom.resi)")
+    cmd.label("last_resi_label", "\"%s%s\" % (last_atom.chain, last_atom.resi)")
+python end
             png {snapshot_path.name}, dpi=300, ray=1
             quit
             """

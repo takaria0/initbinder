@@ -229,6 +229,8 @@ class BulkRunResponse(BaseModel):
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]
+    vendor_range: Optional[List[int]] = None
+    vendor_range_label: Optional[str] = None
     vendor_sequence_length: int
     chain_results: List[Dict[str, object]]
 
