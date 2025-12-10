@@ -515,7 +515,14 @@ def run_bulk_workflow(
         except Exception as exc:  # pragma: no cover - defensive
             log(f"  ! Target status unavailable: {exc}")
 
-        should_prep = request.prepare_targets and (request.force_init or not status or not status.get("has_prep"))
+        meta_state = (status or {}).get("epitope_meta_state")
+        meta_incomplete = meta_state in (None, "missing", "partial")
+        should_prep = request.prepare_targets and (
+            request.force_init
+            or not status
+            or not status.get("has_prep")
+            or meta_incomplete
+        )
         if should_prep:
             log(f"  Running init/decide/prep{' with --force' if request.force_init else ''}…")
             try:

@@ -534,10 +534,24 @@ def _load_target_details(target_yaml: Path, prep_dir: Path) -> dict[str, object]
         return {"epitopes": [], "chains": [], "antigen": {}}
     data = _safe_yaml_load(target_yaml)
     metadata_map = _load_epitope_metadata(prep_dir)
+    expected_epitopes = len(data.get("epitopes") or [])
+    meta_entries = len(metadata_map)
+    if expected_epitopes == 0:
+        meta_state = "none"
+    elif meta_entries == 0:
+        meta_state = "missing"
+    elif meta_entries < expected_epitopes:
+        meta_state = "partial"
+    else:
+        meta_state = "complete"
     details: dict[str, object] = {
         "epitopes": _extract_epitopes(data, metadata_map),
         "chains": _extract_chain_info(data),
         "antigen": _extract_antigen_info(data),
+        "has_epitopes_metadata": meta_entries > 0,
+        "epitope_metadata_entries": meta_entries,
+        "epitope_expected_count": expected_epitopes,
+        "epitope_meta_state": meta_state,
     }
     target_name = data.get("target_name") or data.get("name")
     if target_name:

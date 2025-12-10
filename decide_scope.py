@@ -345,6 +345,22 @@ def _extract_residue_chains(residue_entries: List[str]) -> Set[str]:
     return chains
 
 
+def _segments_from_available(nums: List[int]) -> List[Tuple[int, int]]:
+    """Collapse a sorted list of ints into contiguous (start, end) segments."""
+    if not nums:
+        return []
+    segments: List[Tuple[int, int]] = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        segments.append((start, prev))
+        start = prev = n
+    segments.append((start, prev))
+    return segments
+
+
 def _ensure_epitopes_within_target_chains(
     cfg: dict,
     allowed_chains: Set[str],
@@ -377,8 +393,9 @@ def _ensure_epitopes_within_target_chains(
 
 
     violations = []
-    residue_gaps = []
     residue_lookup = valid_residue_numbers or {}
+    trim_logs: List[str] = []
+    dropped_logs: List[str] = []
 
     for epitope in cfg.get("epitopes") or []:
         residues = epitope.get("residues") or []
@@ -389,25 +406,55 @@ def _ensure_epitopes_within_target_chains(
         if disallowed:
             violations.append((epitope.get("name") or "<unnamed>", residues, epitope_chains, disallowed))
 
+        adjusted_residues: List[str] = []
+        changed = False
         for span in residues:
             if not isinstance(span, str) or ':' not in span or '-' not in span:
+                adjusted_residues.append(span)
                 continue
             ch_raw, rng = span.split(":", 1)
             ch = (ch_raw or "").strip().upper()
             if ch not in residue_lookup:
+                adjusted_residues.append(span)
                 continue
             try:
                 start_str, end_str = rng.split("-", 1)
                 start_i, end_i = int(start_str), int(end_str)
             except ValueError:
+                adjusted_residues.append(span)
                 continue
             if start_i > end_i:
                 start_i, end_i = end_i, start_i
             valid_nums = residue_lookup.get(ch, set())
+            if not valid_nums:
+                adjusted_residues.append(span)
+                continue
+            in_range = sorted(pos for pos in valid_nums if start_i <= pos <= end_i)
             missing_positions = [pos for pos in range(start_i, end_i + 1) if pos not in valid_nums]
+            if not in_range:
+                dropped_logs.append(
+                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} was dropped because none of the residues "
+                    f"exist in chain {ch}'s prepared PDB numbering."
+                )
+                changed = True
+                continue
             if missing_positions:
-                gap_preview = ",".join(str(pos) for pos in missing_positions[:5])
-                residue_gaps.append((epitope.get("name") or "<unnamed>", span, ch, gap_preview))
+                gap_preview = ",".join(str(pos) for pos in missing_positions[:8])
+                segments = _segments_from_available(in_range)
+                replacement = [
+                    f"{ch}:{lo}" if lo == hi else f"{ch}:{lo}-{hi}"
+                    for lo, hi in segments
+                ]
+                adjusted_residues.extend(replacement)
+                changed = True
+                trim_logs.append(
+                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} trimmed to {', '.join(replacement)}; "
+                    f"missing residues: {gap_preview}."
+                )
+            else:
+                adjusted_residues.append(span)
+        if changed:
+            epitope["residues"] = adjusted_residues
 
     if violations:
         lines = []
@@ -422,13 +469,12 @@ def _ensure_epitopes_within_target_chains(
             f"Allowed chains: [{allowed_display}]. {detail}"
         )
 
-    if residue_gaps:
-        msgs = []
-        for name, span, ch, preview in residue_gaps:
-            msgs.append(
-                f"Epitope '{name}' references {span} on chain {ch}, but residues {preview} are not present in the prepared PDB numbering."
-            )
-        raise ValueError("One or more epitope residue ranges do not exist in the validated PDB chains. " + " ".join(msgs))
+    if trim_logs:
+        for msg in trim_logs:
+            print(f"[warn] {msg}")
+    if dropped_logs:
+        for msg in dropped_logs:
+            print(f"[warn] {msg}")
 
 # =============================================================================
 # Core: LLM scope (multi-UniProt + extracellular filter)
@@ -652,6 +698,7 @@ def llm_scope(
             groq_key = _groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
             if not groq_key:
                 raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
+            resp = None
             try:
                 resp = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
@@ -670,6 +717,9 @@ def llm_scope(
                     },
                     timeout=120,
                 )
+                # Explicitly handle rate limits with backoff guidance instead of failing hard.
+                if resp.status_code == 429:
+                    raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
                 resp.raise_for_status()
                 data = resp.json()
                 draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
@@ -678,7 +728,24 @@ def llm_scope(
                 last_error = exc
                 if attempt == max(0, max_llm_retries):
                     raise
-                retry_extra = "\nLLM call failed; please retry.\n"
+                delay = 0
+                status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
+                if status == 429:
+                    retry_after = None
+                    if resp is not None:
+                        retry_after = resp.headers.get("Retry-After")
+                    try:
+                        delay = int(retry_after) if retry_after else 0
+                    except (TypeError, ValueError):
+                        delay = 0
+                    delay = delay if delay and delay > 0 else min(90, 10 * (attempt + 1))
+                    print(f"[warn] Groq rate limit hit (429). Retrying in {delay} seconds...")
+                else:
+                    delay = min(60, 5 * (attempt + 1))
+                    print(f"[warn] LLM call failed on attempt {attempt+1}; retrying in {delay} seconds...")
+                if delay > 0:
+                    time.sleep(delay)
+                retry_extra = "\\nLLM call failed; please retry.\\n"
                 continue
         elif _llm_provider == "gemini":
             import google.generativeai as genai
