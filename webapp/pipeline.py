@@ -141,6 +141,7 @@ def init_decide_prep(
     decide_scope_prompt: Optional[str] = None,
     llm_delay_seconds: float = 0.0,
     decide_scope_attempts: int = 1,
+    target_accession: Optional[str] = None,
 ) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
@@ -153,6 +154,8 @@ def init_decide_prep(
     args = [pdb_id]
     if antigen_url:
         args.extend(["--antigen_url", antigen_url])
+    if target_accession:
+        args.extend(["--target_accession", target_accession])
     if force:
         args.append("--force")
     run_manage_rfa("init-target", args, log=_log)
@@ -171,6 +174,9 @@ def init_decide_prep(
         if prompt_text:
             decide_args_base.extend(["--epitope_prompt", prompt_text])
             job_store.append_log(job_id, "[decide-scope] using custom epitope guidance prompt")
+        if target_accession:
+            decide_args_base.extend(["--target_accession", target_accession])
+            job_store.append_log(job_id, f"[decide-scope] using accession {target_accession}")
 
         attempts = max(1, int(decide_scope_attempts or 1))
         cooldown = float(llm_delay_seconds or 0.0)
@@ -553,6 +559,13 @@ def _load_target_details(target_yaml: Path, prep_dir: Path) -> dict[str, object]
         "epitope_expected_count": expected_epitopes,
         "epitope_meta_state": meta_state,
     }
+    seqs = data.get("sequences") or {}
+    acc_block = seqs.get("accession") or {}
+    vendor_seq = acc_block.get("expressed_aa") or acc_block.get("aa")
+    details["has_vendor_sequence"] = bool(vendor_seq and str(vendor_seq).strip())
+    if acc_block.get("id"):
+        details["vendor_accession_id"] = str(acc_block.get("id")).strip()
+
     target_name = data.get("target_name") or data.get("name")
     if target_name:
         details["target_name"] = str(target_name)

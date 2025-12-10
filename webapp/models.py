@@ -165,6 +165,7 @@ class BulkCsvRow(BaseModel):
     preset_name: str
     antigen_url: Optional[str] = None
     pdb_id: Optional[str] = Field(None, max_length=32)
+    accession: Optional[str] = Field(None, max_length=40)
     resolved_pdb_id: Optional[str] = None
     preset_id: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)

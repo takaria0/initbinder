@@ -700,6 +700,7 @@ def main():
     p_init.add_argument("--chain", help="Optional: Specify a target chain ID to focus on (e.g., 'A').")
     p_init.add_argument("--target_name", help="Optional: Specify the exact name of the target protein.")
     p_init.add_argument("--antigen_url", help="Optional: URL to a Sino Biological antigen page for verification.")
+    p_init.add_argument("--target_accession", help="Optional: UniProt/RefSeq accession to fetch vendor sequence directly.")
     p_init.add_argument("--force", action="store_true",
                         help="Reinitialize target even if files already exist (overwrites metadata).")
 
@@ -719,6 +720,11 @@ def main():
         "--epitope_prompt",
         default=None,
         help="Optional natural language guidance for how the LLM should select epitopes.",
+    )
+    p_scope.add_argument(
+        "--target_accession",
+        default=None,
+        help="Optional UniProt accession to force as the primary target (skips re-deriving from antigen URL).",
     )
 
     p_prep = sub.add_parser("prep-target", help="Clean target PDB and create epitope masks.")
@@ -892,6 +898,7 @@ def main():
             chain_id=args.chain,
             target_name=args.target_name,
             antigen_url=args.antigen_url,
+            target_accession=getattr(args, "target_accession", None),
             force=getattr(args, "force", False),
         )
 
@@ -906,7 +913,8 @@ def main():
             llm_scope(args.pdb, expected_epitopes=args.expected_epitopes,
                       max_llm_retries=args.max_llm_retries,
                       force=args.force,
-                      user_guidance=args.epitope_prompt)
+                      user_guidance=args.epitope_prompt,
+                      target=args.target_accession)
 
     elif args.cmd == "prep-target":
         prep_target(args.pdb, args.sasa_cutoff)

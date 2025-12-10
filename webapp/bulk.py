@@ -256,6 +256,9 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         "pdb_release_date",
         "pdb_vendor_intersection",
         "vendor_accession",
+        "vendor_product_accession",
+        "accession",
+        "uniprot",
         "biotinylated",
     }
     has_header = any(name in known_header_tokens for name in header)
@@ -263,6 +266,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
     preset_idx = None
     antigen_idx = None
     pdb_idx = None
+    accession_idx = None
     if has_header:
         preset_idx = _find_index(header, ["preset name", "preset", "name", "target"])
         if preset_idx is None:
@@ -271,10 +275,12 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         if antigen_idx is None:
             antigen_idx = _find_index(header, ["antigen_catalog", "catalog"])
         pdb_idx = _find_index(header, ["pdb id", "pdb_id", "pdbid", "pdb", "chosen_pdb", "chosen pdb"])
+        accession_idx = _find_index(header, ["vendor_product_accession", "vendor_accession"])
     else:
         preset_idx = 0
         antigen_idx = 1
         pdb_idx = 2 if (rows and len(rows[0]) > 2) else None
+        accession_idx = 3 if (rows and len(rows[0]) > 3) else None
 
     entries: List[dict] = []
     for offset, row in enumerate(rows[start_index:]):
@@ -288,6 +294,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
                 if alt_idx is not None and len(row) > alt_idx:
                     preset_name = _normalize(row[alt_idx])
         pdb_raw = _clean_pdb_id(row[pdb_idx]) if pdb_idx is not None and len(row) > pdb_idx else None
+        accession_raw = _normalize(row[accession_idx]) if accession_idx is not None and len(row) > accession_idx else None
         if not preset_name and not antigen_url and not pdb_raw:
             continue
         entries.append({
@@ -295,6 +302,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
             "preset_name": preset_name or f"Row {raw_index}",
             "antigen_url": antigen_url,
             "pdb_id": pdb_raw,
+            "accession": accession_raw,
         })
     return entries
 
@@ -309,6 +317,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
         preset_name = entry.get("preset_name") or ""
         antigen_url = entry.get("antigen_url") or ""
         pdb_id = _clean_pdb_id(entry.get("pdb_id"))
+        accession = entry.get("accession") or ""
 
         if not pdb_id and preset_name:
             preset_obj = index.by_name.get(preset_name.lower())
@@ -332,6 +341,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
                 raw_index=int(entry.get("raw_index") or 0),
                 preset_name=preset_name,
                 antigen_url=antigen_url,
+                accession=accession or None,
                 pdb_id=pdb_id,
                 resolved_pdb_id=resolved_pdb,
                 preset_id=getattr(preset_obj, "id", None),
@@ -517,11 +527,13 @@ def run_bulk_workflow(
 
         meta_state = (status or {}).get("epitope_meta_state")
         meta_incomplete = meta_state in (None, "missing", "partial")
+        vendor_missing = not (status or {}).get("has_vendor_sequence", True)
         should_prep = request.prepare_targets and (
             request.force_init
             or not status
             or not status.get("has_prep")
             or meta_incomplete
+            or vendor_missing
         )
         if should_prep:
             log(f"  Running init/decide/prep{' with --force' if request.force_init else ''}…")
@@ -538,6 +550,7 @@ def run_bulk_workflow(
                     decide_scope_prompt=request.decide_scope_prompt,
                     llm_delay_seconds=request.llm_delay_seconds,
                     decide_scope_attempts=request.decide_scope_attempts,
+                    target_accession=row.accession,
                 )
                 status = get_target_status(pdb_id)
             except Exception as exc:  # pragma: no cover - defensive

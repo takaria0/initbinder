@@ -220,6 +220,7 @@ def init_target(
     chain_id: str | None = None,
     target_name: str | None = None,
     antigen_url: str = "",
+    target_accession: str | None = None,
     force: bool = False,
 ):
     """Downloads PDB data and creates the initial directory structure.
@@ -232,6 +233,8 @@ def init_target(
 
     if not antigen_url or not isinstance(antigen_url, str):
         raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
+
+    target_accession = (target_accession or "").strip()
 
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     if force:
@@ -390,7 +393,12 @@ def init_target(
     alignment_summary: Optional[AlignmentResult] = None
 
     if "sinobiological.com" in antigen_url:
-        verification_result = _verify_antigen_compatibility(pdb_id, antigen_url, tdir)
+        verification_result = _verify_antigen_compatibility(
+            pdb_id,
+            antigen_url,
+            tdir,
+            target_accession=target_accession,
+        )
         if verification_result:
             alignment_summary = verification_result.get("alignment")
             accession_id = verification_result.get("accession", "") or ""
@@ -435,22 +443,21 @@ def init_target(
     else:
         print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
 
-    # Sequences.accession (debug)
+    # Sequences.accession (debug) — preserve existing values unless new ones are provided
     config.setdefault("sequences", {})
-    config["sequences"].setdefault("accession", {"id": "", "aa": ""})
+    existing_acc = (config["sequences"].get("accession") or {}).copy()
+    accession_block = config["sequences"].setdefault("accession", {})
+    for key in ("id", "aa", "expressed_range", "expressed_aa"):
+        if key in existing_acc and key not in accession_block:
+            accession_block[key] = existing_acc[key]
     if accession_id:
-        config["sequences"]["accession"]["id"] = accession_id
+        accession_block["id"] = accession_id
     if accession_seq:
-        config["sequences"]["accession"]["aa"] = accession_seq
-    accession_block = config["sequences"]["accession"]
+        accession_block["aa"] = accession_seq
     if vendor_range:
         accession_block["expressed_range"] = f"{vendor_range[0]}-{vendor_range[1]}"
-    else:
-        accession_block.pop("expressed_range", None)
     if expressed_seq:
         accession_block["expressed_aa"] = expressed_seq
-    else:
-        accession_block.pop("expressed_aa", None)
     if alignment_summary:
         config["sequences"]["alignment"] = _alignment_result_to_yaml(alignment_summary)
 
@@ -632,7 +639,13 @@ def _legacy_parse_sino_page(antigen_url: str) -> Optional[tuple[str, tuple[int, 
         return None
 
 
-def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> Optional[dict]:
+def _verify_antigen_compatibility(
+    pdb_id: str,
+    antigen_url: str,
+    tdir: Path,
+    *,
+    target_accession: str | None = None,
+) -> Optional[dict]:
     """Return verification details with multi-chain alignment against the vendor construct."""
     print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
 
@@ -642,6 +655,8 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
     if analysis and getattr(analysis, "error", None):
         print(f"[warn] LLM analysis message: {analysis.error}")
     accession = (getattr(analysis, "accession", "") or "").strip() if analysis else ""
+    if not accession and target_accession:
+        accession = target_accession
     vendor_range = None
     if analysis and isinstance(getattr(analysis, "aa_start", None), int) and isinstance(getattr(analysis, "aa_end", None), int):
         vendor_range = (int(analysis.aa_start), int(analysis.aa_end))
@@ -655,14 +670,19 @@ def _verify_antigen_compatibility(pdb_id: str, antigen_url: str, tdir: Path) -> 
         print("[warn] LLM analysis missing accession or range; trying legacy parser.")
         legacy = _legacy_parse_sino_page(antigen_url)
         if not legacy:
-            print("[fail] Could not extract accession/range from vendor page.")
-            return None
-        accession, vendor_range = legacy
-        if analysis:
-            analysis.accession = accession
-            analysis.aa_start, analysis.aa_end = vendor_range
-            analysis.expressed_sequence = None
-        print(f"[ok] Legacy parser recovered accession {accession} and range {vendor_range[0]}-{vendor_range[1]}")
+            if target_accession:
+                print(f"[warn] Vendor parsing failed; falling back to provided accession {target_accession}.")
+                accession = target_accession
+            else:
+                print("[fail] Could not extract accession/range from vendor page.")
+                return None
+        else:
+            accession, vendor_range = legacy
+            if analysis:
+                analysis.accession = accession
+                analysis.aa_start, analysis.aa_end = vendor_range
+                analysis.expressed_sequence = None
+            print(f"[ok] Legacy parser recovered accession {accession} and range {vendor_range[0]}-{vendor_range[1]}")
     else:
         rng_desc = f"{vendor_range[0]}-{vendor_range[1]}" if vendor_range else "LLM expressed sequence"
         print(f"[ok] LLM analysis accession={accession}, range={rng_desc}")

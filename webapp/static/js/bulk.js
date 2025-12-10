@@ -255,6 +255,7 @@ function renderBulkPreview(rows = [], summary = '') {
       row.raw_index ?? '',
       row.preset_name || '',
       row.antigen_url || '',
+      row.accession || '',
       row.resolved_pdb_id || row.pdb_id || '—',
       row.preset_id ? 'Matched preset' : '—',
       Array.isArray(row.warnings) && row.warnings.length ? row.warnings.join('; ') : '',

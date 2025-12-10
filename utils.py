@@ -132,7 +132,7 @@ SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 # utils.py
 import re
 
-_KEY_RE = re.compile(r"^([A-Za-z]+):?(-?\d+)")  # 'A233' も 'A:233' もOK
+_KEY_RE = re.compile(r"^([A-Za-z0-9]+):?(-?\d+)")  # 'A233' / 'A:233' / '7:30' allowed
 
 
 def _ensure_dir(p: Path):
@@ -141,12 +141,12 @@ def _ensure_dir(p: Path):
 
 
 def make_key(ch: str, resnum: int) -> str:
-    """標準キー表記: 'A233'（コロンなし）"""
-    return f"{ch}{int(resnum)}"
+    """標準キー表記: 'A:233' (explicit chain/residue separator to avoid ambiguity)."""
+    return f"{ch}:{int(resnum)}"
 
 def parse_key(key: str):
     """
-    キーを (chain, resnum:int) に分解。'A233' も 'A:233' も受け付ける。
+    キーを (chain, resnum:int) に分解。'A233' / 'A:233' / '7:30' などを受け付ける。
     """
     m = _KEY_RE.match(key.strip())
     if not m:

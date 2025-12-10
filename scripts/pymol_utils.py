@@ -403,12 +403,14 @@ def _write_hotspot_pml(
         return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_")
 
     def _keys_to_sel(obj: str, keys: list[str]) -> str:
-        # A123 / A:123 / A_123 / A-123 のみ採用。純数字は無視（チェイン不明なため）
+        # A123 / A:123 / A_123 / A-123 / 1:123 / 1_123 などを解釈して PyMOL セレクション式に変換
         parts = []
         for k in keys or []:
             s = str(k).strip()
-            m = (re.match(r"^([A-Za-z])[:_\-]?(-?\d+)$", s) or
-                 re.match(r"^([A-Za-z])(-?\d+)$", s))
+            # m = (re.match(r"^([A-Za-z])[:_\-]?(-?\d+)$", s) or
+                #  re.match(r"^([A-Za-z])(-?\d+)$", s))
+            m = re.match(r"^([A-Za-z0-9])[:_\-]?(-?\d+)$", s) or \
+                re.match(r"^([A-Za-z0-9])(-?\d+)$", s)
             if not m:
                 continue
             ch, resi = m.group(1), m.group(2)
