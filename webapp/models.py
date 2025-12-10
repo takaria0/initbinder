@@ -214,6 +214,7 @@ class BulkRunRequest(BaseModel):
     design_settings: BulkDesignSettings = Field(default_factory=BulkDesignSettings)
     throttle_seconds: float = Field(3.0, ge=0.0, le=300.0)
     limit: Optional[int] = Field(None, ge=1, le=2000)
+    llm_delay_seconds: float = Field(0.0, ge=0.0, le=600.0, description="Optional delay before each LLM decide-scope call")
 
 
 class BulkDesignImportRequest(BaseModel):

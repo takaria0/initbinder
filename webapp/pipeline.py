@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
@@ -138,6 +139,7 @@ def init_decide_prep(
     force: bool = False,
     num_epitopes: Optional[int] = None,
     decide_scope_prompt: Optional[str] = None,
+    llm_delay_seconds: float = 0.0,
 ) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
@@ -168,6 +170,10 @@ def init_decide_prep(
         if prompt_text:
             decide_args.extend(["--epitope_prompt", prompt_text])
             job_store.append_log(job_id, "[decide-scope] using custom epitope guidance prompt")
+        if llm_delay_seconds and llm_delay_seconds > 0:
+            wait_s = float(llm_delay_seconds)
+            job_store.append_log(job_id, f"[decide-scope] cooling down {wait_s:.0f}s before LLM query")
+            time.sleep(wait_s)
         run_manage_rfa("decide-scope", decide_args, log=_log)
     if run_prep:
         job_store.update(job_id, message="Running prep-target")
