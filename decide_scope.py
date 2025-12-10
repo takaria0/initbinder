@@ -19,7 +19,7 @@ from utils import (
     UNIPROT_IDMAPPING_STATUS_API,
     UNIPROT_API,
 )
-from env import GOOGLE_API_KEY, MODEL, USE_LLM
+from env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY
 
 # ====== HF cache (あなたの指定どおり。env.py に HF_ROOT があればそれを優先) ======
 try:
@@ -73,6 +73,71 @@ def _load_entry_json(tdir: Path):
             except Exception:
                 pass
     return None
+
+
+def _prune_pdb_metadata(raw: dict) -> dict:
+    """Strip bulky PDB metadata to the small set needed for scope decisions."""
+    if not isinstance(raw, dict):
+        return {}
+
+    def _get_first(seq, key):
+        if isinstance(seq, list):
+            for item in seq:
+                if isinstance(item, dict) and item.get(key):
+                    return item.get(key)
+        return None
+
+    out: dict = {}
+    entry_id = (raw.get("entry") or {}).get("id")
+    if entry_id:
+        out["entry_id"] = entry_id
+
+    struct = raw.get("struct") or {}
+    if struct.get("title"):
+        out["title"] = struct.get("title")
+
+    keywords = raw.get("struct_keywords") or {}
+    key_text = keywords.get("text") or keywords.get("pdbx_keywords")
+    if key_text:
+        out["keywords"] = key_text
+
+    rcsb_info = raw.get("rcsb_entry_info") or {}
+    method = rcsb_info.get("experimental_method") or _get_first(raw.get("exptl"), "method")
+    if method:
+        out["method"] = method
+
+    res = None
+    if isinstance(rcsb_info.get("resolution_combined"), list) and rcsb_info["resolution_combined"]:
+        res = rcsb_info["resolution_combined"][0]
+    if res is None:
+        diffrn_res = (raw.get("rcsb_entry_info") or {}).get("diffrn_resolution_high") or {}
+        res = diffrn_res.get("value")
+    if res is None:
+        res = _get_first(raw.get("reflns"), "d_resolution_high")
+    if res:
+        out["resolution_A"] = res
+
+    assembly_ids = (raw.get("rcsb_entry_container_identifiers") or {}).get("assembly_ids")
+    if assembly_ids:
+        out["assembly_ids"] = assembly_ids
+
+    polymer_entities = (raw.get("rcsb_entry_container_identifiers") or {}).get("polymer_entity_ids")
+    if polymer_entities:
+        out["polymer_entity_ids"] = polymer_entities
+
+    ligands = (rcsb_info.get("nonpolymer_bound_components") or []) if isinstance(rcsb_info, dict) else []
+    if ligands:
+        out["ligands"] = ligands
+
+    symmetry = raw.get("symmetry") or {}
+    if symmetry.get("space_group_name_hm"):
+        out["space_group"] = symmetry.get("space_group_name_hm")
+
+    citation = raw.get("rcsb_primary_citation") or _get_first(raw.get("citation"), None)
+    if isinstance(citation, dict) and citation.get("title"):
+        out["citation_title"] = citation.get("title")
+
+    return out
 
 def _load_chainmap_if_any(tdir: Path):
     cm = (tdir / "raw" / "chainmap.json")
@@ -389,9 +454,10 @@ def llm_scope(
     try:
         import env as _env
         _llm_provider = str(getattr(_env, "LLM_PROVIDER", "gpt-oss-local")).lower()
-        _max_new = int(getattr(_env, "MAX_NEW_TOKENS", "1024"))
+        _max_new = int(getattr(_env, "MAX_NEW_TOKENS", "8000"))
+        _groq_key = GROQ_API_KEY
     except Exception:
-        _llm_provider, _max_new = "gpt-oss-local", 1024
+        _llm_provider, _max_new, _groq_key = "gpt-oss-local", 1024, None
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
     tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
@@ -521,8 +587,9 @@ def llm_scope(
                                                    "--- END CRITICAL INSTRUCTION ---"]) + "\n"
     
     # === Build Final Prompt ===
-    meta = json.loads((tdir/"raw"/"entry.json").read_text())
-    bundle = fetch_uniprot_bundle_for_pdb(pdb_id, meta, max_accessions=max_accessions)
+    meta_raw = json.loads((tdir/"raw"/"entry.json").read_text())
+    meta = _prune_pdb_metadata(meta_raw)
+    bundle = fetch_uniprot_bundle_for_pdb(pdb_id, meta_raw, max_accessions=max_accessions)
     uniprot_context_str = build_uniprot_context(bundle, constrain_epitope=enforce_epitope_constraints)
     target_acc = target or choose_target_accession(bundle, prefer_human=prefer_human, prefer_reviewed=prefer_reviewed)
 
@@ -566,19 +633,61 @@ def llm_scope(
     draft = ""
     cfg = None
 
+    print(f"[info] LLM provider: {_llm_provider} · model: {MODEL}")
+
     for attempt in range(max(0, max_llm_retries) + 1):
         final_prompt = _compose_prompt(retry_extra)
         prompt_path = tdir/"reports"/f"scope_prompt_attempt_{attempt+1}.md"
         prompt_path.write_text(final_prompt)
+        stats_path = prompt_path.with_name(f"{prompt_path.stem}_stats.json")
+        stats_payload = {
+            "attempt": attempt + 1,
+            "char_length": len(final_prompt),
+            "word_count": len(final_prompt.split()),
+            "approx_tokens": max(1, round(len(final_prompt) / 4)),  # rough byte-pair estimate
+        }
+        stats_path.write_text(json.dumps(stats_payload, indent=2))
 
-        if _llm_provider != "gemini":
-            pass
-        else:
+        if _llm_provider == "groq":
+            groq_key = _groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
+            if not groq_key:
+                raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": MODEL,
+                        "temperature": 0.1,
+                        "max_tokens": _max_new,
+                        "messages": [
+                            {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
+                            {"role": "user", "content": final_prompt},
+                        ],
+                    },
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+                draft = draft.strip()
+            except Exception as exc:
+                last_error = exc
+                if attempt == max(0, max_llm_retries):
+                    raise
+                retry_extra = "\nLLM call failed; please retry.\n"
+                continue
+        elif _llm_provider == "gemini":
             import google.generativeai as genai
             genai.configure(api_key=GOOGLE_API_KEY)
             model = genai.GenerativeModel(model_name=MODEL, system_instruction="You are a protein design assistant. Output exactly one YAML block.")
             response = model.generate_content(final_prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
             draft = (response.text or "").strip()
+        else:
+            raise RuntimeError(f"Unsupported LLM_PROVIDER '{_llm_provider}'. Use 'groq' or 'gemini'.")
 
         m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
         if not m:
