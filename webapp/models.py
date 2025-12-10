@@ -215,6 +215,7 @@ class BulkRunRequest(BaseModel):
     throttle_seconds: float = Field(3.0, ge=0.0, le=300.0)
     limit: Optional[int] = Field(None, ge=1, le=2000)
     llm_delay_seconds: float = Field(0.0, ge=0.0, le=600.0, description="Optional delay before each LLM decide-scope call")
+    decide_scope_attempts: int = Field(1, ge=1, le=5, description="Number of decide-scope retries")
 
 
 class BulkDesignImportRequest(BaseModel):

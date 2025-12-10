@@ -108,6 +108,8 @@ def submit_target_initialization(request: TargetInitRequest, *,
                 force=request.force_refresh,
                 num_epitopes=request.num_epitopes,
                 decide_scope_prompt=request.decide_scope_prompt,
+                llm_delay_seconds=getattr(request, "llm_delay_seconds", 0.0),
+                decide_scope_attempts=getattr(request, "decide_scope_attempts", 1),
             )
             try:
                 preferences.record_target_usage(

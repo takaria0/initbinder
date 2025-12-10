@@ -322,7 +322,12 @@ function collectDesignSettings() {
 }
 
 async function startBulkRun(options = {}) {
-  const { submitDesignsOverride = null, triggerEl = null, llmDelaySeconds = null } = options;
+  const {
+    submitDesignsOverride = null,
+    triggerEl = null,
+    llmDelaySeconds = null,
+    decideScopeAttempts = null,
+  } = options;
   const csvText = el.bulkCsvInput?.value || '';
   if (!csvText.trim()) {
     showAlert('Paste a CSV/TSV payload first.');
@@ -351,6 +356,9 @@ async function startBulkRun(options = {}) {
     design_settings: collectDesignSettings(),
     throttle_seconds: throttle,
     llm_delay_seconds: Number.isFinite(llmDelaySeconds) && llmDelaySeconds > 0 ? llmDelaySeconds : 0,
+    decide_scope_attempts: Number.isFinite(decideScopeAttempts) && decideScopeAttempts > 0
+      ? Math.min(5, Math.max(1, Math.round(decideScopeAttempts)))
+      : 1,
   };
   setActionButtonsDisabled(true);
   setBadge(el.bulkStatus, 'Queuing…');
@@ -492,6 +500,7 @@ async function handleVisualizeEpitopes() {
     submitDesignsOverride: false,
     triggerEl: el.bulkVisualizeEpitopes,
     llmDelaySeconds: 70,
+    decideScopeAttempts: 3,
   });
   scrollToSnapshots();
 }

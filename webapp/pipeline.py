@@ -140,6 +140,7 @@ def init_decide_prep(
     num_epitopes: Optional[int] = None,
     decide_scope_prompt: Optional[str] = None,
     llm_delay_seconds: float = 0.0,
+    decide_scope_attempts: int = 1,
 ) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
@@ -158,23 +159,38 @@ def init_decide_prep(
 
     if run_decide:
         job_store.update(job_id, message="Running decide-scope")
-        decide_args = [pdb_id]
+        decide_args_base = [pdb_id]
         if force:
-            decide_args.append("--force")
+            decide_args_base.append("--force")
         if num_epitopes is not None and num_epitopes > 0:
             expected = int(num_epitopes)
-            decide_args.extend(["--expected_epitopes", str(expected)])
-            decide_args.extend(["--max_llm_retries", "3"])
+            decide_args_base.extend(["--expected_epitopes", str(expected)])
+            decide_args_base.extend(["--max_llm_retries", "3"])
             job_store.append_log(job_id, f"[decide-scope] expecting {expected} epitopes with retry")
         prompt_text = (decide_scope_prompt or "").strip()
         if prompt_text:
-            decide_args.extend(["--epitope_prompt", prompt_text])
+            decide_args_base.extend(["--epitope_prompt", prompt_text])
             job_store.append_log(job_id, "[decide-scope] using custom epitope guidance prompt")
-        if llm_delay_seconds and llm_delay_seconds > 0:
-            wait_s = float(llm_delay_seconds)
-            job_store.append_log(job_id, f"[decide-scope] cooling down {wait_s:.0f}s before LLM query")
-            time.sleep(wait_s)
-        run_manage_rfa("decide-scope", decide_args, log=_log)
+
+        attempts = max(1, int(decide_scope_attempts or 1))
+        cooldown = float(llm_delay_seconds or 0.0)
+        for attempt in range(1, attempts + 1):
+            decide_args = list(decide_args_base)
+            if cooldown > 0:
+                job_store.append_log(job_id, f"[decide-scope] cooling down {cooldown:.0f}s before attempt {attempt}")
+                time.sleep(cooldown)
+            try:
+                run_manage_rfa("decide-scope", decide_args, log=_log)
+                break
+            except Exception as exc:
+                if attempt >= attempts:
+                    raise
+                wait_next = max(70.0, cooldown)
+                job_store.append_log(
+                    job_id,
+                    f"[decide-scope] attempt {attempt} failed ({exc}); waiting {wait_next:.0f}s before retry",
+                )
+                time.sleep(wait_next)
     if run_prep:
         job_store.update(job_id, message="Running prep-target")
         # prep-target does not accept --force; init-target already cleared prep when force=True.

@@ -530,6 +530,7 @@ def run_bulk_workflow(
                     num_epitopes=request.num_epitopes,
                     decide_scope_prompt=request.decide_scope_prompt,
                     llm_delay_seconds=request.llm_delay_seconds,
+                    decide_scope_attempts=request.decide_scope_attempts,
                 )
                 status = get_target_status(pdb_id)
             except Exception as exc:  # pragma: no cover - defensive
