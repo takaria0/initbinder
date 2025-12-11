@@ -308,7 +308,14 @@ def find_nglyc_motifs_in_declared(declared_keys: List[str],
                 continue
             X = seq[i+1]; Z = seq[i+2]
             if X != "P" and Z in {"S","T"}:
-                hits.append({"chain":ch,"resnum":n,"motif":"N-X-[S/T]"})
+                # enrich hit with standardized residue key (used for hotspot avoidance)
+                hits.append({
+                    "chain": ch,
+                    "resnum": n,
+                    "asn_key": make_key(ch, n),
+                    "sequon": f"N{X}{Z}",
+                    "motif": "N-X-[S/T]",
+                })
     return hits
 
 def build_epitope_metadata(

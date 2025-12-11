@@ -351,7 +351,11 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
         # derive glyco keys in declared region (returns motif triplets; flatten to keys)
         ng_hits = find_nglyc_motifs_in_declared(declared_keys, chain_seq, chain_index_map, resname_lookup)
-        ng_keys = {h["asn_key"] for h in (ng_hits or [])}
+        ng_keys = {
+            (h.get("asn_key") or make_key(h["chain"], h["resnum"]))
+            for h in (ng_hits or [])
+            if h.get("chain") and h.get("resnum") is not None
+        }
 
         # pick hotspots with policy defaults or YAML overrides
         policy = (cfg.get("hotspot_policy") or {})

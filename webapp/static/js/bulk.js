@@ -29,6 +29,7 @@ const el = {
   jobMeta: document.querySelector('#job-meta'),
   snapshotSection: document.querySelector('#snapshot-section'),
   snapshotGrid: document.querySelector('#snapshot-grid'),
+  snapshotDownloadPdf: document.querySelector('#snapshot-download-pdf'),
 };
 
 function formatRangeLabel(value) {
@@ -98,7 +99,15 @@ function renderSnapshots(meta = []) {
   const list = Array.isArray(meta) ? meta : [];
   if (!list.length) {
     el.snapshotSection.hidden = true;
+    if (el.snapshotDownloadPdf) {
+      el.snapshotDownloadPdf.hidden = true;
+      el.snapshotDownloadPdf.disabled = true;
+    }
     return;
+  }
+  if (el.snapshotDownloadPdf) {
+    el.snapshotDownloadPdf.hidden = false;
+    el.snapshotDownloadPdf.disabled = false;
   }
   const palette = ['#2563eb', '#f97316', '#22c55e', '#a855f7', '#ef4444', '#0ea5e9', '#14b8a6', '#facc15'];
   list.forEach((item) => {
@@ -496,6 +505,59 @@ function scrollToSnapshots() {
   }
 }
 
+async function downloadSnapshotPdf() {
+  try {
+    if (!el.snapshotGrid || el.snapshotGrid.childElementCount === 0) {
+      showAlert('No hotspot snapshots to export yet.');
+      return;
+    }
+    const printable = el.snapshotGrid.cloneNode(true);
+    const container = document.createElement('div');
+    container.appendChild(printable);
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Hotspot snapshots</title>
+          <link rel="stylesheet" href="/static/css/app.css">
+          <style>
+            body { padding: 18px; background: #ffffff; }
+            h1 { margin-bottom: 12px; }
+            .snapshot-card { page-break-inside: avoid; break-inside: avoid; }
+            .snapshot-card + .snapshot-card { margin-top: 12px; }
+            .snapshot-card img { max-width: 100%; height: auto; }
+            @media print { body { padding: 0 12px; } }
+          </style>
+        </head>
+        <body>
+          <h1>Hotspot snapshots</h1>
+          <p class="help-text" style="margin-top: 0;">Includes all hotspot images and annotations currently shown.</p>
+          ${container.innerHTML}
+        </body>
+      </html>`;
+    const popup = window.open('', '_blank', 'width=1000,height=1200');
+    if (!popup || !popup.document) {
+      showAlert('Pop-up blocked. Allow pop-ups to download the PDF.');
+      return;
+    }
+    popup.document.open();
+    popup.document.write(html);
+    popup.document.close();
+    popup.focus();
+    const imgs = Array.from(popup.document.images || []);
+    await Promise.all(imgs.map((img) => new Promise((resolve) => {
+      if (img.complete) return resolve();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+    })));
+    popup.print();
+    setTimeout(() => popup.close(), 500);
+  } catch (err) {
+    showAlert(`Failed to prepare PDF: ${err.message || err}`);
+  }
+}
+
 async function handleVisualizeEpitopes() {
   await startBulkRun({
     submitDesignsOverride: false,
@@ -511,6 +573,7 @@ function init() {
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
   if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
+  if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);
 }
 
 document.addEventListener('DOMContentLoaded', init);
