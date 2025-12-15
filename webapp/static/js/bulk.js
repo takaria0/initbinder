@@ -2,6 +2,7 @@ const state = {
   bulkPreviewRows: [],
   jobPoller: null,
   currentJobId: null,
+  snapshotNames: [],
 };
 
 const el = {
@@ -98,6 +99,7 @@ function renderSnapshots(meta = []) {
   el.snapshotGrid.innerHTML = '';
   const list = Array.isArray(meta) ? meta : [];
   if (!list.length) {
+    state.snapshotNames = [];
     el.snapshotSection.hidden = true;
     if (el.snapshotDownloadPdf) {
       el.snapshotDownloadPdf.hidden = true;
@@ -105,6 +107,7 @@ function renderSnapshots(meta = []) {
     }
     return;
   }
+  state.snapshotNames = list.map((item) => item.filename).filter(Boolean);
   if (el.snapshotDownloadPdf) {
     el.snapshotDownloadPdf.hidden = false;
     el.snapshotDownloadPdf.disabled = false;
@@ -511,7 +514,36 @@ async function downloadSnapshotPdf() {
       showAlert('No hotspot snapshots to export yet.');
       return;
     }
+
+    const names = (state.snapshotNames || []).filter(Boolean);
+    if (names.length) {
+      const params = new URLSearchParams();
+      params.append('names', names.join(','));
+      const res = await fetch(`/api/pymol/snapshots/package?${params.toString()}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const cd = res.headers.get('content-disposition') || '';
+        const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+        const filename = match?.[1] || 'hotspot_snapshots.html';
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        return;
+      }
+    }
+
+    // Fallback: open printable window
     const printable = el.snapshotGrid.cloneNode(true);
+    printable.classList.remove('catalog-viewer');
+    printable.style.maxHeight = 'none';
+    printable.style.overflow = 'visible';
+    printable.style.border = 'none';
+    printable.style.background = 'transparent';
     const container = document.createElement('div');
     container.appendChild(printable);
     const html = `
@@ -524,6 +556,7 @@ async function downloadSnapshotPdf() {
           <style>
             body { padding: 18px; background: #ffffff; }
             h1 { margin-bottom: 12px; }
+            .catalog-viewer { max-height: none !important; overflow: visible !important; border: none; }
             .snapshot-card { page-break-inside: avoid; break-inside: avoid; }
             .snapshot-card + .snapshot-card { margin-top: 12px; }
             .snapshot-card img { max-width: 100%; height: auto; }

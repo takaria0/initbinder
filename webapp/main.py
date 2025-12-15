@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import re
+import base64
+import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -237,6 +239,61 @@ def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
                     mask_residues = []
         output.append({"name": name, "hotspots": hotspots, "mask_residues": mask_residues})
     return output
+
+
+def _snapshot_metadata(items: list[str]) -> list[dict]:
+    results: list[dict] = []
+    for name in items:
+        rel = Path(name)
+        path = _resolve_snapshot_file(str(rel))
+        parent = rel.parent.name if rel.parent else ""
+        pdb_id = ""
+        if parent:
+            pdb_id = parent.split("_")[0].upper()
+        if not pdb_id:
+            pdb_id = rel.stem.split("_")[0].upper()
+        epitopes = _load_epitope_meta(pdb_id) if pdb_id else []
+        alignment_summary: dict[str, object] | None = None
+        warnings: list[str] = []
+        if pdb_id:
+            try:
+                payload = compute_alignment(pdb_id, max_results=3)
+                summary, chain_map = _summarize_alignment_for_snapshot(payload)
+                coverage, cov_warnings = _epitope_coverage_vs_product(epitopes, chain_map)
+                summary["epitope_coverage"] = coverage
+                warnings.extend(cov_warnings)
+                alignment_summary = summary
+            except AlignmentNotFoundError as exc:
+                msg = str(exc)
+                alignment_summary = {
+                    "vendor_range": None,
+                    "chain_ranges": [],
+                    "epitope_coverage": [],
+                    "note": msg,
+                }
+                warnings.append(msg)
+            except Exception as exc:  # pragma: no cover - defensive
+                msg = f"Alignment error: {exc}"
+                alignment_summary = {
+                    "vendor_range": None,
+                    "chain_ranges": [],
+                    "epitope_coverage": [],
+                    "note": msg,
+                }
+                warnings.append(msg)
+        results.append(
+            {
+                "filename": str(rel),
+                "pdb_id": pdb_id,
+                "url": f"/api/pymol/snapshot?name={rel.as_posix()}",
+                "path": str(path),
+                "created_at": path.stat().st_mtime,
+                "epitopes": epitopes,
+                "alignment": alignment_summary,
+                "warnings": warnings,
+            }
+        )
+    return results
 
 
 _RANGE_RE = re.compile(r"-?\d+")
@@ -709,59 +766,118 @@ async def api_pymol_snapshot(name: str) -> FileResponse:
 @app.get("/api/pymol/snapshots/metadata")
 async def api_pymol_snapshot_meta(names: str = Query(..., description="Comma-separated snapshot filenames")) -> list[dict]:
     items = [n for n in names.split(",") if n.strip()]
-    results: list[dict] = []
-    for name in items:
-        rel = Path(name)
-        path = _resolve_snapshot_file(str(rel))
-        parent = rel.parent.name if rel.parent else ""
-        pdb_id = ""
-        if parent:
-            pdb_id = parent.split("_")[0].upper()
-        if not pdb_id:
-            pdb_id = rel.stem.split("_")[0].upper()
-        filename = path.name
-        epitopes = _load_epitope_meta(pdb_id) if pdb_id else []
-        alignment_summary: dict[str, object] | None = None
-        warnings: list[str] = []
-        if pdb_id:
-            try:
-                payload = compute_alignment(pdb_id, max_results=3)
-                summary, chain_map = _summarize_alignment_for_snapshot(payload)
-                coverage, cov_warnings = _epitope_coverage_vs_product(epitopes, chain_map)
-                summary["epitope_coverage"] = coverage
-                warnings.extend(cov_warnings)
-                alignment_summary = summary
-            except AlignmentNotFoundError as exc:
-                msg = str(exc)
-                alignment_summary = {
-                    "vendor_range": None,
-                    "chain_ranges": [],
-                    "epitope_coverage": [],
-                    "note": msg,
-                }
-                warnings.append(msg)
-            except Exception as exc:  # pragma: no cover - defensive
-                msg = f"Alignment error: {exc}"
-                alignment_summary = {
-                    "vendor_range": None,
-                    "chain_ranges": [],
-                    "epitope_coverage": [],
-                    "note": msg,
-                }
-                warnings.append(msg)
-        results.append(
-            {
-                "filename": str(rel),
-                "pdb_id": pdb_id,
-                "url": f"/api/pymol/snapshot?name={rel.as_posix()}",
-                "path": str(path),
-                "created_at": path.stat().st_mtime,
-                "epitopes": epitopes,
-                "alignment": alignment_summary,
-                "warnings": warnings,
-            }
+    return _snapshot_metadata(items)
+
+
+@app.get("/api/pymol/snapshots/package")
+async def api_pymol_snapshot_package(
+    names: str = Query(..., description="Comma-separated snapshot filenames"),
+) -> FileResponse:
+    items = [n for n in names.split(",") if n.strip()]
+    if not items:
+        raise HTTPException(status_code=400, detail="No snapshot names provided")
+    meta = _snapshot_metadata(items)
+    if not meta:
+        raise HTTPException(status_code=404, detail="No snapshots found")
+
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    report_dir = Path(cfg.log_dir) / "webapp" / "snapshot_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    out_path = report_dir / f"hotspot_snapshots_{ts}.html"
+
+    def _fmt_range(val):
+        if isinstance(val, dict) and "start" in val and "end" in val:
+            return f'{val.get("start")}-{val.get("end")}'
+        if isinstance(val, (list, tuple)) and len(val) >= 2:
+            return f"{val[0]}-{val[1]}"
+        return val
+
+    blocks: list[str] = []
+    for item in meta:
+        img_tag = "<div style='color:#94a3b8'>Image unavailable</div>"
+        try:
+            img_bytes = Path(item["path"]).read_bytes()
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+            img_tag = f"<img src='data:image/png;base64,{b64}' alt='{item.get('pdb_id','Target')} hotspot' style='max-width:100%;border:1px solid #e2e8f0;border-radius:8px;'/>"
+        except Exception:
+            pass
+        ep_lines = []
+        for ep in item.get("epitopes") or []:
+            name = ep.get("name") or "Epitope"
+            hotspots = ", ".join(ep.get("hotspots") or [])
+            masks = ", ".join(ep.get("mask_residues") or [])
+            ep_lines.append(f"<li><strong>{name}</strong>: {hotspots or masks or 'No residues recorded'}</li>")
+        ep_html = "<ul>" + "".join(ep_lines) + "</ul>" if ep_lines else "<p style='color:#94a3b8'>No epitope metadata</p>"
+
+        alignment = item.get("alignment") or {}
+        chain_ranges = alignment.get("chain_ranges") or []
+        align_parts = []
+        vendor = alignment.get("vendor_range")
+        if vendor:
+            align_parts.append(f"<div><strong>Product range:</strong> {vendor}</div>")
+        if chain_ranges:
+            cr_text = " · ".join(
+                f"{cr.get('chain') or '?'}:{_fmt_range(cr.get('range') or cr.get('chain_range') or '—')}"
+                for cr in chain_ranges
+            )
+            align_parts.append(f"<div><strong>PDB overlap:</strong> {cr_text}</div>")
+        note = alignment.get("note")
+        if note:
+            align_parts.append(f"<div style='color:#0ea5e9'>{note}</div>")
+        if alignment.get("epitope_coverage"):
+            cov_lines = []
+            for cov in alignment["epitope_coverage"]:
+                status = cov.get("status") or "unknown"
+                total = cov.get("total")
+                covered = cov.get("covered")
+                outside = ", ".join(cov.get("outside") or [])
+                extra = f" ({covered}/{total})" if total is not None else ""
+                outside_txt = f" — outside: {outside}" if outside else ""
+                cov_lines.append(f"<li>{cov.get('name') or 'Epitope'}: {status}{extra}{outside_txt}</li>")
+            align_parts.append("<ul>" + "".join(cov_lines) + "</ul>")
+        align_html = "".join(align_parts) if align_parts else "<div style='color:#94a3b8'>No alignment data</div>"
+
+        warn_lines = [f"<div style='color:#ef4444'>{w}</div>" for w in (item.get("warnings") or [])]
+        warn_html = "".join(warn_lines)
+
+        blocks.append(
+            f"""
+            <section style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:12px 0;">
+              <header style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div><strong>{item.get('pdb_id') or 'Target'}</strong> · {item.get('filename')}</div>
+                <div style="font-size:0.85rem;color:#64748b;">Generated {datetime.datetime.utcfromtimestamp(item.get('created_at',0)).isoformat()}Z</div>
+              </header>
+              {warn_html}
+              <div style="margin:10px 0;">{img_tag}</div>
+              <div><strong>Epitopes</strong></div>
+              {ep_html}
+              <div style="margin-top:8px;"><strong>Alignment</strong></div>
+              {align_html}
+            </section>
+            """
         )
-    return results
+
+    html = f"""<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Hotspot snapshots report</title>
+        <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 16px; color: #0f172a; }}
+          h1 {{ margin-bottom: 4px; }}
+          p.lead {{ color: #475569; margin-top: 0; }}
+          section {{ page-break-inside: avoid; }}
+        </style>
+      </head>
+      <body>
+        <h1>Hotspot snapshots</h1>
+        <p class="lead">Generated {datetime.datetime.utcnow().isoformat()}Z · {len(meta)} image(s)</p>
+        {''.join(blocks)}
+      </body>
+    </html>
+    """
+    out_path.write_text(html)
+    return FileResponse(out_path, filename=out_path.name, media_type="text/html")
 
 
 @app.get("/api/targets/presets", response_model=TargetPresetListResponse)
