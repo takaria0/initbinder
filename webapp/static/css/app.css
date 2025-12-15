@@ -2387,6 +2387,129 @@ th {
   font-size: 0.9rem;
 }
 
+.epitope-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.epitope-metric-card {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metric-title {
+  font-weight: 700;
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.metric-subtext {
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.mini-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 140px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px dashed #e2e8f0;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 60%, #f8fafc 100%);
+}
+
+.mini-chart.empty {
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.mini-bar {
+  flex: 1;
+  min-width: 6px;
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.9), rgba(59, 130, 246, 0.65));
+  border-radius: 8px 8px 2px 2px;
+  position: relative;
+  box-shadow: 0 6px 12px rgba(37, 99, 235, 0.15);
+}
+
+.mini-bar:hover {
+  filter: brightness(1.05);
+}
+
+.mini-bar::after {
+  content: attr(data-count);
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.75rem;
+  color: #475569;
+}
+
+.metric-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-pill {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-pill .pill-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.metric-pill .pill-label {
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.metric-pill .pill-value {
+  font-weight: 700;
+  color: #111827;
+}
+
+.metric-pill .pill-hint {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.metric-split {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+}
+
+.metric-split .hydro-a {
+  background: rgba(37, 99, 235, 0.45);
+}
+
+.metric-split .hydro-b {
+  background: rgba(16, 185, 129, 0.45);
+}
+
 @media (max-width: 1100px) {
   main.app-shell {
     flex-direction: column;

@@ -1,5 +1,9 @@
 # InitBinder Web UI
 
+python target_generation.py --instruction "sino biotin list" --species human --prefer_tags biotin \
+  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/Webscraper/sino_biotinylated_unique.tsv --no_browser_popup --max_targets 500
+
+
 End-to-end FastAPI + Vanilla JS interface for orchestrating the InitBinder antibody design pipeline. The web layer wraps the existing CLI scripts (e.g. `manage_rfa.py`, `export_files.py`) so researchers can move from target setup to assessment review and PyMOL visualization without leaving the browser.
 
 ## Features

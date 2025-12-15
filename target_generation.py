@@ -68,7 +68,7 @@ import sys
 import textwrap
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional, Tuple, Any, Dict, Sequence
+from typing import List, Optional, Tuple, Any, Dict, Sequence, Set
 from datetime import datetime
 import time
 import logging
@@ -265,6 +265,99 @@ class Candidate:
             if value:
                 return value
         return ""
+
+
+@dataclass
+class ManualTarget:
+    """Pre-seeded antigen inputs (e.g., Sino biotinylated list with URLs)."""
+    target_name: str
+    antigens: List[AntigenOption] = field(default_factory=list)
+    species: Optional[str] = None
+
+# -------------------- Manual antigen loader --------------------
+def _detect_delimiter(path: Path) -> str:
+    """Try to detect delimiter; default to tab for .tsv else comma."""
+    default = "\t" if path.suffix.lower() == ".tsv" else ","
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            sample = f.read(2048)
+            f.seek(0)
+            dialect = csv.Sniffer().sniff(sample)
+            if dialect and getattr(dialect, "delimiter", None):
+                return dialect.delimiter
+    except Exception:
+        pass
+    return default
+
+
+def _load_manual_antigen_file(file_path: str, default_species: str) -> List[ManualTarget]:
+    """
+    Load a user-provided CSV/TSV that already lists Sino antigens with URLs.
+    Expected columns (case-insensitive; any name is fine):
+      - antigen_url / url / product_url  (required)
+      - catalog / sku (optional)
+      - gene / protein_name / antigen_name / description (used as target name; required)
+      - species (optional; falls back to CLI species)
+    """
+    path = Path(file_path)
+    if not path.exists():
+        log_info(f"[warn] Manual antigen file not found: {file_path}")
+        return []
+
+    delim = _detect_delimiter(path)
+    with path.open("r", encoding="utf-8") as f:
+        rd = csv.DictReader(f, delimiter=delim)
+        if not rd.fieldnames:
+            log_info(f"[warn] Unable to parse header from {file_path}")
+            return []
+
+        by_target: Dict[str, ManualTarget] = {}
+        order: List[str] = []
+        seen_urls: Set[str] = set()
+
+        def _first_nonempty(row: dict, keys: List[str]) -> str:
+            for k in keys:
+                val = row.get(k) or row.get(k.lower()) or row.get(k.upper())
+                if val and str(val).strip():
+                    return str(val).strip()
+            return ""
+
+        for row in rd:
+            url = _first_nonempty(row, ["antigen_url", "url", "product_url"])
+            name_raw = _first_nonempty(row, ["target_name", "gene", "protein_name", "antigen_name", "Antigen_Name", "Description"])
+            catalog = _first_nonempty(row, ["catalog", "Catalog", "sku", "SKU", "catalog_number", "CatalogNumber"])
+            species = _first_nonempty(row, ["species", "Species"]) or default_species or ""
+
+            if not url or not name_raw:
+                continue
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            # Normalize target label
+            name_clean = name_raw.split(" (")[0].strip()
+            key = name_clean.upper()
+            if key not in by_target:
+                by_target[key] = ManualTarget(target_name=name_clean, species=species, antigens=[])
+                order.append(key)
+
+            target = by_target[key]
+            # Avoid duplicate antigen URLs under the same target
+            if any(a.url == url for a in target.antigens):
+                continue
+            target.antigens.append(
+                AntigenOption(
+                    vendor="Sino Biological",
+                    catalog=catalog,
+                    species=species,
+                    url=url,
+                )
+            )
+
+    manual_targets = [by_target[k] for k in order]
+    total_antigens = sum(len(t.antigens) for t in manual_targets)
+    log_info(f"[info] Loaded {len(manual_targets)} unique targets ({total_antigens} antigen URLs) from {file_path}")
+    return manual_targets
 
 # -------------------- Body text extraction --------------------
 def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_selector: str = "#main_left") -> str:
@@ -1048,7 +1141,13 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         base = [instruction.strip()]
         return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
-def build_candidate(term: str, species: str, *, require_biotinylated_primary: bool = True) -> Optional[Candidate]:
+def build_candidate(
+    term: str,
+    species: str,
+    *,
+    require_biotinylated_primary: bool = True,
+    antigen_options_override: Optional[List[AntigenOption]] = None,
+) -> Optional[Candidate]:
     tax_id = _taxonomy_id_for_species(species)
     base_queries = _candidate_query_templates(term)
     search_queries: List[str] = []
@@ -1090,10 +1189,14 @@ def build_candidate(term: str, species: str, *, require_biotinylated_primary: bo
     log_info(f"\n[info] Evaluating candidate '{label}' (UniProt: {acc}; query={used_query_disp})...")
 
     antigen_query = gene_name or protein_name or term or acc
-    antigen_options = fetch_vendor_antigens(antigen_query, species)
-    if not antigen_options:
-        log_info(f"[warn] No vendor antigens found for {label} (query='{antigen_query}').")
-        return None
+    if antigen_options_override is not None:
+        antigen_options = antigen_options_override
+        log_info(f"[info] Using {len(antigen_options)} preloaded antigen(s) for {label}.")
+    else:
+        antigen_options = fetch_vendor_antigens(antigen_query, species)
+        if not antigen_options:
+            log_info(f"[warn] No vendor antigens found for {label} (query='{antigen_query}').")
+            return None
 
     enrich_antigen_details_with_llm_batch(antigen_options, gene_name or antigen_query, protein_name or antigen_query)
 
@@ -1256,6 +1359,7 @@ def run_target_generation(args):
     Prefer Tags: {args.prefer_tags}
     Require Biotinylated (primary list): {require_biotin}
     Browser Headless Mode: {BROWSER_HEADLESS}
+    Manual Antigen TSV: {getattr(args, 'antigen_tsv', None) or '(none)'}
     Log file: {LOG_PATH}
     -------------------------------------------
     """).strip())
@@ -1293,12 +1397,22 @@ def run_target_generation(args):
         if p.exists():
             avoid_list.append(str(p))
 
-    queries = expand_instruction_to_queries(
-        args.instruction, args.species, args.max_targets,
-        avoid_from_tsv=avoid_list
-    )
+    manual_targets: List[ManualTarget] = []
+    if getattr(args, "antigen_tsv", None):
+        manual_targets = _load_manual_antigen_file(args.antigen_tsv, args.species)
+        if args.max_targets:
+            manual_targets = manual_targets[: args.max_targets]
+        if manual_targets:
+            log_info(f"[info] Bypassing instruction expansion; {len(manual_targets)} manual targets loaded.")
+        else:
+            log_info("[warn] Manual antigen TSV provided but no rows parsed; falling back to instruction expansion.")
 
-    candidates: List[Candidate] = []
+    queries: List[str] = []
+    if not manual_targets:
+        queries = expand_instruction_to_queries(
+            args.instruction, args.species, args.max_targets,
+            avoid_from_tsv=avoid_list
+        )
     # Prepare writers (create files with headers if missing); gather existing keys and running ranks
     def _ensure_header(path: Path, columns: list[str]):
         if not path.exists():
@@ -1330,11 +1444,27 @@ def run_target_generation(args):
     except Exception:
         pass
 
+    work_items: List[Any] = manual_targets if manual_targets else queries
+    if not work_items:
+        log_info("[warn] No targets to process.")
+        return []
+
     candidates: List[Candidate] = []
-    for i, q in enumerate(queries, 1):
-        log_info(f"\n[stage] [{i}/{len(queries)}] Processing query: {q}")
+    for i, q in enumerate(work_items, 1):
+        is_manual = bool(manual_targets)
+        label_for_stage = q.target_name if is_manual else q
+        log_info(f"\n[stage] [{i}/{len(work_items)}] {'Manual antigen' if is_manual else 'Processing query'}: {label_for_stage}")
         try:
-            candidate = build_candidate(q, args.species, require_biotinylated_primary=require_biotin)
+            if is_manual:
+                target_species = q.species or args.species
+                candidate = build_candidate(
+                    q.target_name,
+                    target_species,
+                    require_biotinylated_primary=require_biotin,
+                    antigen_options_override=q.antigens,
+                )
+            else:
+                candidate = build_candidate(q, args.species, require_biotinylated_primary=require_biotin)
             if candidate:
                 candidates.append(candidate)
                 # Append to catalogs incrementally, de-duplicated by (selection, UNIPROT)
@@ -1393,7 +1523,7 @@ def run_target_generation(args):
                                 r.get('method',''), r.get('release_date',''), r.get('subunit_name',''),
                             ])
         except Exception as e:
-            log_info(f"[error] Failed processing query '{q}': {e}")
+            log_info(f"[error] Failed processing target '{label_for_stage}': {e}")
             import traceback
             log_debug(traceback.format_exc())
         time.sleep(SLEEP_PER_TARGET_SEC)
@@ -1417,6 +1547,8 @@ if __name__ == "__main__":
     ap.add_argument("--prefer_tags", default="biotin")
     ap.add_argument("--no_browser_popup", action="store_true",
                     help="Run page fetches headless (no visible browser windows). Recommended for scale.")
+    ap.add_argument("--antigen_tsv", type=str, default=None,
+                    help="CSV/TSV listing manual antigens (e.g., Sino biotinylated list). Columns: antigen_url/url, catalog, target_name/gene/protein_name, optional species.")
     # Exclusion control to avoid duplicates across catalogs
     ap.add_argument("--avoid_tsv", type=str, nargs="*", default=None,
                     help="One or more existing TSVs whose gene/protein names should be excluded from this run.")

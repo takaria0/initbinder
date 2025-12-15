@@ -213,6 +213,18 @@ def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
     meta_path = prep_dir / "epitopes_metadata.json"
     if not meta_path.exists():
         return []
+    def _as_int(value: object) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _as_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     try:
         data = json.loads(meta_path.read_text())
     except Exception:
@@ -237,7 +249,39 @@ def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
                         mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
                 except Exception:
                     mask_residues = []
-        output.append({"name": name, "hotspots": hotspots, "mask_residues": mask_residues})
+        chemistry = ep.get("chemistry") if isinstance(ep, dict) else {}
+        exposed_counts = chemistry.get("exposed_counts") if isinstance(chemistry, dict) else {}
+        fractions = chemistry.get("exposed_sasa_weighted_fractions") if isinstance(chemistry, dict) else {}
+        hydrophobic_count = _as_int(exposed_counts.get("hydrophobic") if isinstance(exposed_counts, dict) else None)
+        polar_count = _as_int(exposed_counts.get("polar") if isinstance(exposed_counts, dict) else None)
+        charged_count = _as_int(exposed_counts.get("charged") if isinstance(exposed_counts, dict) else None)
+        hydrophilic_count = None
+        if polar_count is not None or charged_count is not None:
+            hydrophilic_count = (polar_count or 0) + (charged_count or 0)
+        hydrophobicity = _as_float(fractions.get("hydrophobic") if isinstance(fractions, dict) else None)
+        if hydrophobicity is None and hydrophobic_count is not None and hydrophilic_count is not None:
+            total = hydrophobic_count + hydrophilic_count
+            if total > 0:
+                hydrophobicity = round(hydrophobic_count / total, 3)
+        sasa_block = ep.get("sasa") if isinstance(ep, dict) else {}
+        rsa_block = ep.get("rsa") if isinstance(ep, dict) else {}
+        metrics = {
+            "residue_count": _as_int(ep.get("declared_count") if isinstance(ep, dict) else None),
+            "exposed_count": _as_int(ep.get("exposed_count") if isinstance(ep, dict) else None),
+            "exposed_fraction": _as_float(ep.get("exposed_fraction") if isinstance(ep, dict) else None),
+            "hydrophobic_count": hydrophobic_count,
+            "hydrophilic_count": hydrophilic_count,
+            "hydrophobicity": hydrophobicity,
+            "exposed_surface": _as_float(sasa_block.get("exposed_total") if isinstance(sasa_block, dict) else None),
+            "extrusion": _as_float(rsa_block.get("mean") if isinstance(rsa_block, dict) else None),
+            "rsa_high_fraction": _as_float(rsa_block.get("frac_ge_0.2") if isinstance(rsa_block, dict) else None),
+        }
+        output.append({
+            "name": name,
+            "hotspots": hotspots,
+            "mask_residues": mask_residues,
+            "metrics": metrics,
+        })
     return output
 
 

@@ -31,6 +31,12 @@ const el = {
   snapshotSection: document.querySelector('#snapshot-section'),
   snapshotGrid: document.querySelector('#snapshot-grid'),
   snapshotDownloadPdf: document.querySelector('#snapshot-download-pdf'),
+  epitopeMetricsSection: document.querySelector('#epitope-metrics-section'),
+  epitopeMetricsSummary: document.querySelector('#epitope-metrics-summary'),
+  epitopeResidueChart: document.querySelector('#epitope-residue-chart'),
+  epitopeResidueStats: document.querySelector('#epitope-residue-stats'),
+  epitopeChemistryStats: document.querySelector('#epitope-chemistry-stats'),
+  epitopeExposureStats: document.querySelector('#epitope-exposure-stats'),
 };
 
 function formatRangeLabel(value) {
@@ -52,6 +58,118 @@ function formatPercent(value, decimals = 1) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
   return `${(num * 100).toFixed(decimals)}%`;
+}
+
+function formatNumberValue(value, decimals = 1, fallback = '—') {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return num.toFixed(decimals);
+}
+
+function asNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function describeSeries(values = []) {
+  const arr = values.filter((v) => Number.isFinite(v));
+  if (!arr.length) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const count = sorted.length;
+  const sum = sorted.reduce((acc, val) => acc + val, 0);
+  const mid = Math.floor(count / 2);
+  const median = count % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return {
+    count,
+    min: sorted[0],
+    max: sorted[count - 1],
+    mean: sum / count,
+    median,
+  };
+}
+
+function renderHistogram(container, values = [], { bins = 8, label = 'values' } = {}) {
+  if (!container) return;
+  container.innerHTML = '';
+  container.classList.remove('empty');
+  const list = (values || []).filter((v) => Number.isFinite(v));
+  if (!list.length) {
+    container.classList.add('empty');
+    container.textContent = 'No data yet.';
+    return;
+  }
+  const min = Math.min(...list);
+  const max = Math.max(...list);
+  const span = max - min || 1;
+  const bucketCount = Math.max(3, Math.min(bins, list.length));
+  const binWidth = span / bucketCount || 1;
+  const counts = Array.from({ length: bucketCount }, () => 0);
+  list.forEach((val) => {
+    const idx = Math.min(bucketCount - 1, Math.floor((val - min) / binWidth));
+    counts[idx] += 1;
+  });
+  const peak = Math.max(...counts) || 1;
+  counts.forEach((count, idx) => {
+    const bar = document.createElement('div');
+    bar.className = 'mini-bar';
+    const pct = Math.max(6, Math.round((count / peak) * 100));
+    bar.style.height = `${pct}%`;
+    bar.dataset.count = count;
+    const start = min + idx * binWidth;
+    const end = idx === bucketCount - 1 ? max : start + binWidth;
+    const lo = Math.round(start);
+    const hi = Math.round(end);
+    bar.title = `${count} ${label}: ${lo}-${hi}`;
+    container.appendChild(bar);
+  });
+}
+
+function renderStatPills(container, rows = []) {
+  if (!container) return;
+  container.innerHTML = '';
+  rows.filter((row) => row && row.label && row.value).forEach((row) => {
+    const pill = document.createElement('div');
+    pill.className = 'metric-pill';
+
+    const head = document.createElement('div');
+    head.className = 'pill-head';
+    const label = document.createElement('div');
+    label.className = 'pill-label';
+    label.textContent = row.label;
+    const value = document.createElement('div');
+    value.className = 'pill-value';
+    value.textContent = row.value;
+    head.appendChild(label);
+    head.appendChild(value);
+    pill.appendChild(head);
+
+    if (row.hint) {
+      const hint = document.createElement('div');
+      hint.className = 'pill-hint';
+      hint.textContent = row.hint;
+      pill.appendChild(hint);
+    }
+    if (row.extra instanceof HTMLElement) {
+      pill.appendChild(row.extra);
+    }
+
+    container.appendChild(pill);
+  });
+}
+
+function buildSplitBar(fraction) {
+  const frac = Math.min(1, Math.max(0, Number(fraction) || 0));
+  const bar = document.createElement('div');
+  bar.className = 'metric-split';
+  const a = document.createElement('div');
+  a.className = 'hydro-a';
+  a.style.width = `${(frac * 100).toFixed(1)}%`;
+  const b = document.createElement('div');
+  b.className = 'hydro-b';
+  b.style.width = `${(100 - frac * 100).toFixed(1)}%`;
+  bar.appendChild(a);
+  bar.appendChild(b);
+  return bar;
 }
 
 function setBadge(badge, text, color = null) {
@@ -94,10 +212,188 @@ function appendLog(line) {
   }
 }
 
+function renderEpitopeMetrics(meta = []) {
+  if (!el.epitopeMetricsSection) return;
+  const targets = new Set();
+  const list = Array.isArray(meta) ? meta : [];
+  const entries = [];
+  list.forEach((item) => {
+    if (item && item.pdb_id) targets.add(item.pdb_id);
+    const eps = Array.isArray(item?.epitopes) ? item.epitopes : [];
+    eps.forEach((ep) => {
+      const metrics = ep?.metrics || {};
+      let residueCount = asNumber(metrics.residue_count ?? ep.residue_count ?? ep.declared_count);
+      if (!Number.isFinite(residueCount)) {
+        const maskCount = Array.isArray(ep?.mask_residues) ? ep.mask_residues.length : 0;
+        const hotspotCount = Array.isArray(ep?.hotspots) ? ep.hotspots.length : 0;
+        const derived = Math.max(maskCount, hotspotCount);
+        residueCount = derived > 0 ? derived : null;
+      }
+      const hydrophobicCount = asNumber(metrics.hydrophobic_count);
+      const hydrophilicCount = asNumber(metrics.hydrophilic_count);
+      let hydrophobicity = asNumber(metrics.hydrophobicity);
+      if (!Number.isFinite(hydrophobicity) && Number.isFinite(hydrophobicCount) && Number.isFinite(hydrophilicCount)) {
+        const totalChem = hydrophobicCount + hydrophilicCount;
+        if (totalChem > 0) hydrophobicity = hydrophobicCount / totalChem;
+      }
+      const exposedSurface = asNumber(metrics.exposed_surface);
+      const extrusion = asNumber(metrics.extrusion ?? metrics.rsa_mean);
+      const rsaHigh = asNumber(metrics.rsa_high_fraction);
+      const exposedFraction = asNumber(metrics.exposed_fraction);
+      const hasMetric = [
+        residueCount,
+        hydrophobicCount,
+        hydrophilicCount,
+        hydrophobicity,
+        exposedSurface,
+        extrusion,
+        rsaHigh,
+        exposedFraction,
+      ].some((val) => Number.isFinite(val));
+      if (!hasMetric) return;
+      entries.push({
+        name: ep?.name || '',
+        residueCount,
+        hydrophobicCount,
+        hydrophilicCount,
+        hydrophobicity,
+        exposedSurface,
+        extrusion,
+        rsaHigh,
+        exposedFraction,
+      });
+    });
+  });
+
+  if (!entries.length) {
+    el.epitopeMetricsSection.hidden = true;
+    return;
+  }
+
+  if (el.epitopeMetricsSummary) {
+    const targetSuffix = targets.size ? ` · ${targets.size} target${targets.size === 1 ? '' : 's'}` : '';
+    el.epitopeMetricsSummary.textContent = `${entries.length} epitope${entries.length === 1 ? '' : 's'}${targetSuffix}`;
+    el.epitopeMetricsSummary.hidden = false;
+  }
+
+  const residueValues = entries.map((e) => e.residueCount).filter((v) => Number.isFinite(v));
+  renderHistogram(el.epitopeResidueChart, residueValues, { bins: 8, label: 'epitopes' });
+  if (el.epitopeResidueStats) {
+    const stats = describeSeries(residueValues);
+    if (stats) {
+      const spanText = stats.min === stats.max
+        ? `${Math.round(stats.min)} aa`
+        : `${Math.round(stats.min)}-${Math.round(stats.max)} aa`;
+      el.epitopeResidueStats.textContent = `Median ${formatNumberValue(stats.median, 1)} aa · mean ${formatNumberValue(stats.mean, 1)} aa · span ${spanText}`;
+    } else {
+      el.epitopeResidueStats.textContent = 'No residue counts available yet.';
+    }
+  }
+
+  const hydrophobicValues = entries.map((e) => e.hydrophobicCount).filter((v) => Number.isFinite(v));
+  const hydrophilicValues = entries.map((e) => e.hydrophilicCount).filter((v) => Number.isFinite(v));
+  const hydrophobicityValues = entries.map((e) => e.hydrophobicity).filter((v) => Number.isFinite(v));
+  const totalHydrophobic = hydrophobicValues.reduce((acc, val) => acc + val, 0);
+  const totalHydrophilic = hydrophilicValues.reduce((acc, val) => acc + val, 0);
+  const hydroShare = (totalHydrophobic + totalHydrophilic) > 0 ? totalHydrophobic / (totalHydrophobic + totalHydrophilic) : null;
+  const chemRows = [];
+  const hydrophobicStats = describeSeries(hydrophobicValues);
+  if (hydrophobicStats) {
+    chemRows.push({
+      label: 'Hydrophobic residues',
+      value: `${formatNumberValue(hydrophobicStats.median, 1)} med`,
+      hint: `mean ${formatNumberValue(hydrophobicStats.mean, 1)} · max ${formatNumberValue(hydrophobicStats.max, 0)}`,
+    });
+  }
+  const hydrophilicStats = describeSeries(hydrophilicValues);
+  if (hydrophilicStats) {
+    chemRows.push({
+      label: 'Hydrophilic residues',
+      value: `${formatNumberValue(hydrophilicStats.median, 1)} med`,
+      hint: `mean ${formatNumberValue(hydrophilicStats.mean, 1)} · max ${formatNumberValue(hydrophilicStats.max, 0)}`,
+    });
+  }
+  const hydroFracStats = describeSeries(hydrophobicityValues);
+  if (hydroFracStats || hydroShare !== null) {
+    const fracVal = hydroFracStats?.median ?? hydroShare;
+    const fracText = formatPercent(fracVal, 0) || formatNumberValue(fracVal, 2);
+    const rangeText = hydroFracStats
+      ? `range ${formatPercent(hydroFracStats.min, 0) || 'n/a'}–${formatPercent(hydroFracStats.max, 0) || 'n/a'}`
+      : null;
+    const overallText = hydroShare !== null ? `overall ${formatPercent(hydroShare, 0) || '—'}` : null;
+    chemRows.push({
+      label: 'Hydrophobicity (SASA)',
+      value: fracText || '—',
+      hint: [rangeText, overallText].filter(Boolean).join(' · ') || null,
+      extra: hydroShare !== null ? buildSplitBar(hydroShare) : null,
+    });
+  }
+  if (el.epitopeChemistryStats) {
+    if (chemRows.length) {
+      renderStatPills(el.epitopeChemistryStats, chemRows);
+    } else {
+      el.epitopeChemistryStats.textContent = 'No chemistry metrics yet.';
+    }
+  }
+
+  const surfaceValues = entries.map((e) => e.exposedSurface).filter((v) => Number.isFinite(v));
+  const extrusionValues = entries.map((e) => e.extrusion).filter((v) => Number.isFinite(v));
+  const rsaHighValues = entries.map((e) => e.rsaHigh).filter((v) => Number.isFinite(v));
+  const exposedFractionValues = entries.map((e) => e.exposedFraction).filter((v) => Number.isFinite(v));
+  const exposureRows = [];
+  const surfaceStats = describeSeries(surfaceValues);
+  if (surfaceStats) {
+    exposureRows.push({
+      label: 'Exposed SASA',
+      value: `${formatNumberValue(surfaceStats.median, 0)} Å²`,
+      hint: `mean ${formatNumberValue(surfaceStats.mean, 0)} · span ${formatNumberValue(surfaceStats.min, 0)}-${formatNumberValue(surfaceStats.max, 0)}`,
+    });
+  }
+  const exposedFracStats = describeSeries(exposedFractionValues);
+  if (exposedFracStats) {
+    const val = formatPercent(exposedFracStats.median, 0) || formatNumberValue(exposedFracStats.median, 2);
+    const span = `${formatPercent(exposedFracStats.min, 0) || '—'}-${formatPercent(exposedFracStats.max, 0) || '—'}`;
+    exposureRows.push({
+      label: 'Exposed fraction',
+      value: val,
+      hint: `span ${span}`,
+    });
+  }
+  const extrusionStats = describeSeries(extrusionValues);
+  if (extrusionStats) {
+    const val = formatPercent(extrusionStats.median, 0) || formatNumberValue(extrusionStats.median, 2);
+    const span = `${formatPercent(extrusionStats.min, 0) || '—'}-${formatPercent(extrusionStats.max, 0) || '—'}`;
+    exposureRows.push({
+      label: 'Extrusion (mean RSA)',
+      value: val,
+      hint: `range ${span}`,
+    });
+  }
+  const rsaHighStats = describeSeries(rsaHighValues);
+  if (rsaHighStats) {
+    const val = formatPercent(rsaHighStats.median, 0) || formatNumberValue(rsaHighStats.median, 2);
+    exposureRows.push({
+      label: 'RSA ≥0.2 fraction',
+      value: val,
+      hint: `mean ${formatPercent(rsaHighStats.mean, 0) || '—'}`,
+    });
+  }
+  if (el.epitopeExposureStats) {
+    if (exposureRows.length) {
+      renderStatPills(el.epitopeExposureStats, exposureRows);
+    } else {
+      el.epitopeExposureStats.textContent = 'No exposure metrics yet.';
+    }
+  }
+
+  el.epitopeMetricsSection.hidden = false;
+}
+
 function renderSnapshots(meta = []) {
   if (!el.snapshotGrid || !el.snapshotSection) return;
   el.snapshotGrid.innerHTML = '';
   const list = Array.isArray(meta) ? meta : [];
+  renderEpitopeMetrics(list);
   if (!list.length) {
     state.snapshotNames = [];
     el.snapshotSection.hidden = true;
