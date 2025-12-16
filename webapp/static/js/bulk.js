@@ -4,6 +4,8 @@ const state = {
   currentJobId: null,
   snapshotNames: [],
   boltzConfigs: [],
+  epitopePlots: [],
+  lastJobStatus: null,
 };
 
 const el = {
@@ -32,12 +34,10 @@ const el = {
   snapshotSection: document.querySelector('#snapshot-section'),
   snapshotGrid: document.querySelector('#snapshot-grid'),
   snapshotDownloadPdf: document.querySelector('#snapshot-download-pdf'),
+  epitopePlotSection: document.querySelector('#epitope-plot-section'),
+  epitopePlotGrid: document.querySelector('#epitope-plot-grid'),
+  epitopePlotRefresh: document.querySelector('#epitope-plot-refresh'),
   epitopeMetricsSection: document.querySelector('#epitope-metrics-section'),
-  epitopeMetricsSummary: document.querySelector('#epitope-metrics-summary'),
-  epitopeResidueChart: document.querySelector('#epitope-residue-chart'),
-  epitopeResidueStats: document.querySelector('#epitope-residue-stats'),
-  epitopeChemistryStats: document.querySelector('#epitope-chemistry-stats'),
-  epitopeExposureStats: document.querySelector('#epitope-exposure-stats'),
   boltzPanel: document.querySelector('#boltz-config-panel'),
   boltzTable: document.querySelector('#boltz-config-table tbody'),
   boltzSummary: document.querySelector('#boltz-config-summary'),
@@ -307,179 +307,7 @@ function snapshotsChanged(nextNames = []) {
 
 function renderEpitopeMetrics(meta = []) {
   if (!el.epitopeMetricsSection) return;
-  const targets = new Set();
-  const list = Array.isArray(meta) ? meta : [];
-  const entries = [];
-  list.forEach((item) => {
-    if (item && item.pdb_id) targets.add(item.pdb_id);
-    const eps = Array.isArray(item?.epitopes) ? item.epitopes : [];
-    eps.forEach((ep) => {
-      const metrics = ep?.metrics || {};
-      let residueCount = asNumber(metrics.residue_count ?? ep.residue_count ?? ep.declared_count);
-      if (!Number.isFinite(residueCount)) {
-        const maskCount = Array.isArray(ep?.mask_residues) ? ep.mask_residues.length : 0;
-        const hotspotCount = Array.isArray(ep?.hotspots) ? ep.hotspots.length : 0;
-        const derived = Math.max(maskCount, hotspotCount);
-        residueCount = derived > 0 ? derived : null;
-      }
-      const hydrophobicCount = asNumber(metrics.hydrophobic_count);
-      const hydrophilicCount = asNumber(metrics.hydrophilic_count);
-      let hydrophobicity = asNumber(metrics.hydrophobicity);
-      if (!Number.isFinite(hydrophobicity) && Number.isFinite(hydrophobicCount) && Number.isFinite(hydrophilicCount)) {
-        const totalChem = hydrophobicCount + hydrophilicCount;
-        if (totalChem > 0) hydrophobicity = hydrophobicCount / totalChem;
-      }
-      const exposedSurface = asNumber(metrics.exposed_surface);
-      const extrusion = asNumber(metrics.extrusion ?? metrics.rsa_mean);
-      const rsaHigh = asNumber(metrics.rsa_high_fraction);
-      const exposedFraction = asNumber(metrics.exposed_fraction);
-      const hasMetric = [
-        residueCount,
-        hydrophobicCount,
-        hydrophilicCount,
-        hydrophobicity,
-        exposedSurface,
-        extrusion,
-        rsaHigh,
-        exposedFraction,
-      ].some((val) => Number.isFinite(val));
-      if (!hasMetric) return;
-      entries.push({
-        name: ep?.name || '',
-        residueCount,
-        hydrophobicCount,
-        hydrophilicCount,
-        hydrophobicity,
-        exposedSurface,
-        extrusion,
-        rsaHigh,
-        exposedFraction,
-      });
-    });
-  });
-
-  if (!entries.length) {
-    el.epitopeMetricsSection.hidden = true;
-    return;
-  }
-
-  if (el.epitopeMetricsSummary) {
-    const targetSuffix = targets.size ? ` · ${targets.size} target${targets.size === 1 ? '' : 's'}` : '';
-    el.epitopeMetricsSummary.textContent = `${entries.length} epitope${entries.length === 1 ? '' : 's'}${targetSuffix}`;
-    el.epitopeMetricsSummary.hidden = false;
-  }
-
-  const residueValues = entries.map((e) => e.residueCount).filter((v) => Number.isFinite(v));
-  renderHistogram(el.epitopeResidueChart, residueValues, { bins: 8, label: 'epitopes' });
-  if (el.epitopeResidueStats) {
-    const stats = describeSeries(residueValues);
-    if (stats) {
-      const spanText = stats.min === stats.max
-        ? `${Math.round(stats.min)} aa`
-        : `${Math.round(stats.min)}-${Math.round(stats.max)} aa`;
-      el.epitopeResidueStats.textContent = `Median ${formatNumberValue(stats.median, 1)} aa · mean ${formatNumberValue(stats.mean, 1)} aa · span ${spanText}`;
-    } else {
-      el.epitopeResidueStats.textContent = 'No residue counts available yet.';
-    }
-  }
-
-  const hydrophobicValues = entries.map((e) => e.hydrophobicCount).filter((v) => Number.isFinite(v));
-  const hydrophilicValues = entries.map((e) => e.hydrophilicCount).filter((v) => Number.isFinite(v));
-  const hydrophobicityValues = entries.map((e) => e.hydrophobicity).filter((v) => Number.isFinite(v));
-  const totalHydrophobic = hydrophobicValues.reduce((acc, val) => acc + val, 0);
-  const totalHydrophilic = hydrophilicValues.reduce((acc, val) => acc + val, 0);
-  const hydroShare = (totalHydrophobic + totalHydrophilic) > 0 ? totalHydrophobic / (totalHydrophobic + totalHydrophilic) : null;
-  const chemRows = [];
-  const hydrophobicStats = describeSeries(hydrophobicValues);
-  if (hydrophobicStats) {
-    chemRows.push({
-      label: 'Hydrophobic residues',
-      value: `${formatNumberValue(hydrophobicStats.median, 1)} med`,
-      hint: `mean ${formatNumberValue(hydrophobicStats.mean, 1)} · max ${formatNumberValue(hydrophobicStats.max, 0)}`,
-    });
-  }
-  const hydrophilicStats = describeSeries(hydrophilicValues);
-  if (hydrophilicStats) {
-    chemRows.push({
-      label: 'Hydrophilic residues',
-      value: `${formatNumberValue(hydrophilicStats.median, 1)} med`,
-      hint: `mean ${formatNumberValue(hydrophilicStats.mean, 1)} · max ${formatNumberValue(hydrophilicStats.max, 0)}`,
-    });
-  }
-  const hydroFracStats = describeSeries(hydrophobicityValues);
-  if (hydroFracStats || hydroShare !== null) {
-    const fracVal = hydroFracStats?.median ?? hydroShare;
-    const fracText = formatPercent(fracVal, 0) || formatNumberValue(fracVal, 2);
-    const rangeText = hydroFracStats
-      ? `range ${formatPercent(hydroFracStats.min, 0) || 'n/a'}–${formatPercent(hydroFracStats.max, 0) || 'n/a'}`
-      : null;
-    const overallText = hydroShare !== null ? `overall ${formatPercent(hydroShare, 0) || '—'}` : null;
-    chemRows.push({
-      label: 'Hydrophobicity (SASA)',
-      value: fracText || '—',
-      hint: [rangeText, overallText].filter(Boolean).join(' · ') || null,
-      extra: hydroShare !== null ? buildSplitBar(hydroShare) : null,
-    });
-  }
-  if (el.epitopeChemistryStats) {
-    if (chemRows.length) {
-      renderStatPills(el.epitopeChemistryStats, chemRows);
-    } else {
-      el.epitopeChemistryStats.textContent = 'No chemistry metrics yet.';
-    }
-  }
-
-  const surfaceValues = entries.map((e) => e.exposedSurface).filter((v) => Number.isFinite(v));
-  const extrusionValues = entries.map((e) => e.extrusion).filter((v) => Number.isFinite(v));
-  const rsaHighValues = entries.map((e) => e.rsaHigh).filter((v) => Number.isFinite(v));
-  const exposedFractionValues = entries.map((e) => e.exposedFraction).filter((v) => Number.isFinite(v));
-  const exposureRows = [];
-  const surfaceStats = describeSeries(surfaceValues);
-  if (surfaceStats) {
-    exposureRows.push({
-      label: 'Exposed SASA',
-      value: `${formatNumberValue(surfaceStats.median, 0)} Å²`,
-      hint: `mean ${formatNumberValue(surfaceStats.mean, 0)} · span ${formatNumberValue(surfaceStats.min, 0)}-${formatNumberValue(surfaceStats.max, 0)}`,
-    });
-  }
-  const exposedFracStats = describeSeries(exposedFractionValues);
-  if (exposedFracStats) {
-    const val = formatPercent(exposedFracStats.median, 0) || formatNumberValue(exposedFracStats.median, 2);
-    const span = `${formatPercent(exposedFracStats.min, 0) || '—'}-${formatPercent(exposedFracStats.max, 0) || '—'}`;
-    exposureRows.push({
-      label: 'Exposed fraction',
-      value: val,
-      hint: `span ${span}`,
-    });
-  }
-  const extrusionStats = describeSeries(extrusionValues);
-  if (extrusionStats) {
-    const val = formatPercent(extrusionStats.median, 0) || formatNumberValue(extrusionStats.median, 2);
-    const span = `${formatPercent(extrusionStats.min, 0) || '—'}-${formatPercent(extrusionStats.max, 0) || '—'}`;
-    exposureRows.push({
-      label: 'Extrusion (mean RSA)',
-      value: val,
-      hint: `range ${span}`,
-    });
-  }
-  const rsaHighStats = describeSeries(rsaHighValues);
-  if (rsaHighStats) {
-    const val = formatPercent(rsaHighStats.median, 0) || formatNumberValue(rsaHighStats.median, 2);
-    exposureRows.push({
-      label: 'RSA ≥0.2 fraction',
-      value: val,
-      hint: `mean ${formatPercent(rsaHighStats.mean, 0) || '—'}`,
-    });
-  }
-  if (el.epitopeExposureStats) {
-    if (exposureRows.length) {
-      renderStatPills(el.epitopeExposureStats, exposureRows);
-    } else {
-      el.epitopeExposureStats.textContent = 'No exposure metrics yet.';
-    }
-  }
-
-  el.epitopeMetricsSection.hidden = false;
+  el.epitopeMetricsSection.hidden = true;
 }
 
 function renderSnapshots(meta = []) {
@@ -618,6 +446,64 @@ function renderSnapshots(meta = []) {
     el.snapshotGrid.appendChild(card);
   });
   el.snapshotSection.hidden = false;
+}
+
+function renderEpitopePlots(names = []) {
+  if (!el.epitopePlotGrid || !el.epitopePlotSection) return;
+  el.epitopePlotGrid.innerHTML = '';
+  const list = Array.isArray(names) ? names.filter(Boolean) : [];
+  if (!list.length) {
+    state.epitopePlots = [];
+    el.epitopePlotSection.hidden = true;
+    return;
+  }
+  state.epitopePlots = list;
+  list.forEach((name) => {
+    const card = document.createElement('div');
+    card.className = 'snapshot-card';
+    const header = document.createElement('div');
+    header.className = 'snapshot-header';
+    const title = document.createElement('div');
+    title.textContent = name;
+    header.appendChild(title);
+    card.appendChild(header);
+
+    const imgBox = document.createElement('div');
+    imgBox.className = 'snapshot-image';
+    const img = document.createElement('img');
+    const cacheBust = Date.now();
+    img.src = `/api/bulk/file?name=${encodeURIComponent(name)}&t=${cacheBust}`;
+    img.alt = name;
+    img.loading = 'lazy';
+    img.style.maxWidth = '100%';
+    img.style.border = '1px solid #e2e8f0';
+    img.style.borderRadius = '8px';
+    imgBox.appendChild(img);
+    card.appendChild(imgBox);
+
+    el.epitopePlotGrid.appendChild(card);
+  });
+  el.epitopePlotSection.hidden = false;
+}
+
+async function refreshEpitopePlots() {
+  if (el.epitopePlotRefresh) el.epitopePlotRefresh.disabled = true;
+  try {
+    if (!state.currentJobId) {
+      renderEpitopePlots(state.epitopePlots);
+      if (!state.epitopePlots.length) showAlert('No epitope plots to refresh yet.');
+      return;
+    }
+    const job = await fetchJob(state.currentJobId);
+    updateJobUI(job);
+    if (state.epitopePlots.length) {
+      renderEpitopePlots(state.epitopePlots);
+    }
+  } catch (err) {
+    showAlert(err.message || 'Unable to refresh epitope plots.');
+  } finally {
+    if (el.epitopePlotRefresh) el.epitopePlotRefresh.disabled = false;
+  }
 }
 
 async function loadSnapshotMetadata(names) {
@@ -1122,10 +1008,21 @@ function stopJobPolling() {
 
 function updateJobUI(job) {
   if (!job) return;
+  const prevStatus = state.lastJobStatus;
+  state.lastJobStatus = job.status;
   resetJobLog(job.logs.join('\n'));
   const newSnapshots = Array.isArray(job.details?.snapshots) ? job.details.snapshots.filter(Boolean) : [];
   if (newSnapshots.length && snapshotsChanged(newSnapshots)) {
     loadSnapshotMetadata(newSnapshots);
+  }
+  const epPlotRaw = Array.isArray(job.details?.epitope_plot_files)
+    ? job.details.epitope_plot_files
+    : Array.isArray(job.details?.epitope_plots)
+      ? job.details.epitope_plots
+      : [];
+  const epPlotNames = epPlotRaw.map((p) => (p || '').split('/').pop()).filter(Boolean);
+  if (epPlotNames.length || state.epitopePlots.length) {
+    renderEpitopePlots(epPlotNames);
   }
   if (el.jobMeta) {
     el.jobMeta.innerHTML = '';
@@ -1154,6 +1051,9 @@ function updateJobUI(job) {
         if (name) addLink('Snapshot', name);
       });
     }
+    if (epPlotNames.length) {
+      epPlotNames.forEach((name) => addLink('Epitope plot', name));
+    }
     if (parts.length) {
       parts.forEach((node, idx) => {
         el.jobMeta.appendChild(node);
@@ -1175,7 +1075,7 @@ function updateJobUI(job) {
     setBadge(el.bulkStatus, 'Bulk complete', 'rgba(134, 239, 172, 0.25)');
     showAlert(job.message || 'Bulk job finished.', false);
     setActionButtonsDisabled(false);
-    if (job.details?.design_config_filename) {
+    if (job.details?.design_config_filename && prevStatus !== 'success') {
       const url = `/api/bulk/file?name=${encodeURIComponent(job.details.design_config_filename)}`;
       window.open(url, '_blank');
     }
@@ -1183,6 +1083,11 @@ function updateJobUI(job) {
       loadSnapshotMetadata(job.details.snapshots.filter(Boolean));
     } else {
       renderSnapshots([]);
+    }
+    if (epPlotNames.length) {
+      renderEpitopePlots(epPlotNames);
+    } else {
+      renderEpitopePlots([]);
     }
     stopJobPolling();
   } else {
@@ -1195,8 +1100,10 @@ function updateJobUI(job) {
 
 function startJobPolling(jobId) {
   state.currentJobId = jobId;
+  state.lastJobStatus = null;
   stopJobPolling();
   renderSnapshots([]);
+  renderEpitopePlots([]);
   const poll = async () => {
     try {
       const job = await fetchJob(jobId);
@@ -1323,6 +1230,7 @@ function init() {
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
+  if (el.epitopePlotRefresh) el.epitopePlotRefresh.addEventListener('click', refreshEpitopePlots);
   document.addEventListener('click', (evt) => {
     const closeTarget = evt.target?.dataset?.close;
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);

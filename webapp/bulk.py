@@ -139,10 +139,51 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
                 mask_residues = []
     hotspots = ep.get("hotspots") or []
     hotspots = [str(h).strip() for h in hotspots if str(h).strip()]
+
+    def _as_int(value: object) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _as_float(value: object) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    chemistry = ep.get("chemistry") if isinstance(ep, dict) else {}
+    exposed_counts = chemistry.get("exposed_counts") if isinstance(chemistry, dict) else {}
+    fractions = chemistry.get("exposed_sasa_weighted_fractions") if isinstance(chemistry, dict) else {}
+    hydrophobic_count = _as_int(exposed_counts.get("hydrophobic") if isinstance(exposed_counts, dict) else None)
+    polar_count = _as_int(exposed_counts.get("polar") if isinstance(exposed_counts, dict) else None)
+    charged_count = _as_int(exposed_counts.get("charged") if isinstance(exposed_counts, dict) else None)
+    hydrophilic_count = None
+    if polar_count is not None or charged_count is not None:
+        hydrophilic_count = (polar_count or 0) + (charged_count or 0)
+    hydrophobicity = _as_float(fractions.get("hydrophobic") if isinstance(fractions, dict) else None)
+    if hydrophobicity is None and hydrophobic_count is not None and hydrophilic_count is not None:
+        total = hydrophobic_count + hydrophilic_count
+        if total > 0:
+            hydrophobicity = round(hydrophobic_count / total, 3)
+    sasa_block = ep.get("sasa") if isinstance(ep, dict) else {}
+    rsa_block = ep.get("rsa") if isinstance(ep, dict) else {}
+    metrics = {
+        "residue_count": _as_int(ep.get("declared_count") if isinstance(ep, dict) else None),
+        "exposed_count": _as_int(ep.get("exposed_count") if isinstance(ep, dict) else None),
+        "exposed_fraction": _as_float(ep.get("exposed_fraction") if isinstance(ep, dict) else None),
+        "hydrophobic_count": hydrophobic_count,
+        "hydrophilic_count": hydrophilic_count,
+        "hydrophobicity": hydrophobicity,
+        "exposed_surface": _as_float(sasa_block.get("exposed_total") if isinstance(sasa_block, dict) else None),
+        "extrusion": _as_float(rsa_block.get("mean") if isinstance(rsa_block, dict) else None),
+        "rsa_high_fraction": _as_float(rsa_block.get("frac_ge_0.2") if isinstance(rsa_block, dict) else None),
+    }
     return {
         "name": name,
         "hotspots": hotspots,
         "mask_residues": mask_residues,
+        "metrics": metrics,
     }
 
 
@@ -222,6 +263,88 @@ def _distribute_designs(total: int, count: int) -> List[int]:
     return designs
 
 
+def _epitope_stats_payload(
+    ep_data: dict,
+    *,
+    pdb_id: str,
+    ep_index: int,
+    prepared_pdb: Path,
+) -> dict:
+    name = ep_data.get("name") or f"Epitope {ep_index}"
+    hotspots = ep_data.get("hotspots") or []
+    mask_residues = ep_data.get("mask_residues") or []
+    selected_residues = mask_residues or hotspots
+    metrics = ep_data.get("metrics") or {}
+
+    def _as_int(value: object) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _as_float(value: object) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    hydrophobicity = _as_float(metrics.get("hydrophobicity"))
+    hydrophobic_count = _as_int(metrics.get("hydrophobic_count"))
+    hydrophilic_count = _as_int(metrics.get("hydrophilic_count"))
+    residue_count = _as_int(metrics.get("residue_count")) or (len(selected_residues) or None)
+    hydrophilicity = None
+    if hydrophobicity is not None:
+        hydrophilicity = round(max(0.0, 1.0 - hydrophobicity), 4)
+    elif hydrophilic_count is not None and residue_count:
+        hydrophilicity = round(hydrophilic_count / residue_count, 4)
+
+    return {
+        "pdb_id": pdb_id.upper(),
+        "pdb_path": str(prepared_pdb),
+        "epitope_index": ep_index,
+        "epitope_name": name,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "selected_residues": selected_residues,
+        "hotspots": hotspots,
+        "mask_residues": mask_residues,
+        "metrics": {
+            "residue_count": residue_count,
+            "hydrophobic_count": hydrophobic_count,
+            "hydrophilic_count": hydrophilic_count,
+            "hydrophobicity": hydrophobicity,
+            "hydrophilicity": hydrophilicity,
+            "extrusion_index": _as_float(metrics.get("extrusion")),
+            "exposed_fraction": _as_float(metrics.get("exposed_fraction")),
+            "exposed_count": _as_int(metrics.get("exposed_count")),
+            "exposed_surface": _as_float(metrics.get("exposed_surface")),
+            "rsa_high_fraction": _as_float(metrics.get("rsa_high_fraction")),
+        },
+    }
+
+
+def _write_epitope_stats_file(
+    ep_dir: Path,
+    *,
+    pdb_id: str,
+    ep_index: int,
+    ep_data: dict,
+    prepared_pdb: Path,
+    log: Callable[[str], None],
+) -> None:
+    payload = _epitope_stats_payload(ep_data, pdb_id=pdb_id, ep_index=ep_index, prepared_pdb=prepared_pdb)
+    stats_path = ep_dir / "epitope_stats.json"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.write_text(json.dumps(payload, indent=2))
+    residue_note = payload.get("metrics", {}).get("residue_count") or len(payload.get("selected_residues") or [])
+    msg = (
+        f"  [epitope-stats] {payload.get('pdb_id', pdb_id.upper())} · "
+        f"{payload.get('epitope_name', f'epitope_{ep_index}')} -> {stats_path} "
+        f"(residues={residue_note})"
+    )
+    log(msg)
+    print(msg)
+
+
 def _write_boltzgen_configs(
     pdb_id: str,
     epitopes: List[dict],
@@ -247,6 +370,7 @@ def _write_boltzgen_configs(
     scaffold_paths = engine._resolve_nanobody_scaffolds()
     for idx, ep in enumerate(epitopes, start=1):
         ep_dir = config_root / f"epitope_{idx}"
+        ep_dir.mkdir(parents=True, exist_ok=True)
         spec_path = ep_dir / "boltzgen_config.yaml"
         count = design_counts[idx - 1] if idx - 1 < len(design_counts) else (design_counts[-1] if design_counts else 1)
         name = ep.get("name") or f"Epitope {idx}"
@@ -272,6 +396,19 @@ def _write_boltzgen_configs(
             print(msg)
         except Exception as exc:  # pragma: no cover - defensive
             msg = f"  [boltzgen-config] failed for {pdb_id.upper()} · {name}: {exc}"
+            log(msg)
+            print(msg)
+        try:
+            _write_epitope_stats_file(
+                ep_dir,
+                pdb_id=pdb_id,
+                ep_index=idx,
+                ep_data=ep,
+                prepared_pdb=prepared_pdb,
+                log=log,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            msg = f"  [epitope-stats] failed for {pdb_id.upper()} · {name}: {exc}"
             log(msg)
             print(msg)
 
@@ -880,6 +1017,155 @@ def _epitope_run_label(base_label: str, ep_name: Optional[str], index: int) -> s
     return f"{base_label}_{safe}"
 
 
+def _write_epitope_plots(
+    epitopes: List[dict],
+    out_dir: Path,
+    timestamp: str,
+    log: Callable[[str], None],
+) -> List[str]:
+    """Render simple matplotlib plots for epitope metrics and return saved paths."""
+    if not epitopes:
+        return []
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - environment guard
+        msg = f"[epitope-plots] Matplotlib unavailable: {exc}"
+        log(msg)
+        print(msg)
+        return []
+
+    def _residue_count(ep: dict) -> Optional[int]:
+        metrics = ep.get("metrics") or {}
+        value = metrics.get("residue_count") or ep.get("declared_count")
+        try:
+            return int(value)
+        except Exception:
+            pass
+        masks = ep.get("mask_residues") or []
+        hotspots = ep.get("hotspots") or []
+        fallback = max(len(masks), len(hotspots))
+        return fallback or None
+
+    def _hydrophobicity(ep: dict) -> Optional[float]:
+        metrics = ep.get("metrics") or {}
+        raw = metrics.get("hydrophobicity")
+        try:
+            return float(raw)
+        except Exception:
+            pass
+        hydrophobic = metrics.get("hydrophobic_count")
+        hydrophilic = metrics.get("hydrophilic_count")
+        try:
+            if hydrophobic is not None and hydrophilic is not None:
+                hydrophobic = float(hydrophobic)
+                hydrophilic = float(hydrophilic)
+                total = hydrophobic + hydrophilic
+                if total > 0:
+                    return hydrophobic / total
+        except Exception:
+            return None
+        return None
+
+    def _exposed_surface(ep: dict) -> Optional[float]:
+        metrics = ep.get("metrics") or {}
+        try:
+            return float(metrics.get("exposed_surface"))
+        except Exception:
+            return None
+
+    def _extrusion(ep: dict) -> Optional[float]:
+        metrics = ep.get("metrics") or {}
+        try:
+            return float(metrics.get("extrusion"))
+        except Exception:
+            try:
+                return float(metrics.get("rsa_mean"))
+            except Exception:
+                return None
+
+    def _rsa_high(ep: dict) -> Optional[float]:
+        metrics = ep.get("metrics") or {}
+        try:
+            return float(metrics.get("rsa_high_fraction"))
+        except Exception:
+            return None
+
+    residue_counts = [rc for rc in (_residue_count(ep) for ep in epitopes) if rc is not None]
+    hydrophobicity_vals = [hv for hv in (_hydrophobicity(ep) for ep in epitopes) if hv is not None]
+    scatter_points = []
+    for ep in epitopes:
+        surface = _exposed_surface(ep)
+        extrusion = _extrusion(ep)
+        if surface is None or extrusion is None:
+            continue
+        rsa = _rsa_high(ep)
+        label = ep.get("name") or ep.get("epitope_name") or ""
+        scatter_points.append((surface, extrusion, rsa, label))
+
+    saved: List[str] = []
+
+    if residue_counts:
+        plt.figure(figsize=(7, 4.5))
+        plt.hist(residue_counts, bins=min(12, max(6, len(residue_counts))), color="#2563eb", edgecolor="#0f172a", alpha=0.8)
+        plt.xlabel("Residue count")
+        plt.ylabel("Epitopes")
+        plt.title("Epitope residue count distribution")
+        plt.tight_layout()
+        path = out_dir / f"epitope_residue_hist_{timestamp}.png"
+        plt.savefig(path, dpi=200)
+        plt.close()
+        saved.append(str(path))
+        msg = f"[epitope-plots] residue histogram -> {path}"
+        log(msg)
+        print(msg)
+
+    if hydrophobicity_vals:
+        plt.figure(figsize=(7, 4.5))
+        plt.hist([v * 100 for v in hydrophobicity_vals], bins=10, color="#10b981", edgecolor="#0f172a", alpha=0.8)
+        plt.xlabel("Hydrophobicity (SASA, %)")
+        plt.ylabel("Epitopes")
+        plt.title("Hydrophobicity distribution")
+        plt.tight_layout()
+        path = out_dir / f"epitope_hydrophobicity_hist_{timestamp}.png"
+        plt.savefig(path, dpi=200)
+        plt.close()
+        saved.append(str(path))
+        msg = f"[epitope-plots] hydrophobicity histogram -> {path}"
+        log(msg)
+        print(msg)
+
+    if scatter_points:
+        plt.figure(figsize=(7, 4.5))
+        sizes = [max(20, min(120, (p[2] or 0.5) * 200)) if p[2] is not None else 30 for p in scatter_points]
+        rsa_colors = [p[2] if p[2] is not None else 0.0 for p in scatter_points]
+        scatter = plt.scatter(
+            [p[0] for p in scatter_points],
+            [p[1] for p in scatter_points],
+            s=sizes,
+            c=rsa_colors,
+            cmap="viridis",
+            alpha=0.8,
+            edgecolors="#0f172a",
+        )
+        plt.xlabel("Exposed SASA (Å²)")
+        plt.ylabel("Extrusion (mean RSA)")
+        plt.title("Epitope exposure vs extrusion")
+        cbar = plt.colorbar(scatter)
+        cbar.set_label("RSA ≥0.2 fraction (color)")
+        plt.tight_layout()
+        path = out_dir / f"epitope_exposure_scatter_{timestamp}.png"
+        plt.savefig(path, dpi=200)
+        plt.close()
+        saved.append(str(path))
+        msg = f"[epitope-plots] exposure scatter -> {path}"
+        log(msg)
+        print(msg)
+
+    return saved
+
+
 def run_bulk_workflow(
     request: BulkRunRequest,
     *,
@@ -914,6 +1200,8 @@ def run_bulk_workflow(
     design_rows: List[Dict[str, object]] = []
     design_jobs: List[Dict[str, object]] = []
     snapshots: List[str] = []
+    epitope_entries: List[dict] = []
+    epitope_plot_paths: List[str] = []
 
     design_settings = request.design_settings
     insights_path = out_dir / f"bulk_insights_{timestamp}.csv"
@@ -931,6 +1219,10 @@ def run_bulk_workflow(
             status = get_target_status(pdb_id)
         except Exception as exc:  # pragma: no cover - defensive
             log(f"  ! Target status unavailable: {exc}")
+        try:
+            epitope_entries.extend([{"pdb_id": pdb_id, **ep} for ep in _load_epitopes_for_target(pdb_id)])
+        except Exception as exc:  # pragma: no cover - defensive
+            log(f"  ! Failed to load epitope metadata for {pdb_id}: {exc}")
 
         meta_state = (status or {}).get("epitope_meta_state")
         meta_incomplete = meta_state in (None, "missing", "partial")
@@ -1174,6 +1466,8 @@ def run_bulk_workflow(
         _write_csv(design_path, headers, design_rows)
         log(f"[design-config] saved → {design_path}")
 
+    epitope_plot_paths = _write_epitope_plots(epitope_entries, out_dir, timestamp, log) if epitope_entries else []
+
     job_store.update(
         job_id,
         status=JobStatus.SUCCESS,
@@ -1188,6 +1482,8 @@ def run_bulk_workflow(
             "submitted_designs": len(design_jobs),
             "log_path": str(log_path),
             "snapshots": snapshots,
+            "epitope_plots": epitope_plot_paths,
+            "epitope_plot_files": [Path(p).name for p in epitope_plot_paths if p],
         },
     )
     if snapshots:

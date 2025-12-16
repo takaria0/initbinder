@@ -122,28 +122,15 @@
               <div id="snapshot-grid" class="catalog-viewer"></div>
             </section>
 
-            <section id="epitope-metrics-section" hidden>
+            <section id="epitope-plot-section" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <h2 style="margin: 0;">Epitope metrics</h2>
-                <div id="epitope-metrics-summary" class="badge"></div>
+                <h2 style="margin: 0;">Epitope plots</h2>
+                <button type="button" id="epitope-plot-refresh" class="ghost">Refresh plots</button>
               </div>
-              <p class="help-text" style="margin-top: 0;">Aggregated exposure and chemistry statistics across all detected epitopes (antigen agnostic).</p>
-              <div class="epitope-metrics-grid">
-                <div class="epitope-metric-card">
-                  <div class="metric-title">Residue count distribution</div>
-                  <div id="epitope-residue-chart" class="mini-chart"></div>
-                  <div id="epitope-residue-stats" class="metric-subtext"></div>
-                </div>
-                <div class="epitope-metric-card">
-                  <div class="metric-title">Chemistry balance</div>
-                  <div id="epitope-chemistry-stats" class="metric-list"></div>
-                </div>
-                <div class="epitope-metric-card">
-                  <div class="metric-title">Exposure &amp; extrusion</div>
-                  <div id="epitope-exposure-stats" class="metric-list"></div>
-                </div>
-              </div>
+              <div id="epitope-plot-grid" class="catalog-viewer"></div>
             </section>
+
+            <section id="epitope-metrics-section" hidden style="display: none;"></section>
 
             <section>
               <h2>Design binders</h2>
