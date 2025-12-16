@@ -164,6 +164,7 @@ class BulkCsvRow(BaseModel):
     raw_index: int
     preset_name: str
     antigen_url: Optional[str] = None
+    protein_name: Optional[str] = None
     pdb_id: Optional[str] = Field(None, max_length=32)
     accession: Optional[str] = Field(None, max_length=40)
     resolved_pdb_id: Optional[str] = None

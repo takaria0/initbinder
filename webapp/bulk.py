@@ -814,6 +814,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
     antigen_idx = None
     pdb_idx = None
     accession_idx = None
+    protein_idx = None
     if has_header:
         preset_idx = _find_index(header, ["preset name", "preset", "name", "target"])
         if preset_idx is None:
@@ -823,6 +824,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
             antigen_idx = _find_index(header, ["antigen_catalog", "catalog"])
         pdb_idx = _find_index(header, ["pdb id", "pdb_id", "pdbid", "pdb", "chosen_pdb", "chosen pdb"])
         accession_idx = _find_index(header, ["vendor_product_accession", "vendor_accession"])
+        protein_idx = _find_index(header, ["protein_name", "protein name", "description", "target_name"])
     else:
         preset_idx = 0
         antigen_idx = 1
@@ -842,12 +844,14 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
                     preset_name = _normalize(row[alt_idx])
         pdb_raw = _clean_pdb_id(row[pdb_idx]) if pdb_idx is not None and len(row) > pdb_idx else None
         accession_raw = _normalize(row[accession_idx]) if accession_idx is not None and len(row) > accession_idx else None
+        protein_name = _normalize(row[protein_idx]) if protein_idx is not None and len(row) > protein_idx else None
         if not preset_name and not antigen_url and not pdb_raw:
             continue
         entries.append({
             "raw_index": raw_index,
             "preset_name": preset_name or f"Row {raw_index}",
             "antigen_url": antigen_url,
+            "protein_name": protein_name,
             "pdb_id": pdb_raw,
             "accession": accession_raw,
         })
@@ -862,6 +866,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
         warnings: List[str] = []
         preset_obj = None
         preset_name = entry.get("preset_name") or ""
+        protein_name = entry.get("protein_name")
         antigen_url = entry.get("antigen_url") or ""
         pdb_id = _clean_pdb_id(entry.get("pdb_id"))
         accession = entry.get("accession") or ""
@@ -888,6 +893,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
                 raw_index=int(entry.get("raw_index") or 0),
                 preset_name=preset_name,
                 antigen_url=antigen_url,
+                protein_name=protein_name,
                 accession=accession or None,
                 pdb_id=pdb_id,
                 resolved_pdb_id=resolved_pdb,

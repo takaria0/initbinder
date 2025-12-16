@@ -13,6 +13,12 @@
       #boltz-config-panel .boltz-cmd-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
       #boltz-config-panel .boltz-cmd-cell button { font-size: 12px; padding: 6px 10px; }
       #boltz-config-panel .boltz-status-cell { white-space: nowrap; }
+      #boltz-config-panel .target-row { cursor: pointer; background: #f8fafc; }
+      #boltz-config-panel .target-row td { border-top: 1px solid #e2e8f0; }
+      #boltz-config-panel .target-row .toggle-icon { display: inline-block; width: 12px; margin-right: 6px; transition: transform 0.15s ease; color: #475569; }
+      #boltz-config-panel .target-row.expanded .toggle-icon { transform: rotate(90deg); }
+      #boltz-config-panel .epitope-row[hidden] { display: none; }
+      .modal pre.scrollable { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; max-height: 60vh; overflow: auto; margin: 0; }
     </style>
   </head>
   <body>
@@ -73,44 +79,11 @@
                   <tr>
                     <th>#</th>
                     <th>Preset</th>
+                    <th>Protein name</th>
                     <th>Antigen URL</th>
                     <th>Accession</th>
                     <th>PDB ID</th>
-                    <th>Matched preset</th>
                     <th>Notes</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
-            </section>
-
-            <section id="boltz-config-panel" class="table-scroll" hidden>
-              <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
-                <div>
-                  <h3 style="margin: 0;">BoltzGen configs</h3>
-                  <div id="boltz-config-summary" class="badge" hidden></div>
-                </div>
-                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
-                  <label>Epitope design num
-                    <input type="number" id="boltz-design-count" value="100" min="1">
-                  </label>
-                  <label>Max runtime (hours)
-                    <input type="number" id="boltz-time-hours" value="12" min="1" max="240" step="1">
-                  </label>
-                  <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
-                </div>
-              </div>
-              <p class="help-text" style="margin-top: 0;">Detected <code>boltzgen_config.yaml</code> files under each target. Run all epitopes or trigger them individually.</p>
-              <table id="boltz-config-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Preset</th>
-                    <th>PDB ID</th>
-                    <th>Epitope</th>
-                    <th>Binding</th>
-                    <th>Status</th>
-                    <th>Commands</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -135,21 +108,45 @@
 
             <section id="epitope-metrics-section" hidden style="display: none;"></section>
 
+            <section id="boltz-config-panel" class="table-scroll" hidden>
+              <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
+                <div>
+                  <h3 style="margin: 0;">BoltzGen configs</h3>
+                  <div id="boltz-config-summary" class="badge" hidden></div>
+                </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <label>Epitope design num
+                    <input type="number" id="boltz-design-count" value="100" min="1">
+                  </label>
+                  <label>Max runtime (hours)
+                    <input type="number" id="boltz-time-hours" value="12" min="1" max="240" step="1">
+                  </label>
+                  <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
+                </div>
+              </div>
+              <p class="help-text" style="margin-top: 0;">Detected <code>boltzgen_config.yaml</code> files under each target. Click a PDB row to reveal epitopes. Use Show run command for a copy-paste set of cluster steps.</p>
+              <table id="boltz-config-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Preset</th>
+                    <th>PDB ID</th>
+                    <th>Epitope</th>
+                    <th>Binding</th>
+                    <th>Status</th>
+                    <th>Commands</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </section>
+
             <section>
-              <h2>Design binders</h2>
-              <p class="help-text" style="margin-top: 0;">Configure binder design runs sent to the cluster using the epitopes above.</p>
+              <h2>Bulk submit</h2>
+              <p class="help-text" style="margin-top: 0;">Kick off init/decide/prep, PyMOL exports, and epitope visuals. BoltzGen config runs can be launched below.</p>
               <div class="form-row">
-                <label>Design engine
-                  <select id="design-engine">
-                    <option value="boltzgen" selected>BoltzGen</option>
-                    <option value="rfantibody">RFantibody</option>
-                  </select>
-                </label>
-                <label>Total designs
-                  <input type="number" id="design-total" value="90" min="1">
-                </label>
                 <label>Run label prefix
-                  <input type="text" id="bulk-run-prefix" value="bulk">
+                  <input type="text" id="bulk-run-prefix" value="boltz">
                 </label>
                 <label>Submission throttle (sec)
                   <input type="number" id="bulk-throttle" value="3" step="0.5" min="0">
@@ -183,7 +180,7 @@
           <h3 id="boltz-config-title">BoltzGen config</h3>
           <button type="button" id="boltz-config-close" class="ghost">Close</button>
         </div>
-        <pre id="boltz-config-body" class="scrollable" style="max-height: 60vh; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;"></pre>
+        <pre id="boltz-config-body" class="scrollable"></pre>
       </div>
     </div>
 
@@ -194,7 +191,18 @@
           <h3 id="boltz-log-title">Job log</h3>
           <button type="button" id="boltz-log-close" class="ghost">Close</button>
         </div>
-        <pre id="boltz-log-body" class="scrollable" style="max-height: 60vh; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;">Select a job to view logs.</pre>
+        <pre id="boltz-log-body" class="scrollable">Select a job to view logs.</pre>
+      </div>
+    </div>
+
+    <div id="boltz-run-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-run"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="boltz-run-title">Cluster run steps</h3>
+          <button type="button" id="boltz-run-close" class="ghost">Close</button>
+        </div>
+        <pre id="boltz-run-body" class="scrollable">Loading manual run steps…</pre>
       </div>
     </div>
 

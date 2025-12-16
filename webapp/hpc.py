@@ -807,6 +807,25 @@ PY
             "target_root": str(self.target_root) if self.target_root else None,
             "target_root_exists": False,
         }
+        try:
+            status["ssh_target"] = self._ssh_target()
+        except Exception:
+            status["ssh_target"] = None
+        bg_cfg = getattr(self.cfg, "boltzgen", None)
+        if bg_cfg:
+            status["boltzgen"] = {
+                "partition": getattr(bg_cfg, "partition", None),
+                "account": getattr(bg_cfg, "account", None),
+                "gpus": getattr(bg_cfg, "gpus", None),
+                "cpus": getattr(bg_cfg, "cpus", None),
+                "mem_gb": getattr(bg_cfg, "mem_gb", None),
+                "time_hours": getattr(bg_cfg, "time_hours", None),
+                "cache_dir": str(getattr(bg_cfg, "cache_dir", None)) if getattr(bg_cfg, "cache_dir", None) else None,
+                "output_root": str(getattr(bg_cfg, "output_root", None)) if getattr(bg_cfg, "output_root", None) else None,
+                "conda_activate": getattr(bg_cfg, "conda_activate", None),
+                "extra_args": getattr(bg_cfg, "extra_run_args", None),
+            }
+        status["conda_activate"] = self.cfg.conda_activate
         if self.cfg.mock:
             status.update({"control_master": True, "remote_root_exists": True, "details": "mock mode"})
             return status
