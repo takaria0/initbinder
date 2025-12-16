@@ -14,6 +14,7 @@ import yaml
 
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .config import load_config
+from .designs import BoltzGenEngine
 from .job_store import JobStatus, JobStore
 from .models import (
     BulkCsvRow,
@@ -212,6 +213,60 @@ def _distribute_designs(total: int, count: int) -> List[int]:
     designs = [base + (1 if i < remainder else 0) for i in range(count)]
     designs = [d if d > 0 else 1 for d in designs]
     return designs
+
+
+def _write_boltzgen_configs(
+    pdb_id: str,
+    epitopes: List[dict],
+    design_counts: List[int],
+    log: Callable[[str], None],
+) -> None:
+    """Emit per-epitope BoltzGen specs under targets/{pdb}/configs/."""
+    cfg = load_config()
+    workspace = cfg.paths.workspace_root or cfg.paths.project_root
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+    prep_dir = target_dir / "prep"
+    prepared_pdb = prep_dir / "prepared.pdb"
+    if not prepared_pdb.exists():
+        msg = f"  [boltzgen-config] Missing prepared.pdb for {pdb_id.upper()} (expected {prepared_pdb}); skipping spec export."
+        log(msg)
+        print(msg)
+        return
+
+    config_root = target_dir / "configs"
+    config_root.mkdir(parents=True, exist_ok=True)
+    engine = BoltzGenEngine()
+    scaffold_paths = engine._resolve_nanobody_scaffolds()
+    for idx, ep in enumerate(epitopes, start=1):
+        ep_dir = config_root / f"epitope_{idx}"
+        spec_path = ep_dir / "boltzgen_config.yaml"
+        count = design_counts[idx - 1] if idx - 1 < len(design_counts) else (design_counts[-1] if design_counts else 1)
+        name = ep.get("name") or f"Epitope {idx}"
+        try:
+            info = engine._write_spec(
+                workspace=workspace,
+                spec_path=spec_path,
+                prepared_pdb=prepared_pdb,
+                pdb_id=pdb_id,
+                run_label="configs",
+                arm=name,
+                hotspot_keys=ep.get("hotspots") or [],
+                epitope_residues=ep.get("mask_residues") or [],
+                num_designs=count,
+                scaffold_paths=scaffold_paths,
+                binding_override=None,
+            )
+            msg = (
+                f"  [boltzgen-config] {pdb_id.upper()} · {name} -> {spec_path} "
+                f"(designs={count}, hotspots={info.hotspot_count})"
+            )
+            log(msg)
+            print(msg)
+        except Exception as exc:  # pragma: no cover - defensive
+            msg = f"  [boltzgen-config] failed for {pdb_id.upper()} · {name}: {exc}"
+            log(msg)
+            print(msg)
 
 
 def _parse_bulk_csv(csv_text: str) -> List[dict]:
@@ -575,6 +630,7 @@ def run_bulk_workflow(
                             rel_snap = snap
                         snapshots.append(str(rel_snap))
                         log(f"  Snapshot saved → {snap} (dir: {snap.parent})")
+                        job_store.update(job_id, details={"snapshots": list(snapshots)})
                     except Exception as exc:
                         log(f"  ! Snapshot failed: {exc}")
                 except PyMolLaunchError as exc:
@@ -648,8 +704,14 @@ def run_bulk_workflow(
 
         if design_settings.model_engine == "boltzgen":
             epitopes = _load_epitopes_for_target(pdb_id)
+            design_splits = []
             if epitopes and not design_settings.boltz_binding:
-                splits = _distribute_designs(design_settings.total_designs, len(epitopes))
+                design_splits = _distribute_designs(design_settings.total_designs, len(epitopes))
+                if request.export_designs and not request.submit_designs:
+                    try:
+                        _write_boltzgen_configs(pdb_id, epitopes, design_splits, log)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log(f"  ! Failed to write BoltzGen configs: {exc}")
                 for ep_idx, ep in enumerate(epitopes, start=1):
                     binding_str = _format_binding_from_ep(ep)
                     run_label = _epitope_run_label(run_label_base, ep.get("name"), ep_idx)
@@ -659,7 +721,7 @@ def run_bulk_workflow(
                         "antigen_url": row.antigen_url,
                         "model_engine": design_settings.model_engine,
                         "epitope": ep.get("name"),
-                        "total_designs": splits[ep_idx - 1],
+                        "total_designs": design_splits[ep_idx - 1],
                         "num_sequences": design_settings.num_sequences,
                         "temperature": design_settings.temperature,
                         "binder_chain_id": design_settings.binder_chain_id,
@@ -670,6 +732,8 @@ def run_bulk_workflow(
                         "boltz_binding": binding_str,
                     })
             else:
+                if request.export_designs and not request.submit_designs:
+                    log("  [boltzgen-config] No epitope metadata or binding override present; skipping per-epitope configs.")
                 queue_design_job({
                     "pdb_id": pdb_id,
                     "preset_name": row.preset_name,
@@ -703,6 +767,15 @@ def run_bulk_workflow(
                 "run_label": run_label_base,
                 "boltz_binding": design_settings.boltz_binding,
             })
+
+        # Progress + incremental metadata for the UI
+        progress = idx / total if total else None
+        job_store.update(
+            job_id,
+            progress=progress,
+            message=f"Processed {idx}/{total}: {row.preset_name}",
+            details={"snapshots": list(snapshots)},
+        )
 
     if request.export_insights and insights_rows:
         headers = [

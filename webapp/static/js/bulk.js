@@ -212,6 +212,15 @@ function appendLog(line) {
   }
 }
 
+function snapshotsChanged(nextNames = []) {
+  const prev = state.snapshotNames || [];
+  if (prev.length !== nextNames.length) return true;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i] !== nextNames[i]) return true;
+  }
+  return false;
+}
+
 function renderEpitopeMetrics(meta = []) {
   if (!el.epitopeMetricsSection) return;
   const targets = new Set();
@@ -712,6 +721,10 @@ function stopJobPolling() {
 function updateJobUI(job) {
   if (!job) return;
   resetJobLog(job.logs.join('\n'));
+  const newSnapshots = Array.isArray(job.details?.snapshots) ? job.details.snapshots.filter(Boolean) : [];
+  if (newSnapshots.length && snapshotsChanged(newSnapshots)) {
+    loadSnapshotMetadata(newSnapshots);
+  }
   if (el.jobMeta) {
     el.jobMeta.innerHTML = '';
     const parts = [];
@@ -781,6 +794,7 @@ function updateJobUI(job) {
 function startJobPolling(jobId) {
   state.currentJobId = jobId;
   stopJobPolling();
+  renderSnapshots([]);
   const poll = async () => {
     try {
       const job = await fetchJob(jobId);
