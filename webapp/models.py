@@ -186,6 +186,12 @@ class BulkDesignSettings(BaseModel):
         max_length=500,
         description="Optional BoltzGen binding_types override, e.g. A:142,151,229;B:10..30",
     )
+    boltz_time_hours: Optional[int] = Field(
+        None,
+        ge=1,
+        le=240,
+        description="Optional per-job walltime (hours) for BoltzGen submissions",
+    )
 
 
 class BulkPreviewRequest(BaseModel):
@@ -271,6 +277,12 @@ class BoltzgenConfigRunRequest(BaseModel):
     )
     run_label_prefix: Optional[str] = Field(None, max_length=80)
     throttle_seconds: float = Field(0.0, ge=0.0, le=120.0)
+    time_hours: Optional[int] = Field(
+        None,
+        ge=1,
+        le=240,
+        description="Optional walltime (hours) for BoltzGen config runs",
+    )
 
 
 class BoltzgenConfigRunResponse(BaseModel):
@@ -317,6 +329,12 @@ class DesignRunRequest(BaseModel):
         None,
         max_length=500,
         description="Optional chain:residue list for BoltzGen binding_types (e.g., A:142,151,229;B:10..30)",
+    )
+    boltz_time_hours: Optional[int] = Field(
+        None,
+        ge=1,
+        le=240,
+        description="Optional per-job walltime (hours) for BoltzGen runs",
     )
 
 

@@ -42,6 +42,7 @@ const el = {
   boltzTable: document.querySelector('#boltz-config-table tbody'),
   boltzSummary: document.querySelector('#boltz-config-summary'),
   boltzDesignCount: document.querySelector('#boltz-design-count'),
+  boltzTimeHours: document.querySelector('#boltz-time-hours'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
@@ -231,6 +232,12 @@ function getBoltzDesignCount() {
   const raw = Number(el.boltzDesignCount?.value || 0);
   if (!Number.isFinite(raw) || raw <= 0) return null;
   return Math.max(1, Math.round(raw));
+}
+
+function getBoltzTimeHours() {
+  const raw = Number(el.boltzTimeHours?.value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.min(240, Math.max(1, Math.round(raw)));
 }
 
 function toggleModal(modalEl, isOpen) {
@@ -770,6 +777,7 @@ async function runBoltzTarget(pdbId, triggerEl = null) {
     pdb_id: pdbId,
     design_count: designs,
     run_label_prefix: (el.bulkRunPrefix?.value || 'boltz').trim() || 'boltz',
+    time_hours: getBoltzTimeHours(),
   };
   if (triggerEl) triggerEl.disabled = true;
   try {
@@ -803,6 +811,7 @@ async function runBoltzEpitope(pdbId, configPath, triggerEl = null) {
     config_path: configPath,
     design_count: designs,
     run_label_prefix: (el.bulkRunPrefix?.value || 'boltz').trim() || 'boltz',
+    time_hours: getBoltzTimeHours(),
   };
   if (triggerEl) triggerEl.disabled = true;
   try {
@@ -923,6 +932,7 @@ function collectDesignSettings() {
     total_designs: Number(el.designTotal?.value || 0) || 90,
     run_assess: true,
     run_label_prefix: (el.bulkRunPrefix?.value || '').trim() || null,
+    boltz_time_hours: getBoltzTimeHours(),
   };
   return settings;
 }

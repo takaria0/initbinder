@@ -716,6 +716,7 @@ def run_boltzgen_config_jobs(
             run_label=run_label,
             run_assess=False,
             boltz_binding=binding,
+            boltz_time_hours=request.time_hours,
         )
         job_store.append_log(
             job_id,
@@ -1314,6 +1315,8 @@ def run_bulk_workflow(
         run_label_base = _default_run_label(design_settings.run_label_prefix, row, idx)
 
         def queue_design_job(entry: Dict[str, object]) -> None:
+            if design_settings.boltz_time_hours:
+                entry.setdefault("boltz_time_hours", design_settings.boltz_time_hours)
             design_rows.append(entry)
             if not request.submit_designs:
                 return
@@ -1329,6 +1332,7 @@ def run_bulk_workflow(
                 run_assess=design_settings.run_assess,
                 rfdiff_crop_radius=design_settings.rfdiff_crop_radius,
                 boltz_binding=entry.get("boltz_binding"),
+                boltz_time_hours=design_settings.boltz_time_hours,
             )
             try:
                 design_job_id = design_submitter(design_request, job_store=job_store)
@@ -1462,6 +1466,7 @@ def run_bulk_workflow(
             "rfdiff_crop_radius",
             "run_label",
             "boltz_binding",
+            "boltz_time_hours",
         ]
         _write_csv(design_path, headers, design_rows)
         log(f"[design-config] saved → {design_path}")

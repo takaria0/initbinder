@@ -976,7 +976,7 @@ class BoltzGenEngine(DesignEngine):
         gpus = bg_cfg.gpus or self.DEFAULT_GPUS
         cpus = int(bg_cfg.cpus or self.DEFAULT_CPUS)
         mem_gb = int(bg_cfg.mem_gb or self.DEFAULT_MEM_GB)
-        time_h = int(bg_cfg.time_hours or self.DEFAULT_TIME_H)
+        time_h = int(request.boltz_time_hours or bg_cfg.time_hours or self.DEFAULT_TIME_H)
         job_store.append_log(
             job_id,
             "[boltzgen] resources partition=%s account=%s gpus=%s cpus=%s mem=%sG time=%sh"
