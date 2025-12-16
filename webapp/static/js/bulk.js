@@ -669,10 +669,12 @@ function renderBoltzConfigs() {
       tr.appendChild(td);
     });
     const statusCell = document.createElement('td');
+    statusCell.className = 'boltz-status-cell';
     statusCell.appendChild(buildStatusBadge(summarizeTargetStatus(target)));
     tr.appendChild(statusCell);
 
     const cmdCell = document.createElement('td');
+    cmdCell.className = 'boltz-cmd-cell';
     const runBtn = document.createElement('button');
     runBtn.type = 'button';
     runBtn.textContent = 'Run all epitopes';
@@ -722,10 +724,12 @@ function renderBoltzConfigs() {
         epRow.appendChild(td);
       });
       const epStatus = document.createElement('td');
+      epStatus.className = 'boltz-status-cell';
       epStatus.appendChild(buildStatusBadge(cfg.job_status));
       epRow.appendChild(epStatus);
 
       const epCmd = document.createElement('td');
+      epCmd.className = 'boltz-cmd-cell';
       const epRun = document.createElement('button');
       epRun.type = 'button';
       epRun.textContent = 'Run';
