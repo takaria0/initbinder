@@ -3,6 +3,7 @@ const state = {
   jobPoller: null,
   currentJobId: null,
   snapshotNames: [],
+  boltzConfigs: [],
 };
 
 const el = {
@@ -37,6 +38,19 @@ const el = {
   epitopeResidueStats: document.querySelector('#epitope-residue-stats'),
   epitopeChemistryStats: document.querySelector('#epitope-chemistry-stats'),
   epitopeExposureStats: document.querySelector('#epitope-exposure-stats'),
+  boltzPanel: document.querySelector('#boltz-config-panel'),
+  boltzTable: document.querySelector('#boltz-config-table tbody'),
+  boltzSummary: document.querySelector('#boltz-config-summary'),
+  boltzDesignCount: document.querySelector('#boltz-design-count'),
+  boltzRefresh: document.querySelector('#boltz-config-refresh'),
+  boltzConfigModal: document.querySelector('#boltz-config-modal'),
+  boltzConfigTitle: document.querySelector('#boltz-config-title'),
+  boltzConfigBody: document.querySelector('#boltz-config-body'),
+  boltzConfigClose: document.querySelector('#boltz-config-close'),
+  boltzLogModal: document.querySelector('#boltz-log-modal'),
+  boltzLogTitle: document.querySelector('#boltz-log-title'),
+  boltzLogBody: document.querySelector('#boltz-log-body'),
+  boltzLogClose: document.querySelector('#boltz-log-close'),
 };
 
 function formatRangeLabel(value) {
@@ -182,6 +196,76 @@ function setBadge(badge, text, color = null) {
   badge.textContent = text;
   badge.style.background = color || 'rgba(37, 99, 235, 0.12)';
   badge.style.color = color ? '#0f172a' : 'var(--color-accent)';
+}
+
+function normalizeStatus(status) {
+  const value = (status || '').toLowerCase();
+  if (value === 'running' || value === 'pending') return { text: value === 'pending' ? 'Queued' : 'Running', tone: 'info' };
+  if (value === 'success') return { text: 'Complete', tone: 'success' };
+  if (value === 'failed' || value === 'canceled') return { text: 'Failed', tone: 'danger' };
+  return { text: 'No result', tone: 'muted' };
+}
+
+function buildStatusBadge(status) {
+  const meta = normalizeStatus(status);
+  const pill = document.createElement('span');
+  pill.className = 'badge';
+  pill.textContent = meta.text;
+  if (meta.tone === 'success') {
+    pill.style.background = 'rgba(134, 239, 172, 0.25)';
+    pill.style.color = '#14532d';
+  } else if (meta.tone === 'danger') {
+    pill.style.background = 'rgba(248, 113, 113, 0.25)';
+    pill.style.color = '#7f1d1d';
+  } else if (meta.tone === 'info') {
+    pill.style.background = 'rgba(191, 219, 254, 0.4)';
+    pill.style.color = '#1d4ed8';
+  } else {
+    pill.style.background = 'rgba(148, 163, 184, 0.25)';
+    pill.style.color = '#475569';
+  }
+  return pill;
+}
+
+function getBoltzDesignCount() {
+  const raw = Number(el.boltzDesignCount?.value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.max(1, Math.round(raw));
+}
+
+function toggleModal(modalEl, isOpen) {
+  if (!modalEl) return;
+  modalEl.hidden = !isOpen;
+  if (isOpen) {
+    document.body.classList.add('modal-open');
+  } else {
+    const openModals = document.querySelectorAll('.modal:not([hidden])');
+    if (!openModals.length) {
+      document.body.classList.remove('modal-open');
+    }
+  }
+}
+
+function bindingTextFromConfig(cfg = {}) {
+  return cfg.binding_label || cfg.include_label || '—';
+}
+
+function epitopeLabel(cfg = {}, fallbackIndex = null) {
+  if (cfg.epitope_name) return cfg.epitope_name;
+  if (cfg.epitope_id) return cfg.epitope_id;
+  if (fallbackIndex !== null) return `Epitope ${fallbackIndex}`;
+  return 'Epitope';
+}
+
+function summarizeTargetStatus(target) {
+  if (target.target_job_status) return target.target_job_status;
+  const configs = Array.isArray(target.configs) ? target.configs : [];
+  if (!configs.length) return null;
+  const statuses = configs.map((cfg) => (cfg.job_status || '').toLowerCase());
+  if (statuses.some((s) => s === 'running' || s === 'pending')) return 'running';
+  if (statuses.some((s) => s === 'failed')) return 'failed';
+  if (statuses.some((s) => s === 'success')) return 'success';
+  return null;
 }
 
 function setActionButtonsDisabled(disabled) {
@@ -557,6 +641,319 @@ async function loadSnapshotMetadata(names) {
   }
 }
 
+function renderBoltzConfigs() {
+  if (!el.boltzPanel || !el.boltzTable) return;
+  const tbody = el.boltzTable;
+  tbody.innerHTML = '';
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    el.boltzPanel.hidden = true;
+    if (el.boltzSummary) el.boltzSummary.hidden = true;
+    return;
+  }
+  let configCount = 0;
+  targets.forEach((target, idx) => {
+    const configs = Array.isArray(target.configs) ? target.configs : [];
+    configCount += configs.length;
+    const tr = document.createElement('tr');
+    const cells = [
+      idx + 1,
+      target.preset_name || '—',
+      target.pdb_id || '',
+      'All epitopes',
+      '—',
+    ];
+    cells.forEach((val) => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    const statusCell = document.createElement('td');
+    statusCell.appendChild(buildStatusBadge(summarizeTargetStatus(target)));
+    tr.appendChild(statusCell);
+
+    const cmdCell = document.createElement('td');
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.textContent = 'Run all epitopes';
+    runBtn.dataset.action = 'run-target';
+    runBtn.dataset.pdbId = target.pdb_id || '';
+    cmdCell.appendChild(runBtn);
+
+    const cfgBtn = document.createElement('button');
+    cfgBtn.type = 'button';
+    cfgBtn.textContent = 'Show config';
+    cfgBtn.className = 'ghost';
+    cfgBtn.dataset.action = 'show-config-target';
+    cfgBtn.dataset.pdbId = target.pdb_id || '';
+    cmdCell.appendChild(cfgBtn);
+
+    const logBtn = document.createElement('button');
+    logBtn.type = 'button';
+    logBtn.textContent = 'Show log';
+    logBtn.className = 'ghost';
+    logBtn.dataset.action = 'show-log';
+    logBtn.dataset.pdbId = target.pdb_id || '';
+    if (target.target_job_id) {
+      logBtn.dataset.jobId = target.target_job_id;
+      logBtn.dataset.logTitle = `BoltzGen config run · ${target.pdb_id}`;
+    } else {
+      logBtn.disabled = true;
+    }
+    cmdCell.appendChild(logBtn);
+
+    tr.appendChild(cmdCell);
+    tbody.appendChild(tr);
+
+    configs.forEach((cfg, cfgIdx) => {
+      const epRow = document.createElement('tr');
+      epRow.className = 'epitope-row';
+      const epCells = [
+        '',
+        '',
+        '',
+        epitopeLabel(cfg, cfgIdx + 1),
+        bindingTextFromConfig(cfg),
+      ];
+      epCells.forEach((val, cellIdx) => {
+        const td = document.createElement('td');
+        td.textContent = val || '';
+        if (cellIdx === 3) td.style.paddingLeft = '14px';
+        epRow.appendChild(td);
+      });
+      const epStatus = document.createElement('td');
+      epStatus.appendChild(buildStatusBadge(cfg.job_status));
+      epRow.appendChild(epStatus);
+
+      const epCmd = document.createElement('td');
+      const epRun = document.createElement('button');
+      epRun.type = 'button';
+      epRun.textContent = 'Run';
+      epRun.dataset.action = 'run-epitope';
+      epRun.dataset.pdbId = target.pdb_id || '';
+      epRun.dataset.configPath = cfg.config_path || '';
+      epCmd.appendChild(epRun);
+
+      const epCfgBtn = document.createElement('button');
+      epCfgBtn.type = 'button';
+      epCfgBtn.textContent = 'Show config';
+      epCfgBtn.className = 'ghost';
+      epCfgBtn.dataset.action = 'show-config-epitope';
+      epCfgBtn.dataset.pdbId = target.pdb_id || '';
+      epCfgBtn.dataset.configPath = cfg.config_path || '';
+      epCmd.appendChild(epCfgBtn);
+
+      const epLog = document.createElement('button');
+      epLog.type = 'button';
+      epLog.textContent = 'Show log';
+      epLog.className = 'ghost';
+      epLog.dataset.action = 'show-log';
+      epLog.dataset.pdbId = target.pdb_id || '';
+      if (cfg.job_id) {
+        epLog.dataset.jobId = cfg.job_id;
+        epLog.dataset.logTitle = `${epitopeLabel(cfg, cfgIdx + 1)} · ${target.pdb_id}`;
+      } else {
+        epLog.disabled = true;
+      }
+      epCmd.appendChild(epLog);
+
+      epRow.appendChild(epCmd);
+      tbody.appendChild(epRow);
+    });
+  });
+
+  if (el.boltzSummary) {
+    el.boltzSummary.textContent = `${configCount} config${configCount === 1 ? '' : 's'} across ${targets.length} target${targets.length === 1 ? '' : 's'}`;
+    el.boltzSummary.hidden = false;
+  }
+  el.boltzPanel.hidden = false;
+}
+
+async function loadBoltzConfigs(options = {}) {
+  const { silent = false } = options;
+  if (!el.boltzPanel || !el.boltzTable) return;
+  const ids = Array.from(new Set(
+    (state.bulkPreviewRows || [])
+      .map((row) => (row.resolved_pdb_id || row.pdb_id || '').trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (!ids.length) {
+    el.boltzPanel.hidden = true;
+    return;
+  }
+  try {
+    const params = new URLSearchParams();
+    params.append('pdb_ids', ids.join(','));
+    const res = await fetch(`/api/bulk/boltzgen/configs?${params.toString()}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to load BoltzGen configs (${res.status})`);
+    }
+    const body = await res.json();
+    const targets = Array.isArray(body.targets) ? body.targets : [];
+    const presetMap = new Map();
+    (state.bulkPreviewRows || []).forEach((row) => {
+      const key = (row.resolved_pdb_id || '').toUpperCase();
+      if (key) presetMap.set(key, row.preset_name || row.gene || '');
+    });
+    targets.forEach((target) => {
+      const key = (target.pdb_id || '').toUpperCase();
+      if (presetMap.has(key)) {
+        target.preset_name = presetMap.get(key);
+      }
+    });
+    state.boltzConfigs = targets;
+    renderBoltzConfigs();
+  } catch (err) {
+    if (!silent) showAlert(err.message || String(err));
+    if (el.boltzPanel) el.boltzPanel.hidden = true;
+  }
+}
+
+async function fetchBoltzConfig(pdbId, configPath) {
+  const params = new URLSearchParams();
+  params.append('pdb_id', pdbId);
+  params.append('config_path', configPath);
+  const res = await fetch(`/api/bulk/boltzgen/config?${params.toString()}`);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Unable to load config (${res.status})`);
+  }
+  return res.json();
+}
+
+async function showBoltzConfig(pdbId, configPath = null) {
+  if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
+  try {
+    if (configPath) {
+      const cfg = await fetchBoltzConfig(pdbId, configPath);
+      el.boltzConfigTitle.textContent = `BoltzGen config · ${cfg.epitope_name || configPath}`;
+      el.boltzConfigBody.textContent = cfg.yaml_text || 'No config content found.';
+    } else {
+      const target = (state.boltzConfigs || []).find((t) => (t.pdb_id || '').toUpperCase() === (pdbId || '').toUpperCase());
+      const configs = Array.isArray(target?.configs) ? target.configs : [];
+      if (!configs.length) throw new Error('No configs detected for this target.');
+      const texts = [];
+      for (const cfg of configs) {
+        try {
+          const content = await fetchBoltzConfig(pdbId, cfg.config_path);
+          texts.push(`# ${content.epitope_name || cfg.config_path}\n${content.yaml_text || ''}`);
+        } catch (err) {
+          texts.push(`# ${epitopeLabel(cfg)}\nError loading config: ${err.message || err}`);
+        }
+      }
+      el.boltzConfigTitle.textContent = `BoltzGen configs · ${pdbId}`;
+      el.boltzConfigBody.textContent = texts.join('\n\n');
+    }
+    toggleModal(el.boltzConfigModal, true);
+  } catch (err) {
+    showAlert(err.message || String(err));
+  }
+}
+
+async function showBoltzLog(jobId, title = 'Job log') {
+  if (!jobId) {
+    showAlert('No job ID available yet.');
+    return;
+  }
+  try {
+    const job = await fetchJob(jobId);
+    if (el.boltzLogTitle) el.boltzLogTitle.textContent = title;
+    if (el.boltzLogBody) {
+      el.boltzLogBody.textContent = (job.logs && job.logs.length)
+        ? job.logs.join('\n')
+        : 'No logs available yet.';
+    }
+    toggleModal(el.boltzLogModal, true);
+  } catch (err) {
+    showAlert(err.message || String(err));
+  }
+}
+
+async function runBoltzTarget(pdbId, triggerEl = null) {
+  const designs = getBoltzDesignCount();
+  if (!designs) {
+    showAlert('Enter a positive epitope design count.');
+    return;
+  }
+  const payload = {
+    pdb_id: pdbId,
+    design_count: designs,
+    run_label_prefix: (el.bulkRunPrefix?.value || 'boltz').trim() || 'boltz',
+  };
+  if (triggerEl) triggerEl.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/boltzgen/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to submit BoltzGen run (${res.status})`);
+    }
+    const body = await res.json();
+    showAlert(body.message || 'BoltzGen config run queued.', false);
+    await loadBoltzConfigs({ silent: true });
+  } catch (err) {
+    showAlert(err.message || String(err));
+  } finally {
+    if (triggerEl) triggerEl.disabled = false;
+  }
+}
+
+async function runBoltzEpitope(pdbId, configPath, triggerEl = null) {
+  const designs = getBoltzDesignCount();
+  if (!designs) {
+    showAlert('Enter a positive epitope design count.');
+    return;
+  }
+  const payload = {
+    pdb_id: pdbId,
+    config_path: configPath,
+    design_count: designs,
+    run_label_prefix: (el.bulkRunPrefix?.value || 'boltz').trim() || 'boltz',
+  };
+  if (triggerEl) triggerEl.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/boltzgen/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to submit epitope run (${res.status})`);
+    }
+    const body = await res.json();
+    showAlert(body.message || 'Epitope run queued.', false);
+    await loadBoltzConfigs({ silent: true });
+  } catch (err) {
+    showAlert(err.message || String(err));
+  } finally {
+    if (triggerEl) triggerEl.disabled = false;
+  }
+}
+
+function handleBoltzTableClick(event) {
+  const btn = event.target.closest('button[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const pdbId = btn.dataset.pdbId;
+  const configPath = btn.dataset.configPath;
+  if (action === 'run-target') {
+    runBoltzTarget(pdbId, btn);
+  } else if (action === 'run-epitope') {
+    runBoltzEpitope(pdbId, configPath, btn);
+  } else if (action === 'show-config-target') {
+    showBoltzConfig(pdbId, null);
+  } else if (action === 'show-config-epitope') {
+    showBoltzConfig(pdbId, configPath);
+  } else if (action === 'show-log') {
+    showBoltzLog(btn.dataset.jobId, btn.dataset.logTitle || 'Job log');
+  }
+}
+
 function renderBulkPreview(rows = [], summary = '') {
   if (!el.bulkPreviewPanel || !el.bulkPreviewTable) return;
   const tbody = el.bulkPreviewTable;
@@ -621,6 +1018,7 @@ async function previewBulkCsv(options = {}) {
     const body = await res.json();
     state.bulkPreviewRows = Array.isArray(body.rows) ? body.rows : [];
     renderBulkPreview(state.bulkPreviewRows, body.message || '');
+    loadBoltzConfigs({ silent: true });
     setBadge(el.bulkStatus, body.message || 'Preview ready', 'rgba(134, 239, 172, 0.25)');
     if (!silent) showAlert(body.message || 'Preview ready.', false);
   } catch (err) {
@@ -917,6 +1315,15 @@ function init() {
   if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);
+  if (el.boltzRefresh) el.boltzRefresh.addEventListener('click', () => loadBoltzConfigs({ silent: true }));
+  if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
+  if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
+  if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
+  document.addEventListener('click', (evt) => {
+    const closeTarget = evt.target?.dataset?.close;
+    if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);
+    if (closeTarget === 'boltz-log') toggleModal(el.boltzLogModal, false);
+  });
 }
 
 document.addEventListener('DOMContentLoaded', init);

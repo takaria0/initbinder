@@ -75,6 +75,36 @@
               </table>
             </section>
 
+            <section id="boltz-config-panel" class="table-scroll" hidden>
+              <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
+                <div>
+                  <h3 style="margin: 0;">BoltzGen configs</h3>
+                  <div id="boltz-config-summary" class="badge" hidden></div>
+                </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <label>Epitope design num
+                    <input type="number" id="boltz-design-count" value="100" min="1">
+                  </label>
+                  <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
+                </div>
+              </div>
+              <p class="help-text" style="margin-top: 0;">Detected <code>boltzgen_config.yaml</code> files under each target. Run all epitopes or trigger them individually.</p>
+              <table id="boltz-config-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Preset</th>
+                    <th>PDB ID</th>
+                    <th>Epitope</th>
+                    <th>Binding</th>
+                    <th>Status</th>
+                    <th>Commands</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </section>
+
             <section id="snapshot-section" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <h2 style="margin: 0;">Hotspot snapshots</h2>
@@ -146,6 +176,28 @@
         </div>
       </div>
     </main>
+
+    <div id="boltz-config-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-config"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="boltz-config-title">BoltzGen config</h3>
+          <button type="button" id="boltz-config-close" class="ghost">Close</button>
+        </div>
+        <pre id="boltz-config-body" class="scrollable" style="max-height: 60vh; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;"></pre>
+      </div>
+    </div>
+
+    <div id="boltz-log-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-log"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="boltz-log-title">Job log</h3>
+          <button type="button" id="boltz-log-close" class="ghost">Close</button>
+        </div>
+        <pre id="boltz-log-body" class="scrollable" style="max-height: 60vh; background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;">Select a job to view logs.</pre>
+      </div>
+    </div>
 
     <script type="module" src="/static/js/bulk.js"></script>
   </body>

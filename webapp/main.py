@@ -34,6 +34,10 @@ from .models import (
     AssessmentRunResponse,
     AssessmentRunSummary,
     AssessmentSyncResponse,
+    BoltzgenConfigContent,
+    BoltzgenConfigListResponse,
+    BoltzgenConfigRunRequest,
+    BoltzgenConfigRunResponse,
     BoltzGenRunListResponse,
     BoltzGenSyncResponse,
     BulkDesignImportRequest,
@@ -80,7 +84,11 @@ from .models import (
 )
 from .designs import list_design_engines
 from .pipeline import get_target_status
-from .bulk import preview_bulk_targets
+from .bulk import (
+    list_boltzgen_config_state,
+    load_boltzgen_config_content,
+    preview_bulk_targets,
+)
 from .pymol import (
     PyMolLaunchError,
     launch_boltzgen_top_binders,
@@ -102,6 +110,7 @@ from .workflows import (
     submit_assessment_sync,
     submit_bulk_design_import,
     submit_bulk_run,
+    submit_boltzgen_config_run,
     submit_design_run,
     submit_export,
     submit_golden_gate_plan,
@@ -799,6 +808,31 @@ async def api_bulk_file(name: str) -> FileResponse:
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(candidate, filename=candidate.name)
+
+
+@app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)
+async def api_boltzgen_config_list(
+    pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
+) -> BoltzgenConfigListResponse:
+    ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
+    return list_boltzgen_config_state(ids)
+
+
+@app.get("/api/bulk/boltzgen/config", response_model=BoltzgenConfigContent)
+async def api_boltzgen_config(pdb_id: str, config_path: str) -> BoltzgenConfigContent:
+    try:
+        return load_boltzgen_config_content(pdb_id, config_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/bulk/boltzgen/run", response_model=BoltzgenConfigRunResponse)
+async def api_boltzgen_config_run(payload: BoltzgenConfigRunRequest) -> BoltzgenConfigRunResponse:
+    job_id = submit_boltzgen_config_run(payload, job_store=store)
+    message = "Queued BoltzGen config run"
+    return BoltzgenConfigRunResponse(job_id=job_id, message=message)
 
 
 @app.get("/api/pymol/snapshot")

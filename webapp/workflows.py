@@ -19,6 +19,7 @@ from .models import (
     AssessmentRunRequest,
     BulkDesignImportRequest,
     BulkRunRequest,
+    BoltzgenConfigRunRequest,
     DesignRunRequest,
     ExportRequest,
     GoldenGateRequest,
@@ -29,7 +30,7 @@ from .pipeline import PipelineError, init_decide_prep
 from .designs import run_design_workflow
 from .exporter import ExportError, run_export
 from .golden_gate import GoldenGateError, run_golden_gate_plan
-from .bulk import import_design_configs, run_bulk_workflow
+from .bulk import import_design_configs, run_boltzgen_config_jobs, run_bulk_workflow
 
 
 _executor: ThreadPoolExecutor | None = None
@@ -431,6 +432,29 @@ def submit_bulk_design_import(request: BulkDesignImportRequest, *,
     return job.job_id
 
 
+def submit_boltzgen_config_run(request: BoltzgenConfigRunRequest, *,
+                               job_store: JobStore | None = None) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    label = f"BoltzGen configs {request.pdb_id.upper()}"
+    job = store.create_job("boltzgen_config_run", label, details=request.dict())
+
+    def _run() -> None:
+        try:
+            run_boltzgen_config_jobs(
+                request,
+                job_store=store,
+                job_id=job.job_id,
+                design_submitter=submit_design_run,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
 async def wait_for_job(job_id: str, *, job_store: JobStore | None = None,
                        poll_interval: float = 0.5) -> None:
     store = job_store or get_job_store()
@@ -451,5 +475,6 @@ __all__ = [
     "submit_assessment_sync",
     "submit_bulk_run",
     "submit_bulk_design_import",
+    "submit_boltzgen_config_run",
     "wait_for_job",
 ]

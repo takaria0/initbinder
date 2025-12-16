@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import io
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +16,14 @@ import yaml
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .config import load_config
 from .designs import BoltzGenEngine
-from .job_store import JobStatus, JobStore
+from .job_store import JobStatus, JobStore, get_job_store
 from .models import (
+    BoltzgenConfigContent,
+    BoltzgenConfigListResponse,
+    BoltzgenConfigRunRequest,
+    BoltzgenConfigRunResponse,
+    BoltzgenEpitopeConfig,
+    BoltzgenTargetConfig,
     BulkCsvRow,
     BulkDesignImportRequest,
     BulkPreviewRequest,
@@ -267,6 +274,351 @@ def _write_boltzgen_configs(
             msg = f"  [boltzgen-config] failed for {pdb_id.upper()} · {name}: {exc}"
             log(msg)
             print(msg)
+
+
+_CONFIG_LOG_HEADERS = [
+    "timestamp",
+    "pdb_id",
+    "config_path",
+    "epitope_name",
+    "job_id",
+    "run_label",
+    "design_count",
+    "scope",
+    "parent_job_id",
+    "binding",
+]
+_TARGET_SCOPE_KEY = "__target__"
+
+
+def _config_run_log_path() -> Path:
+    """CSV path used to track BoltzGen config submissions."""
+    return _output_dir() / "boltzgen_config_runs.csv"
+
+
+def _append_config_run_record(record: Dict[str, object]) -> None:
+    path = _config_run_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_CONFIG_LOG_HEADERS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({key: record.get(key) for key in _CONFIG_LOG_HEADERS})
+
+
+def _load_config_run_records() -> List[dict]:
+    path = _config_run_log_path()
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            return [row for row in reader]
+    except Exception:
+        return []
+
+
+def _normalize_config_path(target_dir: Path, config_path: Path | str) -> str:
+    base = target_dir.resolve()
+    candidate = (target_dir / config_path).resolve() if not Path(config_path).is_absolute() else Path(config_path).resolve()
+    try:
+        rel = candidate.relative_to(base)
+    except Exception:
+        rel = candidate
+    return str(rel)
+
+
+def _epitope_labels_from_target(target_dir: Path) -> Dict[int, dict]:
+    target_yaml = target_dir / "target.yaml"
+    if not target_yaml.exists():
+        return {}
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        return {}
+    labels: Dict[int, dict] = {}
+    for idx, entry in enumerate(data.get("epitopes") or [], start=1):
+        name = entry.get("display_name") or entry.get("name") or f"Epitope {idx}"
+        residues = entry.get("residues") or []
+        labels[idx] = {"name": str(name).strip(), "residues": residues}
+    return labels
+
+
+def _binding_label_from_entries(entries: Iterable[dict], key: str) -> List[str]:
+    tokens: List[str] = []
+    for entry in entries:
+        chain = entry.get("chain") if isinstance(entry, dict) else {}
+        chain_id = str(chain.get("id") or "").strip() if isinstance(chain, dict) else ""
+        binding = str(chain.get(key) or "").strip() if isinstance(chain, dict) else ""
+        if chain_id and binding:
+            tokens.append(f"{chain_id}:{binding}")
+    return tokens
+
+
+def _parse_boltzgen_config(config_path: Path) -> dict:
+    binding_label = None
+    include_label = None
+    hotspot_count = None
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        data = {}
+    entities = data.get("entities") or []
+    file_blocks = []
+    for entity in entities:
+        if isinstance(entity, dict) and "file" in entity:
+            file_blocks.append(entity.get("file") or {})
+    binding_tokens: List[str] = []
+    include_tokens: List[str] = []
+    for file_block in file_blocks:
+        if not isinstance(file_block, dict):
+            continue
+        binding_entries = file_block.get("binding_types") or []
+        include_entries = file_block.get("include") or []
+        binding_tokens.extend(_binding_label_from_entries(binding_entries, "binding"))
+        include_tokens.extend(_binding_label_from_entries(include_entries, "res_index"))
+    if binding_tokens:
+        binding_label = ";".join(binding_tokens)
+    if include_tokens:
+        include_label = ";".join(include_tokens)
+    binding_for_count = binding_label or include_label
+    if binding_for_count:
+        try:
+            mapping = BoltzGenEngine._expand_epitope_residues(binding_for_count.split(";"))
+            hotspot_count = sum(len(vals) for vals in mapping.values())
+        except Exception:
+            hotspot_count = None
+    return {
+        "binding_label": binding_label,
+        "include_label": include_label,
+        "hotspot_count": hotspot_count,
+    }
+
+
+def _discover_boltzgen_configs(pdb_id: str) -> List[dict]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+    config_dir = target_dir / "configs"
+    if not config_dir.exists():
+        return []
+    ep_labels = _epitope_labels_from_target(target_dir)
+    entries: List[dict] = []
+    for path in sorted(config_dir.rglob("boltzgen_config.yaml")):
+        rel = _normalize_config_path(target_dir, path)
+        parent = path.parent.name
+        ep_idx = None
+        match = re.search(r"(\d+)", parent)
+        if match:
+            try:
+                ep_idx = int(match.group(1))
+            except ValueError:
+                ep_idx = None
+        ep_label = ep_labels.get(ep_idx, {}) if ep_idx is not None else {}
+        parsed = _parse_boltzgen_config(path)
+        entries.append({
+            "pdb_id": pdb_id.upper(),
+            "config_path": rel,
+            "epitope_id": parent,
+            "epitope_index": ep_idx,
+            "epitope_name": ep_label.get("name") or parent,
+            "binding_label": parsed.get("binding_label"),
+            "include_label": parsed.get("include_label"),
+            "hotspot_count": parsed.get("hotspot_count"),
+        })
+    return entries
+
+
+def _latest_run_records() -> Dict[tuple[str, str], dict]:
+    runs = _load_config_run_records()
+    latest: Dict[tuple[str, str], dict] = {}
+    for rec in runs:
+        pdb_id = (rec.get("pdb_id") or "").upper()
+        config_key = rec.get("config_path") or _TARGET_SCOPE_KEY
+        try:
+            ts = float(rec.get("timestamp") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        key = (pdb_id, config_key)
+        prev = latest.get(key)
+        if prev is None:
+            latest[key] = rec | {"_ts": ts}
+        else:
+            prev_ts = prev.get("_ts") or 0.0
+            if ts >= prev_ts:
+                latest[key] = rec | {"_ts": ts}
+    return latest
+
+
+def _job_status_for(job_store: JobStore, job_id: Optional[str]) -> Optional[str]:
+    if not job_id:
+        return None
+    try:
+        record = job_store.get(job_id)
+        return record.status.value
+    except KeyError:
+        return None
+
+
+def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse:
+    if not pdb_ids:
+        return BoltzgenConfigListResponse(targets=[])
+    job_store = get_job_store(load_config().log_dir)
+    latest_runs = _latest_run_records()
+    targets: List[BoltzgenTargetConfig] = []
+    for pdb in pdb_ids:
+        configs = _discover_boltzgen_configs(pdb)
+        if not configs:
+            targets.append(BoltzgenTargetConfig(pdb_id=pdb.upper(), configs=[]))
+            continue
+        enriched: List[BoltzgenEpitopeConfig] = []
+        for cfg_entry in configs:
+            key = (pdb.upper(), cfg_entry["config_path"])
+            run_rec = latest_runs.get(key)
+            status = _job_status_for(job_store, run_rec.get("job_id") if run_rec else None) if run_rec else None
+            enriched.append(
+                BoltzgenEpitopeConfig(
+                    epitope_id=cfg_entry.get("epitope_id"),
+                    epitope_name=cfg_entry.get("epitope_name"),
+                    config_path=cfg_entry.get("config_path"),
+                    binding_label=cfg_entry.get("binding_label"),
+                    include_label=cfg_entry.get("include_label"),
+                    hotspot_count=cfg_entry.get("hotspot_count"),
+                    job_id=run_rec.get("job_id") if run_rec else None,
+                    job_status=status,
+                    run_label=run_rec.get("run_label") if run_rec else None,
+                    submitted_at=float(run_rec.get("_ts")) if run_rec and run_rec.get("_ts") is not None else None,
+                    parent_job_id=run_rec.get("parent_job_id") if run_rec else None,
+                )
+            )
+        target_key = (pdb.upper(), _TARGET_SCOPE_KEY)
+        target_run = latest_runs.get(target_key)
+        targets.append(
+            BoltzgenTargetConfig(
+                pdb_id=pdb.upper(),
+                configs=enriched,
+                target_job_id=target_run.get("job_id") if target_run else None,
+                target_job_status=_job_status_for(job_store, target_run.get("job_id")) if target_run else None,
+            )
+        )
+    return BoltzgenConfigListResponse(targets=targets)
+
+
+def load_boltzgen_config_content(pdb_id: str, config_path: str) -> BoltzgenConfigContent:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = (targets_dir / pdb_id.upper()).resolve()
+    abs_path = (target_dir / config_path).resolve()
+    if not str(abs_path).startswith(str(target_dir)):
+        raise ValueError("Config path outside target directory")
+    if not abs_path.exists():
+        raise FileNotFoundError(f"Config not found: {abs_path}")
+    ep_name = abs_path.parent.name
+    return BoltzgenConfigContent(
+        pdb_id=pdb_id.upper(),
+        config_path=_normalize_config_path(target_dir, abs_path),
+        epitope_name=ep_name,
+        yaml_text=abs_path.read_text(),
+    )
+
+
+def run_boltzgen_config_jobs(
+    request: BoltzgenConfigRunRequest,
+    *,
+    job_store: JobStore,
+    job_id: str,
+    design_submitter: DesignSubmitter,
+) -> None:
+    job_store.update(job_id, status=JobStatus.RUNNING, message="Preparing BoltzGen config run")
+    pdb_id = request.pdb_id.upper()
+    configs = _discover_boltzgen_configs(pdb_id)
+    if request.config_path:
+        target_dir = load_config().paths.targets_dir or (load_config().paths.workspace_root / "targets")
+        base_dir = (target_dir / pdb_id).resolve()
+        requested_rel = _normalize_config_path(base_dir, request.config_path)
+        configs = [cfg for cfg in configs if cfg.get("config_path") == requested_rel]
+    if not configs:
+        raise ValueError(f"No BoltzGen configs found for {pdb_id}")
+
+    design_count = max(1, int(request.design_count or 1))
+    throttle = request.throttle_seconds if request.throttle_seconds and request.throttle_seconds > 0 else 0.0
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    prefix = (request.run_label_prefix or "boltz").strip() or "boltz"
+    base_label = f"{prefix}_{pdb_id}_{timestamp}"
+    scope = "epitope" if request.config_path else "target"
+    _append_config_run_record({
+        "timestamp": time.time(),
+        "pdb_id": pdb_id,
+        "config_path": _TARGET_SCOPE_KEY,
+        "epitope_name": "",
+        "job_id": job_id,
+        "run_label": base_label,
+        "design_count": design_count,
+        "scope": scope,
+        "parent_job_id": "",
+        "binding": "",
+    })
+
+    submitted: List[Dict[str, object]] = []
+    for idx, cfg_entry in enumerate(configs, start=1):
+        binding = cfg_entry.get("binding_label") or cfg_entry.get("include_label")
+        if not binding:
+            job_store.append_log(job_id, f"Skip {cfg_entry.get('config_path')} (no binding in config)")
+            continue
+        ep_name = cfg_entry.get("epitope_name") or cfg_entry.get("epitope_id") or f"ep{idx}"
+        run_label = _epitope_run_label(base_label, ep_name, idx)
+        design_request = DesignRunRequest(
+            pdb_id=pdb_id,
+            model_engine="boltzgen",
+            total_designs=design_count,
+            num_sequences=1,
+            temperature=0.1,
+            binder_chain_id=None,
+            af3_seed=1,
+            run_label=run_label,
+            run_assess=False,
+            boltz_binding=binding,
+        )
+        job_store.append_log(
+            job_id,
+            f"Submitting {cfg_entry.get('config_path')} ({binding}) · {design_count} designs → {run_label}",
+        )
+        try:
+            design_job_id = design_submitter(design_request, job_store=job_store)
+            submitted.append({
+                "job_id": design_job_id,
+                "run_label": run_label,
+                "config_path": cfg_entry.get("config_path"),
+                "epitope_name": ep_name,
+            })
+            job_store.append_log(job_id, f"  queued design job {design_job_id}")
+            _append_config_run_record({
+                "timestamp": time.time(),
+                "pdb_id": pdb_id,
+                "config_path": cfg_entry.get("config_path"),
+                "epitope_name": ep_name,
+                "job_id": design_job_id,
+                "run_label": run_label,
+                "design_count": design_count,
+                "scope": "epitope",
+                "parent_job_id": job_id,
+                "binding": binding,
+            })
+            if throttle > 0:
+                time.sleep(throttle)
+        except Exception as exc:  # pragma: no cover - defensive
+            job_store.append_log(job_id, f"  ! Failed to submit BoltzGen job: {exc}")
+
+    if not submitted:
+        raise ValueError("No BoltzGen jobs were submitted (missing bindings or configs?)")
+
+    job_store.update(
+        job_id,
+        status=JobStatus.SUCCESS,
+        message=f"Queued {len(submitted)} BoltzGen config run(s)",
+        details={"submitted_jobs": submitted},
+    )
 
 
 def _parse_bulk_csv(csv_text: str) -> List[dict]:

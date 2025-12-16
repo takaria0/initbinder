@@ -229,6 +229,55 @@ class BulkRunResponse(BaseModel):
     message: str
 
 
+class BoltzgenEpitopeConfig(BaseModel):
+    epitope_id: Optional[str] = None
+    epitope_name: Optional[str] = None
+    config_path: str
+    binding_label: Optional[str] = None
+    include_label: Optional[str] = None
+    hotspot_count: Optional[int] = None
+    job_id: Optional[str] = None
+    job_status: Optional[str] = None
+    run_label: Optional[str] = None
+    submitted_at: Optional[float] = None
+    parent_job_id: Optional[str] = None
+
+
+class BoltzgenTargetConfig(BaseModel):
+    pdb_id: str
+    preset_name: Optional[str] = None
+    configs: List[BoltzgenEpitopeConfig] = Field(default_factory=list)
+    target_job_id: Optional[str] = None
+    target_job_status: Optional[str] = None
+
+
+class BoltzgenConfigListResponse(BaseModel):
+    targets: List[BoltzgenTargetConfig] = Field(default_factory=list)
+
+
+class BoltzgenConfigContent(BaseModel):
+    pdb_id: str
+    config_path: str
+    epitope_name: Optional[str] = None
+    yaml_text: str
+
+
+class BoltzgenConfigRunRequest(BaseModel):
+    pdb_id: str
+    design_count: int = Field(90, ge=1, le=50000, description="Designs to generate per epitope")
+    config_path: Optional[str] = Field(
+        None,
+        description="Optional relative path to a boltzgen_config.yaml to restrict run to one epitope",
+    )
+    run_label_prefix: Optional[str] = Field(None, max_length=80)
+    throttle_seconds: float = Field(0.0, ge=0.0, le=120.0)
+
+
+class BoltzgenConfigRunResponse(BaseModel):
+    job_id: str
+    message: str
+
+
 class AlignmentResponse(BaseModel):
     pdb_id: str
     antigen_url: Optional[str]
