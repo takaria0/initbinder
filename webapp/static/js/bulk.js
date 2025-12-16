@@ -1055,6 +1055,15 @@ function updateJobUI(job) {
     if (job.details?.design_config_filename) {
       addLink('Design config CSV', job.details.design_config_filename);
     }
+    if (job.details?.selection_filename) {
+      addLink('Epitope input TSV', job.details.selection_filename);
+    }
+    if (job.details?.targets_table_filename) {
+      addLink('Detected targets', job.details.targets_table_filename);
+    }
+    if (job.details?.snapshot_report_filename) {
+      addLink('Snapshot report', job.details.snapshot_report_filename);
+    }
     if (Array.isArray(job.details?.snapshots) && job.details.snapshots.length) {
       job.details.snapshots.forEach((snap) => {
         const name = (snap || '').trim();

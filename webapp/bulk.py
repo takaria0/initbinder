@@ -7,6 +7,8 @@ import json
 import io
 import re
 import time
+import shutil
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
@@ -923,6 +925,14 @@ def _output_dir() -> Path:
     return out
 
 
+def _plots_dir(timestamp: str) -> Path:
+    cfg = load_config()
+    base = cfg.paths.workspace_root or cfg.paths.project_root
+    out = Path(base) / "plots" / timestamp
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _snapshot_root() -> Path:
     cfg = load_config()
     cache_root = cfg.paths.cache_dir or (cfg.paths.workspace_root / "cache")
@@ -941,6 +951,42 @@ def _open_log(path: Path) -> Callable[[str], None]:
         handle.flush()
 
     return _log
+
+
+def _write_snapshot_report(snapshots: List[str], out_dir: Path, timestamp: str, log: Callable[[str], None]) -> Optional[Path]:
+    if not snapshots:
+        return None
+    items: List[dict] = []
+    for name in snapshots:
+        rel = Path(name)
+        path = _snapshot_root() / rel
+        if not path.exists():
+            continue
+        try:
+            img_bytes = path.read_bytes()
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+        except Exception:
+            b64 = ""
+        items.append({"name": rel.name, "path": path, "b64": b64})
+    if not items:
+        return None
+    html_parts = [
+        "<!doctype html><html><head><meta charset='utf-8'><title>Hotspot snapshots</title>",
+        "<style>body{font-family:Inter,system-ui,sans-serif;background:#f8fafc;padding:18px;color:#0f172a;} .card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:12px;box-shadow:0 4px 16px rgba(15,23,42,0.08);} img{max-width:100%;border:1px solid #e2e8f0;border-radius:8px;}</style></head><body>",
+        "<h1>Hotspot snapshots</h1>",
+    ]
+    for item in items:
+        img_tag = f"<div style='color:#94a3b8'>Image unavailable</div>"
+        if item["b64"]:
+            img_tag = f"<img src='data:image/png;base64,{item['b64']}' alt='{item['name']}'>"
+        html_parts.append(f"<div class='card'><div><strong>{item['name']}</strong><div style='color:#64748b;font-size:0.9rem;'>{item['path']}</div></div><div style='margin-top:8px;'>{img_tag}</div></div>")
+    html_parts.append("</body></html>")
+    out_path = out_dir / f"hotspot_snapshots_{timestamp}.html"
+    out_path.write_text("\n".join(html_parts), encoding="utf-8")
+    msg = f"[snapshots] report -> {out_path}"
+    log(msg)
+    print(msg)
+    return out_path
 
 
 def _write_csv(path: Path, headers: List[str], rows: List[Dict[str, object]]) -> None:
@@ -1186,6 +1232,7 @@ def run_bulk_workflow(
     total = len(rows)
     out_dir = _output_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+    plot_dir = _plots_dir(timestamp)
     log_path = out_dir / f"bulk_{timestamp}.log"
     file_log = _open_log(log_path)
 
@@ -1196,6 +1243,40 @@ def run_bulk_workflow(
     job_store.update(job_id, details={"planned_rows": total, "log_path": str(log_path)})
     if total == 0:
         raise ValueError("No valid rows found to process.")
+
+    # Persist input TSV/CSV for provenance
+    selection_path = plot_dir / "epitope_selection_input.tsv"
+    selection_path.write_text(request.csv_text, encoding="utf-8")
+    log(f"[input] epitope selection TSV saved → {selection_path}")
+    try:
+        shutil.copy2(selection_path, out_dir / selection_path.name)
+    except Exception as exc:  # pragma: no cover - defensive
+        log(f"[input] copy to bulk dir failed: {exc}")
+
+    # Detected targets table
+    targets_table_path = plot_dir / "detected_targets.csv"
+    _write_csv(
+        targets_table_path,
+        ["raw_index", "preset_name", "antigen_url", "accession", "pdb_id", "resolved_pdb_id", "preset_id", "warnings"],
+        [
+            {
+                "raw_index": row.raw_index,
+                "preset_name": row.preset_name,
+                "antigen_url": row.antigen_url,
+                "accession": row.accession,
+                "pdb_id": row.pdb_id,
+                "resolved_pdb_id": row.resolved_pdb_id,
+                "preset_id": row.preset_id,
+                "warnings": ";".join(row.warnings or []),
+            }
+            for row in rows
+        ],
+    )
+    log(f"[targets] detected target table saved → {targets_table_path}")
+    try:
+        shutil.copy2(targets_table_path, out_dir / targets_table_path.name)
+    except Exception as exc:  # pragma: no cover - defensive
+        log(f"[targets] copy to bulk dir failed: {exc}")
 
     insights_rows: List[Dict[str, object]] = []
     design_rows: List[Dict[str, object]] = []
@@ -1470,8 +1551,30 @@ def run_bulk_workflow(
         ]
         _write_csv(design_path, headers, design_rows)
         log(f"[design-config] saved → {design_path}")
+        try:
+            shutil.copy2(design_path, plot_dir / "boltzgen_configs.csv")
+            log(f"[design-config] copied to plots dir → {plot_dir / 'boltzgen_configs.csv'}")
+        except Exception as exc:  # pragma: no cover - defensive
+            log(f"[design-config] copy to plots dir failed: {exc}")
 
-    epitope_plot_paths = _write_epitope_plots(epitope_entries, out_dir, timestamp, log) if epitope_entries else []
+    # Epitope stats plots
+    epitope_plot_paths = _write_epitope_plots(epitope_entries, plot_dir, timestamp, log) if epitope_entries else []
+    epitope_plot_files: List[str] = []
+    for plot_path in epitope_plot_paths:
+        try:
+            src = Path(plot_path)
+            dest = out_dir / src.name
+            shutil.copy2(src, dest)
+            epitope_plot_files.append(dest.name)
+        except Exception as exc:  # pragma: no cover - defensive
+            log(f"[epitope-plots] copy failed for {plot_path}: {exc}")
+
+    snapshot_report_path = _write_snapshot_report(snapshots, plot_dir, timestamp, log)
+    if snapshot_report_path:
+        try:
+            shutil.copy2(snapshot_report_path, out_dir / snapshot_report_path.name)
+        except Exception:
+            pass
 
     job_store.update(
         job_id,
@@ -1488,12 +1591,21 @@ def run_bulk_workflow(
             "log_path": str(log_path),
             "snapshots": snapshots,
             "epitope_plots": epitope_plot_paths,
-            "epitope_plot_files": [Path(p).name for p in epitope_plot_paths if p],
+            "epitope_plot_files": epitope_plot_files,
+            "plot_dir": str(plot_dir),
+            "selection_path": str(selection_path),
+            "selection_filename": selection_path.name,
+            "targets_table_path": str(targets_table_path),
+            "targets_table_filename": targets_table_path.name,
+            "snapshot_report_path": str(snapshot_report_path) if snapshot_report_path else None,
+            "snapshot_report_filename": snapshot_report_path.name if snapshot_report_path else None,
         },
     )
     if snapshots:
         base_dirs = sorted({Path(path).parent for path in snapshots})
         log(f"[snapshots] saved {len(snapshots)} image(s) under: " + ", ".join(str(p) for p in base_dirs))
+    log(f"[plots] bundle saved under {plot_dir}")
+    print(f"[plots] bundle saved under {plot_dir}")
 
 
 def _parse_bool(value: object, default: bool = True) -> bool:
