@@ -455,32 +455,34 @@ function renderSnapshots(meta = []) {
   el.snapshotSection.hidden = false;
 }
 
-function renderEpitopePlots(names = []) {
+function renderEpitopePlots(items = []) {
   if (!el.epitopePlotGrid || !el.epitopePlotSection) return;
   el.epitopePlotGrid.innerHTML = '';
-  const list = Array.isArray(names) ? names.filter(Boolean) : [];
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) {
     state.epitopePlots = [];
     el.epitopePlotSection.hidden = true;
     return;
   }
   state.epitopePlots = list;
-  list.forEach((name) => {
+  list.forEach((item) => {
+    const label = item.label || (item.src || '').split('/').pop() || 'Epitope plot';
+    const src = item.src;
+    if (!src) return;
     const card = document.createElement('div');
     card.className = 'snapshot-card';
     const header = document.createElement('div');
     header.className = 'snapshot-header';
     const title = document.createElement('div');
-    title.textContent = name;
+    title.textContent = label;
     header.appendChild(title);
     card.appendChild(header);
 
     const imgBox = document.createElement('div');
     imgBox.className = 'snapshot-image';
     const img = document.createElement('img');
-    const cacheBust = Date.now();
-    img.src = `/api/bulk/file?name=${encodeURIComponent(name)}&t=${cacheBust}`;
-    img.alt = name;
+    img.src = src;
+    img.alt = label;
     img.loading = 'lazy';
     img.style.maxWidth = '100%';
     img.style.border = '1px solid #e2e8f0';
@@ -1025,12 +1027,31 @@ function updateJobUI(job) {
   if (newSnapshots.length && snapshotsChanged(newSnapshots)) {
     loadSnapshotMetadata(newSnapshots);
   }
-  const epPlotRaw = Array.isArray(job.details?.epitope_plot_files)
-    ? job.details.epitope_plot_files
-    : Array.isArray(job.details?.epitope_plots)
-      ? job.details.epitope_plots
-      : [];
-  const epPlotNames = epPlotRaw.map((p) => (p || '').split('/').pop()).filter(Boolean);
+  const epPlotFiles = Array.isArray(job.details?.epitope_plot_files) ? job.details.epitope_plot_files : [];
+  const epPlotPaths = Array.isArray(job.details?.epitope_plots) ? job.details.epitope_plots : [];
+  const plotDir = typeof job.details?.plot_dir === 'string' ? job.details.plot_dir : '';
+  const epPlotNames = [];
+  const seen = new Set();
+  const makeSrc = (val) => {
+    if (!val) return null;
+    if (/^([A-Za-z]:)?\//.test(val)) return val.startsWith('file://') ? val : `file://${val}`;
+    return `/api/bulk/file?name=${encodeURIComponent(val)}&t=${Date.now()}`;
+  };
+  epPlotFiles.forEach((name) => {
+    const label = (name || '').split('/').pop();
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    const candidate = plotDir ? `${plotDir.replace(/\/$/, '')}/${label}` : label;
+    const src = makeSrc(candidate) || makeSrc(label);
+    if (src) epPlotNames.push({ src, label });
+  });
+  epPlotPaths.forEach((path) => {
+    const label = (path || '').split('/').pop();
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    const src = makeSrc(path);
+    if (src) epPlotNames.push({ src, label });
+  });
   if (epPlotNames.length || state.epitopePlots.length) {
     renderEpitopePlots(epPlotNames);
   }
@@ -1103,11 +1124,7 @@ function updateJobUI(job) {
     } else {
       renderSnapshots([]);
     }
-    if (epPlotNames.length) {
-      renderEpitopePlots(epPlotNames);
-    } else {
-      renderEpitopePlots([]);
-    }
+    renderEpitopePlots(epPlotNames);
     stopJobPolling();
   } else {
     setBadge(el.bulkStatus, 'Bulk failed', 'rgba(248, 113, 113, 0.25)');
