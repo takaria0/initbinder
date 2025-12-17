@@ -9,7 +9,7 @@ import base64
 import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -829,10 +829,13 @@ async def api_boltzgen_diversity() -> BoltzgenDiversityResponse:
 
 @app.get("/api/bulk/boltzgen/binders", response_model=BoltzgenBinderResponse)
 async def api_boltzgen_binders(
+    response: Response,
     pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
 ) -> BoltzgenBinderResponse:
+    response.headers["Cache-Control"] = "no-store"
+    print(f"Received request for BoltzGen binders: pdb_ids={pdb_ids}, page={page}, page_size={page_size}")
     ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
     return list_boltzgen_binders(ids, page=page, page_size=page_size)
 

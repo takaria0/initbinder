@@ -840,7 +840,7 @@ function renderBinderRows(rows = []) {
   el.binderPanel.hidden = false;
 }
 
-async function loadBinderTable({ page = 1, silent = false } = {}) {
+async function loadBinderTable({ page = 1, silent = false, force = false } = {}) {
   if (!el.binderPanel) return;
   const ids = Array.from(new Set(
     (state.bulkPreviewRows || [])
@@ -855,8 +855,10 @@ async function loadBinderTable({ page = 1, silent = false } = {}) {
   params.append('pdb_ids', ids.join(','));
   params.append('page', String(page));
   params.append('page_size', String(state.binderPageSize || 100));
+  if (force) params.append('_ts', String(Date.now()));
   try {
-    const res = await fetch(`/api/bulk/boltzgen/binders?${params.toString()}`);
+    if (el.binderRefresh) el.binderRefresh.disabled = true;
+    const res = await fetch(`/api/bulk/boltzgen/binders?${params.toString()}`, { cache: 'no-store' });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.detail || `Failed to load binders (${res.status})`);
@@ -875,6 +877,8 @@ async function loadBinderTable({ page = 1, silent = false } = {}) {
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
     if (el.binderPanel) el.binderPanel.hidden = true;
+  } finally {
+    if (el.binderRefresh) el.binderRefresh.disabled = false;
   }
 }
 
@@ -2069,7 +2073,7 @@ function init() {
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
-  if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => loadBinderTable({ page: state.binderPage || 1 }));
+  if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => loadBinderTable({ page: state.binderPage || 1, force: true }));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
