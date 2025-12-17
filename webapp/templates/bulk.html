@@ -161,35 +161,37 @@
 
             <section id="boltz-binders-panel" class="table-scroll">
               <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
-                <div>
+                <div style="display:flex; flex-direction:column; gap:4px;">
                   <h3 style="margin: 0;">Designed binders</h3>
                   <div id="boltz-binders-summary" class="badge"></div>
-                  <div id="boltz-binders-csv" class="help-text" style="margin-top: 4px;" hidden></div>
+                  <div id="boltz-binders-csv" class="help-text" hidden></div>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-binders-download" class="ghost">Download CSV</button>
                   <button type="button" id="boltz-binders-refresh" class="ghost">Refresh</button>
                 </div>
               </div>
-              <p class="help-text" style="margin-top: 0;">Shows up to 100 BoltzGen binders per page (latest runs). Paths are clickable and a PyMOL button will highlight the target epitope.</p>
-              <table id="boltz-binders-table">
-                <thead>
-                  <tr>
-                    <th>PDB ID</th>
-                    <th>Epitope</th>
-                    <th>Rank</th>
-                    <th>ipTM</th>
-                    <th>RMSD</th>
-                    <th>CIF path</th>
-                    <th>PyMOL</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
-              <div id="boltz-binders-pagination" class="table-pagination" hidden>
-                <button type="button" data-page-nav="prev">&larr; Prev</button>
-                <span class="page-label" id="boltz-binders-page-label"></span>
-                <button type="button" data-page-nav="next">Next &rarr;</button>
+              <div class="card" style="padding: 10px; border:1px solid #e2e8f0; border-radius:8px;">
+                <p class="help-text" style="margin: 0 0 8px 0;">Latest BoltzGen binders from the diversity roll-up. Paths are clickable; PyMOL will highlight the target epitope.</p>
+                <table id="boltz-binders-table">
+                  <thead>
+                    <tr>
+                      <th>PDB ID</th>
+                      <th>Epitope</th>
+                      <th>Rank</th>
+                      <th>ipTM</th>
+                      <th>RMSD</th>
+                      <th>CIF path</th>
+                      <th>PyMOL</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+                <div id="boltz-binders-pagination" class="table-pagination" hidden style="margin-top:10px;">
+                  <button type="button" data-page-nav="prev">&larr; Prev</button>
+                  <span class="page-label" id="boltz-binders-page-label"></span>
+                  <button type="button" data-page-nav="next">Next &rarr;</button>
+                </div>
               </div>
             </section>
           </div>

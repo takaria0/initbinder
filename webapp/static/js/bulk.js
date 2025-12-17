@@ -699,9 +699,13 @@ async function downloadEpitopeReportHtml() {
   }
 }
 
-async function refreshDiversity({ silent = false } = {}) {
+async function refreshDiversity({ silent = false, page = null } = {}) {
   try {
-    const res = await fetch('/api/bulk/boltzgen/diversity');
+    const params = new URLSearchParams();
+    const nextPage = page ?? state.binderPage ?? 1;
+    params.append('page', String(nextPage));
+    params.append('page_size', String(state.binderPageSize || 100));
+    const res = await fetch(`/api/bulk/boltzgen/diversity?${params.toString()}`);
     if (!res.ok) throw new Error('Unable to load diversity report');
     const data = await res.json();
     state.diversityCsv = data.csv_name || null;
@@ -711,6 +715,7 @@ async function refreshDiversity({ silent = false } = {}) {
     state.diversityOutputDir = data.output_dir || null;
     state.diversityPlots = Array.isArray(data.plots) ? data.plots : [];
     const pdbIds = new Set();
+    const binderRows = Array.isArray(data.binder_rows) ? data.binder_rows : [];
     (state.diversityPlots || []).forEach((plot) => {
       const val = (plot.pdb_id || '').trim().toUpperCase();
       if (val) pdbIds.add(val);
@@ -719,15 +724,31 @@ async function refreshDiversity({ silent = false } = {}) {
       const val = (file.pdb_id || '').trim().toUpperCase();
       if (val) pdbIds.add(val);
     });
+    binderRows.forEach((row) => {
+      const val = (row.pdb_id || '').trim().toUpperCase();
+      if (val) pdbIds.add(val);
+    });
     state.binderPdbIds = Array.from(pdbIds);
     if (state.diversityCsv) {
-      state.binderCsvName = state.binderCsvName || state.diversityCsv;
+      state.binderCsvName = state.diversityCsv;
     }
     renderDiversityPlots(state.diversityPlots);
     if (!silent && data.message) {
       showAlert(data.message, false);
     }
-    await loadBinderTable({ page: 1, silent: true });
+    if (binderRows.length || typeof data.binder_total === 'number') {
+      state.binderRows = binderRows;
+      state.binderTotal = Number(data.binder_total || binderRows.length || 0);
+      state.binderPage = Number(data.binder_page || nextPage || 1);
+      state.binderPageSize = Number(data.binder_page_size || state.binderPageSize || 100);
+      state.binderMessage = data.binder_message || data.message || null;
+      renderBinderRows(state.binderRows);
+    } else {
+      state.binderRows = [];
+      state.binderTotal = 0;
+      state.binderMessage = data.message || null;
+      await loadBinderTable({ page: nextPage, silent: true });
+    }
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
   }
@@ -1624,9 +1645,9 @@ function handleBinderPagination(event) {
   const current = state.binderPage || 1;
   const totalPages = Math.max(1, Math.ceil((state.binderTotal || 0) / (state.binderPageSize || 1)));
   if (dir === 'prev' && current > 1) {
-    loadBinderTable({ page: current - 1, silent: true });
+    refreshDiversity({ silent: true, page: current - 1 });
   } else if (dir === 'next' && current < totalPages) {
-    loadBinderTable({ page: current + 1, silent: true });
+    refreshDiversity({ silent: true, page: current + 1 });
   }
 }
 
@@ -2108,7 +2129,7 @@ function init() {
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
-  if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => loadBinderTable({ page: state.binderPage || 1, force: true }));
+  if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));

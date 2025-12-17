@@ -1390,7 +1390,12 @@ def _write_epitope_plots(
     return saved
 
 
-def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
+def build_boltzgen_diversity_report(
+    *,
+    include_binders: bool = False,
+    binder_page: int = 1,
+    binder_page_size: int = 100,
+) -> BoltzgenDiversityResponse:
     """Aggregate BoltzGen metrics and render diversity plots."""
 
     cfg = load_config()
@@ -1517,6 +1522,22 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
         writer.writeheader()
         writer.writerows(aggregate_rows)
 
+    page_val = max(1, int(binder_page or 1))
+    page_size_val = min(200, max(1, int(binder_page_size or 100)))
+    binder_rows: List[BoltzgenBinderRow] = []
+    binder_total = 0
+    binder_msg: Optional[str] = None
+    if include_binders:
+        binder_ids = sorted({entry.get("pdb_id", "").strip().upper() for entry in metrics_files if entry.get("pdb_id")})
+        binder_rows_all = _load_binder_rows_from_csv(csv_path, ids=binder_ids)
+        binder_total = len(binder_rows_all)
+        start = (page_val - 1) * page_size_val
+        end = start + page_size_val
+        binder_rows = binder_rows_all[start:end]
+        binder_msg = (
+            f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
+        )
+
     plot_entries: List[BoltzgenDiversityPlot] = []
     try:
         import matplotlib
@@ -1532,6 +1553,11 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
             metrics_files=metrics_files,
             message="Matplotlib unavailable; generated CSV only.",
             output_dir=str(out_dir),
+            binder_rows=binder_rows,
+            binder_total=binder_total,
+            binder_page=page_val if include_binders else 1,
+            binder_page_size=page_size_val if include_binders else 0,
+            binder_message=binder_msg,
         )
 
     html_sections: List[str] = []
@@ -1695,6 +1721,11 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
         plots=plot_entries,
         metrics_files=metrics_files,
         message=f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets.",
+        binder_rows=binder_rows,
+        binder_total=binder_total,
+        binder_page=page_val if include_binders else 1,
+        binder_page_size=page_size_val if include_binders else 0,
+        binder_message=binder_msg,
     )
 
 
@@ -1709,31 +1740,13 @@ def _binder_config_map(entries: List[dict]) -> Dict[str, dict]:
     return mapping
 
 
-def list_boltzgen_binders(
-    pdb_ids: List[str], *, page: int = 1, page_size: int = 50
-) -> BoltzgenBinderResponse:
-    ids = [p.strip().upper() for p in pdb_ids if p and str(p).strip()]
-    if not ids:
-        return BoltzgenBinderResponse(message="No PDB IDs provided.")
-
-    page = max(1, int(page))
-    page_size = min(100, max(1, int(page_size)))
-
-    report = build_boltzgen_diversity_report()
-    csv_name = report.csv_name
-    if not csv_name:
-        return BoltzgenBinderResponse(
-            message=report.message or "No BoltzGen metrics detected for the requested targets.",
-            page=page,
-            page_size=page_size,
-        )
-
-    csv_path = _output_dir() / csv_name
-    if not csv_path.exists():
-        return BoltzgenBinderResponse(
-            message=f"Aggregated metrics CSV missing: {csv_path}", page=page, page_size=page_size
-        )
-
+def _load_binder_rows_from_csv(
+    csv_path: Path,
+    *,
+    ids: Optional[List[str]] = None,
+) -> List[BoltzgenBinderRow]:
+    wanted = [p.strip().upper() for p in (ids or []) if p and str(p).strip()]
+    wanted_set = set(wanted)
     by_pdb_counter: Dict[str, int] = defaultdict(int)
     config_cache: Dict[str, Dict[str, dict]] = {}
     all_rows: List[BoltzgenBinderRow] = []
@@ -1742,7 +1755,9 @@ def list_boltzgen_binders(
         reader = csv.DictReader(handle)
         for raw in reader:
             pdb_id = str(raw.get("PDB_ID") or raw.get("pdb_id") or "").strip().upper()
-            if not pdb_id or pdb_id not in ids:
+            if not pdb_id:
+                continue
+            if wanted_set and pdb_id not in wanted_set:
                 continue
 
             epitope = (raw.get("epitope_name") or raw.get("spec") or raw.get("epitope") or "").strip() or None
@@ -1801,6 +1816,35 @@ def list_boltzgen_binders(
             )
 
     all_rows.sort(key=lambda r: (r.pdb_id, r.epitope or "", r.rank))
+    return all_rows
+
+
+def list_boltzgen_binders(
+    pdb_ids: List[str], *, page: int = 1, page_size: int = 50
+) -> BoltzgenBinderResponse:
+    ids = [p.strip().upper() for p in pdb_ids if p and str(p).strip()]
+    if not ids:
+        return BoltzgenBinderResponse(message="No PDB IDs provided.")
+
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+
+    report = build_boltzgen_diversity_report()
+    csv_name = report.csv_name
+    if not csv_name:
+        return BoltzgenBinderResponse(
+            message=report.message or "No BoltzGen metrics detected for the requested targets.",
+            page=page,
+            page_size=page_size,
+        )
+
+    csv_path = _output_dir() / csv_name
+    if not csv_path.exists():
+        return BoltzgenBinderResponse(
+            message=f"Aggregated metrics CSV missing: {csv_path}", page=page, page_size=page_size
+        )
+
+    all_rows = _load_binder_rows_from_csv(csv_path, ids=ids)
     total_rows = len(all_rows)
     start = (page - 1) * page_size
     end = start + page_size

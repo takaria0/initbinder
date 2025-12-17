@@ -259,6 +259,11 @@ class BoltzgenDiversityResponse(BaseModel):
     plots: List[BoltzgenDiversityPlot] = Field(default_factory=list)
     metrics_files: List[BoltzgenMetricsFile] = Field(default_factory=list)
     message: Optional[str] = None
+    binder_rows: List[BoltzgenBinderRow] = Field(default_factory=list)
+    binder_total: int = 0
+    binder_page: int = 1
+    binder_page_size: int = 0
+    binder_message: Optional[str] = None
 
 
 class BoltzgenBinderRow(BaseModel):
