@@ -1012,6 +1012,11 @@ function buildAllRunCommandsText(targets = []) {
   });
 
   lines.push('', '# 3) Launch BoltzGen pipeline', condaLine);
+  lines.push(`export INITBINDER_ROOT=${envRoot}`);
+  lines.push(`export INITBINDER_TARGET_ROOT=${envTargetRoot}`);
+
+  const monitorLines = [];
+  const pullLines = [];
   targets.forEach((t) => {
     const pdb = (t?.pdb_id || '').toUpperCase();
     if (!pdb) return;
@@ -1027,10 +1032,10 @@ function buildAllRunCommandsText(targets = []) {
     const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
     const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
     const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+
     lines.push(
       '',
       `# Target ${pdb}`,
-      `INITBINDER_ROOT=${envRoot} INITBINDER_TARGET_ROOT=${envTargetRoot} \\`,
       `python ${pipelinePath} pipeline ${pdb} \\`,
       `  --run_label ${runLabel} \\`,
       `  --num_designs ${designCount} \\`,
@@ -1040,15 +1045,19 @@ function buildAllRunCommandsText(targets = []) {
       cacheLine,
       extraLine,
       '  --submit',
-      '',
-      '# Monitor',
-      `ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`,
-      `ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`,
-      '',
-      '# Pull results back',
-      `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/_boltzgen/${runLabel}/`,
     );
+
+    monitorLines.push(`ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`);
+    monitorLines.push(`ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`);
+    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/_boltzgen/${runLabel}/`);
   });
+
+  if (monitorLines.length) {
+    lines.push('', '# Monitor', ...monitorLines);
+  }
+  if (pullLines.length) {
+    lines.push('', '# Pull results back', ...pullLines);
+  }
 
   return lines.filter(Boolean).join('\n');
 }
