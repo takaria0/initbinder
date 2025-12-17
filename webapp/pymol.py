@@ -25,10 +25,15 @@ from .result_collectors import (
 )
 
 try:
-    from scripts.pymol_utils import export_design_bundle, export_hotspot_bundle
+    from scripts.pymol_utils import (
+        export_design_bundle,
+        export_hotspot_bundle,
+        _collect_expression_regions,
+    )
 except Exception as exc:  # pragma: no cover - defensive import guard
     export_design_bundle = None  # type: ignore
     export_hotspot_bundle = None  # type: ignore
+    _collect_expression_regions = None  # type: ignore
     _PYMOL_UTILS_ERROR = exc
 else:
     _PYMOL_UTILS_ERROR = None
@@ -68,6 +73,57 @@ class GalleryMovieResult:
     frame_prefix: Path
     frames_pattern: str
     log_path: Path
+
+
+def _swap_selection_object(selection: str, obj_name: str) -> str:
+    """Replace the leading object name in a PyMOL selection with obj_name."""
+    if not selection:
+        return selection
+    return re.sub(r"\btarget\b", obj_name, selection, count=1)
+
+
+def _gather_expression_regions(pdb_id: str) -> tuple[Optional[str], list[dict[str, str]], set[str]]:
+    """Mirror the vendor expression lookup from scripts/pymol_utils."""
+    vendor_label: Optional[str] = None
+    regions: list[dict[str, str]] = []
+    target_chains: set[str] = set()
+
+    if _collect_expression_regions is None:
+        return vendor_label, regions, target_chains
+
+    try:
+        vendor_label, region_list, chain_meta = _collect_expression_regions(pdb_id.upper())
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[pymol] vendor expression lookup failed for {pdb_id}: {exc}")
+        return None, [], set()
+
+    for region in region_list or []:
+        selection = str(region.get("selection") or "").strip()
+        chain = str(region.get("chain") or "").strip().upper()
+        start = str(region.get("start") or "").strip()
+        end = str(region.get("end") or "").strip()
+        if not selection:
+            continue
+        if chain:
+            target_chains.add(chain)
+        regions.append(
+            {
+                "selection": selection,
+                "chain": chain,
+                "start": start,
+                "end": end,
+            }
+        )
+
+    if isinstance(chain_meta, dict):
+        for entry in chain_meta.get("target") or []:
+            if entry:
+                target_chains.add(str(entry).strip().upper())
+        for entry in chain_meta.get("supporting") or []:
+            if entry:
+                target_chains.add(str(entry).strip().upper())
+
+    return vendor_label, regions, target_chains
 
 
 def _ensure_env() -> Path:
@@ -617,17 +673,30 @@ def launch_boltzgen_binder(
     selection = _selection_from_labels(binding_label, include_label)
     selection_obj = "target" if target_dest else "complex"
 
+    vendor_label, expression_regions, target_chain_ids = _gather_expression_regions(pdb_id)
+    target_obj = "target" if target_dest else "complex"
+    pdb_fetch_name = (pdb_id or "").strip().upper()
+
     script_lines = [
         "reinitialize",
         "bg_color white",
         "set ray_opaque_background, off",
         "set cartoon_fancy_helices, on",
         "set cartoon_smooth_loops, on",
+        "set_color designed_binder, [0.220, 0.420, 0.780]",
         f"load {design_dest.name}, complex",
         "hide everything, complex",
         "show cartoon, complex",
-        "color skyblue, complex",
+        "color designed_binder, complex",
     ]
+
+    if pdb_fetch_name:
+        script_lines.extend(
+            [
+                f"fetch {pdb_fetch_name}",
+                f"align {pdb_fetch_name}, complex",
+            ]
+        )
 
     if target_dest:
         script_lines.extend(
@@ -639,6 +708,50 @@ def launch_boltzgen_binder(
                 "set cartoon_transparency, 0.45, target",
             ]
         )
+
+    if target_chain_ids:
+        chain_expr = " or ".join(f"chain {cid}" for cid in sorted(target_chain_ids))
+        script_lines.extend(
+            [
+                f"select target_chains_complex, complex and ({chain_expr})",
+                "color lightgrey, target_chains_complex",
+                "set cartoon_transparency, 0.45, target_chains_complex",
+                "group target_chains, target_chains_complex",
+            ]
+        )
+
+    if expression_regions:
+        vendor_clean = str(vendor_label).replace("\n", " ").replace('"', "") if vendor_label else None
+        script_lines.extend(
+            [
+                "set_color vendor_expression, [0.960, 0.720, 0.240]",
+                "set label_font_id, 7",
+                "set label_size, -0.6",
+                f"set cartoon_transparency, 0.65, {target_obj}",
+            ]
+        )
+        for idx, region in enumerate(expression_regions, start=1):
+            sel_expr = _swap_selection_object(region.get("selection", ""), target_obj)
+            if not sel_expr:
+                continue
+            chain = region.get("chain") or f"chain{idx}"
+            start_label = region.get("start") or ""
+            end_label = region.get("end") or ""
+            obj_name = f"vendor_expr_{idx:02d}_{chain}"
+            script_lines.extend(
+                [
+                    f"select {obj_name}, {sel_expr}",
+                    f"set cartoon_transparency, 0.05, {obj_name}",
+                    f"color vendor_expression, {obj_name}",
+                    f"group vendor_expression, {obj_name}",
+                    f"label first ({sel_expr} and name CA), \"{chain}:{start_label}\"",
+                    f"label last ({sel_expr} and name CA), \"{chain}:{end_label}\"",
+                    f"set label_color, vendor_expression, first ({sel_expr} and name CA)",
+                    f"set label_color, vendor_expression, last ({sel_expr} and name CA)",
+                ]
+            )
+        if vendor_clean:
+            script_lines.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_clean}\"")
 
     if selection:
         script_lines.extend(

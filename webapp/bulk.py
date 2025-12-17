@@ -43,6 +43,10 @@ from .pipeline import get_target_status, init_decide_prep
 from .preferences import list_presets
 from .result_collectors import load_boltzgen_metrics
 from .pymol import PyMolLaunchError, launch_hotspots, render_hotspot_snapshot, resolve_boltz_design_path
+try:  # For mapping vendor expression chains to the prepared structure
+    from scripts.pymol_utils import _collect_expression_regions  # type: ignore
+except Exception:  # pragma: no cover - defensive import
+    _collect_expression_regions = None  # type: ignore
 
 
 DesignSubmitter = Callable[[DesignRunRequest, JobStore | None], str]
@@ -505,6 +509,94 @@ def _write_epitope_stats_file(
     print(msg)
 
 
+def _target_chains_for_boltz(pdb_id: str) -> List[str]:
+    """Return chains aligned to vendor/target metadata for boltzgen configs."""
+    chains: List[str] = []
+    seen: set[str] = set()
+
+    if _collect_expression_regions:
+        try:
+            _, regions, chain_meta = _collect_expression_regions(pdb_id.upper())
+            for region in regions or []:
+                cid = str(region.get("chain") or "").strip().upper()
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    chains.append(cid)
+            if isinstance(chain_meta, dict):
+                for group in ("target", "supporting"):
+                    for cid in chain_meta.get(group) or []:
+                        cid_clean = str(cid).strip().upper()
+                        if cid_clean and cid_clean not in seen:
+                            seen.add(cid_clean)
+                            chains.append(cid_clean)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[boltzgen-config] warn: could not read expression regions for {pdb_id}: {exc}")
+
+    if chains:
+        return chains
+
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_yaml = targets_dir / pdb_id.upper() / "target.yaml"
+    if not target_yaml.exists():
+        return chains
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        return chains
+    for key in ("chains", "supporting_chains"):
+        for cid in data.get(key) or []:
+            cid_clean = str(cid).strip().upper()
+            if cid_clean and cid_clean not in seen:
+                seen.add(cid_clean)
+                chains.append(cid_clean)
+    return chains
+
+
+def _inject_chain_include(spec_path: Path, chain_ids: Sequence[str], log: Callable[[str], None]) -> None:
+    """Ensure boltzgen config includes explicit chain filters."""
+    chain_list = [str(cid).strip().upper() for cid in chain_ids if str(cid).strip()]
+    if not chain_list or not spec_path.exists():
+        return
+    try:
+        data = yaml.safe_load(spec_path.read_text()) or {}
+    except Exception as exc:
+        log(f"  [boltzgen-config] warn: could not reload {spec_path} for chain include: {exc}")
+        return
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return
+    file_block = None
+    for entity in entities:
+        if isinstance(entity, dict) and isinstance(entity.get("file"), dict):
+            file_block = entity["file"]
+            break
+    if file_block is None:
+        return
+    include_entries = file_block.get("include")
+    if not isinstance(include_entries, list):
+        include_entries = []
+    existing = {
+        str(entry.get("chain", {}).get("id") or "").strip().upper()
+        for entry in include_entries
+        if isinstance(entry, dict) and isinstance(entry.get("chain"), dict)
+    }
+    added = 0
+    for cid in chain_list:
+        if cid and cid not in existing:
+            include_entries.append({"chain": {"id": cid}})
+            added += 1
+    if added == 0:
+        return
+    file_block["include"] = include_entries
+    data["entities"] = entities
+    try:
+        spec_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        log(f"  [boltzgen-config] limited target chains to {', '.join(chain_list)} in {spec_path}")
+    except Exception as exc:
+        log(f"  [boltzgen-config] warn: failed to persist chain include to {spec_path}: {exc}")
+
+
 def _write_boltzgen_configs(
     pdb_id: str,
     epitopes: List[dict],
@@ -532,6 +624,7 @@ def _write_boltzgen_configs(
     config_root.mkdir(parents=True, exist_ok=True)
     engine = BoltzGenEngine()
     scaffold_paths = engine._resolve_nanobody_scaffolds()
+    target_chain_ids = _target_chains_for_boltz(pdb_id)
 
     for idx, ep in enumerate(epitopes, start=1):
         ep_dir = config_root / f"epitope_{idx}"
@@ -567,6 +660,7 @@ def _write_boltzgen_configs(
             )
             log(msg)
             print(msg)
+            _inject_chain_include(spec_path, target_chain_ids, log)
         except Exception as exc:  # pragma: no cover - defensive
             msg = f"  [boltzgen-config] failed for {pdb_id.upper()} · {name}: {exc}"
             log(msg)
