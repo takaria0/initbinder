@@ -958,6 +958,164 @@ async def api_pymol_snapshot_package(
     return FileResponse(out_path, filename=out_path.name, media_type="text/html")
 
 
+@app.get("/api/jobs/{job_id}/epitope-report")
+async def api_job_epitope_report(job_id: str) -> FileResponse:
+    try:
+        record: JobRecord = store.get(job_id)
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+    details = record.details or {}
+    snapshots_raw = details.get("snapshots") if isinstance(details, dict) else None
+    snapshot_names = [n for n in (snapshots_raw or []) if isinstance(n, str) and n.strip()]
+    snapshot_meta = _snapshot_metadata(snapshot_names) if snapshot_names else []
+
+    plot_dir_raw = details.get("plot_dir") if isinstance(details, dict) else None
+    plot_dir = Path(str(plot_dir_raw)).expanduser() if plot_dir_raw else None
+
+    plot_paths: list[Path] = []
+    for val in (details.get("epitope_plots") if isinstance(details, dict) else None) or []:
+        if not isinstance(val, str) or not val.strip():
+            continue
+        p = Path(val).expanduser()
+        if not p.is_absolute() and plot_dir:
+            p = plot_dir / p
+        plot_paths.append(p)
+    if plot_dir and isinstance(details, dict):
+        for name in details.get("epitope_plot_files") or []:
+            if not isinstance(name, str) or not name.strip():
+                continue
+            plot_paths.append(plot_dir / name)
+
+    # De-duplicate while preserving order.
+    seen_plots: set[Path] = set()
+    unique_plots: list[Path] = []
+    for p in plot_paths:
+        try:
+            resolved = p.resolve()
+        except Exception:
+            continue
+        if resolved in seen_plots:
+            continue
+        seen_plots.add(resolved)
+        unique_plots.append(resolved)
+
+    if not snapshot_meta and not unique_plots:
+        raise HTTPException(status_code=404, detail="No snapshots or epitope plots found for this job")
+
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    report_dir = Path(cfg.log_dir) / "webapp" / "epitope_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    out_path = report_dir / f"epitope_report_{job_id}_{ts}.html"
+
+    def _img_b64(path: Path) -> tuple[str, str] | None:
+        if not path.exists() or not path.is_file():
+            return None
+        mime = "image/png"
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            mime = "image/jpeg"
+        try:
+            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        except Exception:
+            return None
+        return mime, b64
+
+    sections: list[str] = []
+
+    if snapshot_meta:
+        snapshot_blocks: list[str] = []
+        for item in snapshot_meta:
+            img_tag = "<div style='color:#94a3b8'>Image unavailable</div>"
+            raw_path = item.get("path")
+            if isinstance(raw_path, str):
+                encoded = _img_b64(Path(raw_path))
+                if encoded:
+                    mime, b64 = encoded
+                    alt = f"{item.get('pdb_id','Target')} hotspot"
+                    img_tag = (
+                        f"<img src='data:{mime};base64,{b64}' alt='{alt}' "
+                        "style='max-width:100%;border:1px solid #e2e8f0;border-radius:8px;'/>"
+                    )
+            warn_lines = [f"<div style='color:#ef4444'>{w}</div>" for w in (item.get("warnings") or [])]
+            warn_html = "".join(warn_lines)
+            snapshot_blocks.append(
+                f"""
+                <section style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:12px 0;page-break-inside:avoid;">
+                  <header style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                    <div><strong>{item.get('pdb_id') or 'Target'}</strong> · {item.get('filename') or ''}</div>
+                    <div style="font-size:0.85rem;color:#64748b;">Generated {datetime.datetime.utcfromtimestamp(item.get('created_at',0)).isoformat()}Z</div>
+                  </header>
+                  {warn_html}
+                  <div style="margin:10px 0;">{img_tag}</div>
+                </section>
+                """
+            )
+        sections.append(
+            f"""
+            <section>
+              <h2 style="margin:18px 0 6px;">Hotspot snapshots</h2>
+              <p style="color:#475569;margin-top:0;">{len(snapshot_meta)} image(s)</p>
+              {''.join(snapshot_blocks)}
+            </section>
+            """
+        )
+
+    plot_blocks: list[str] = []
+    for path in unique_plots:
+        encoded = _img_b64(path)
+        if not encoded:
+            continue
+        mime, b64 = encoded
+        label = path.name
+        plot_blocks.append(
+            f"""
+            <section style="border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:12px 0;page-break-inside:avoid;">
+              <header style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <div><strong>{label}</strong></div>
+                <div style="font-size:0.85rem;color:#64748b;">{path}</div>
+              </header>
+              <div style="margin:10px 0;">
+                <img src='data:{mime};base64,{b64}' alt='{label}' style='max-width:100%;border:1px solid #e2e8f0;border-radius:8px;'/>
+              </div>
+            </section>
+            """
+        )
+    if plot_blocks:
+        sections.append(
+            f"""
+            <section>
+              <h2 style="margin:18px 0 6px;">Epitope plots</h2>
+              <p style="color:#475569;margin-top:0;">{len(plot_blocks)} plot(s)</p>
+              {''.join(plot_blocks)}
+            </section>
+            """
+        )
+
+    title = "Epitope report"
+    html = f"""<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>{title}</title>
+        <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 16px; color: #0f172a; }}
+          h1 {{ margin-bottom: 4px; }}
+          p.lead {{ color: #475569; margin-top: 0; }}
+          section {{ page-break-inside: avoid; }}
+          code {{ background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }}
+        </style>
+      </head>
+      <body>
+        <h1>{title}</h1>
+        <p class="lead">Job <code>{record.job_id}</code> · {datetime.datetime.utcnow().isoformat()}Z</p>
+        {''.join(sections)}
+      </body>
+    </html>
+    """
+    out_path.write_text(html)
+    return FileResponse(out_path, filename=out_path.name, media_type="text/html")
+
+
 @app.get("/api/targets/presets", response_model=TargetPresetListResponse)
 async def api_target_presets() -> TargetPresetListResponse:
     presets = preferences.list_presets()

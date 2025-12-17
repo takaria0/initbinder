@@ -39,7 +39,7 @@ const el = {
   snapshotDownloadPdf: document.querySelector('#snapshot-download-pdf'),
   epitopePlotSection: document.querySelector('#epitope-plot-section'),
   epitopePlotGrid: document.querySelector('#epitope-plot-grid'),
-  epitopePlotRefresh: document.querySelector('#epitope-plot-refresh'),
+  epitopeReportDownload: document.querySelector('#epitope-report-download'),
   epitopeMetricsSection: document.querySelector('#epitope-metrics-section'),
   boltzPanel: document.querySelector('#boltz-config-panel'),
   boltzTable: document.querySelector('#boltz-config-table tbody'),
@@ -47,6 +47,7 @@ const el = {
   boltzDesignCount: document.querySelector('#boltz-design-count'),
   boltzTimeHours: document.querySelector('#boltz-time-hours'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
+  boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
@@ -516,23 +517,34 @@ function renderEpitopePlots(items = []) {
   el.epitopePlotSection.hidden = false;
 }
 
-async function refreshEpitopePlots() {
-  if (el.epitopePlotRefresh) el.epitopePlotRefresh.disabled = true;
+async function downloadEpitopeReportHtml() {
+  if (el.epitopeReportDownload) el.epitopeReportDownload.disabled = true;
   try {
     if (!state.currentJobId) {
-      renderEpitopePlots(state.epitopePlots);
-      if (!state.epitopePlots.length) showAlert('No epitope plots to refresh yet.');
+      showAlert('Run a bulk job first to generate a report.');
       return;
     }
-    const job = await fetchJob(state.currentJobId);
-    updateJobUI(job);
-    if (state.epitopePlots.length) {
-      renderEpitopePlots(state.epitopePlots);
+    const res = await fetch(`/api/jobs/${encodeURIComponent(state.currentJobId)}/epitope-report`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to generate report (${res.status})`);
     }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] || 'epitope_report.html';
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch (err) {
-    showAlert(err.message || 'Unable to refresh epitope plots.');
+    showAlert(err.message || 'Unable to generate report.');
   } finally {
-    if (el.epitopePlotRefresh) el.epitopePlotRefresh.disabled = false;
+    if (el.epitopeReportDownload) el.epitopeReportDownload.disabled = false;
   }
 }
 
@@ -868,10 +880,17 @@ function clusterDefaults() {
   const lastSegment = targetBaseRaw.split('/').filter(Boolean).pop() || '';
   const targetRoot = lastSegment.toLowerCase() === 'targets' ? targetBaseRaw : `${targetBaseRaw}/targets`;
   const toolsRoot = workspaceRoot || '<remote_root>';
+  const localRootRaw = (info.local_root || '').toString().replace(/\/$/, '');
+  const localWorkspaceRoot = localRootRaw || '';
+  const localTargetsRoot = localWorkspaceRoot
+    ? (localWorkspaceRoot.toLowerCase().endsWith('/targets') ? localWorkspaceRoot : `${localWorkspaceRoot}/targets`)
+    : '';
   return {
     remoteRoot: workspaceRoot,
     targetRoot,
     toolsRoot,
+    localWorkspaceRoot,
+    localTargetsRoot,
     sshTarget: info.ssh_target || '<cluster>',
     condaActivate: boltz.conda_activate || info.conda_activate || '',
     boltz,
@@ -889,9 +908,11 @@ function runLabelFor(pdbId) {
 
 function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const upper = (pdbId || '').toUpperCase();
-  const { remoteRoot, targetRoot, toolsRoot, sshTarget, condaActivate, boltz } = clusterDefaults();
+  const {
+    remoteRoot, targetRoot, toolsRoot, sshTarget, condaActivate, boltz, localTargetsRoot,
+  } = clusterDefaults();
   const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${upper}`.replace(/\/+/g, '/');
-  const localTarget = `targets/${upper}`;
+  const localTarget = localTargetsRoot ? `${localTargetsRoot}/${upper}` : `targets/${upper}`;
   const runLabel = runLabelFor(upper);
   const designCount = getBoltzDesignCount() || 100;
   const timeHours = getBoltzTimeHours() || boltz.time_hours || 12;
@@ -919,7 +940,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     `# Manual BoltzGen submission${epitopeName ? ` (${epitopeName})` : ''}`,
     '',
     '# 1) Sync target configs + tools to cluster',
-    `rsync -az ${localTarget} ${sshTarget}:${remoteTarget}`,
+    `rsync -az ${localTarget} ${sshTarget}:${targetRoot}`,
     `rsync -az tools ${sshTarget}:${toolsRoot || '<remote_root>'}/tools`,
     '',
     '# 2) Verify boltzgen configs exist on cluster',
@@ -947,6 +968,91 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   ].filter(Boolean).join('\n');
 }
 
+function buildAllRunCommandsText(targets = []) {
+  const {
+    remoteRoot, targetRoot, toolsRoot, sshTarget, condaActivate, boltz, localTargetsRoot,
+  } = clusterDefaults();
+  const envRoot = remoteRoot || '<remote_root>';
+  const envTargetRoot = targetRoot || `${envRoot}/targets`;
+  const pipelinePath = `${remoteRoot || '<remote_root>'}/tools/boltzgen/pipeline.py`;
+  const condaLine = condaActivate ? condaActivate : '# conda activate bg';
+
+  const designCount = getBoltzDesignCount() || 100;
+  const timeHours = getBoltzTimeHours() || boltz.time_hours || 12;
+  const partition = boltz.partition || '<partition>';
+  const gpus = boltz.gpus || '<gpus>';
+  const cpus = boltz.cpus || '<cpus>';
+  const memVal = boltz.mem_gb ?? '<mem>';
+  const memLabel = Number.isFinite(memVal) ? `${memVal}G` : `${memVal}`;
+  const cacheDir = boltz.cache_dir ? `${boltz.cache_dir}` : null;
+  const extraArgs = Array.isArray(boltz.extra_args) ? boltz.extra_args : (boltz.extra_args ? [boltz.extra_args] : []);
+
+  const lines = [
+    '# Manual BoltzGen submission (all targets)',
+    '',
+    '# 1) Sync target configs + tools to cluster',
+  ];
+  targets.forEach((t) => {
+    const pdb = (t?.pdb_id || '').toUpperCase();
+    if (!pdb) return;
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    lines.push(`rsync -az ${localTarget} ${sshTarget}:${targetRoot}`);
+  });
+  lines.push(`rsync -az tools ${sshTarget}:${toolsRoot || '<remote_root>'}/tools`);
+
+  lines.push('', '# 2) Verify boltzgen configs exist on cluster');
+  targets.forEach((t) => {
+    const pdb = (t?.pdb_id || '').toUpperCase();
+    if (!pdb) return;
+    const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
+    const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
+    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
+      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
+    lines.push(`ssh ${sshTarget} "ls ${remoteSpecs.join(' ')}"`);
+  });
+
+  lines.push('', '# 3) Launch BoltzGen pipeline', condaLine);
+  targets.forEach((t) => {
+    const pdb = (t?.pdb_id || '').toUpperCase();
+    if (!pdb) return;
+    const runLabel = runLabelFor(pdb);
+    const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
+    const outputRoot = boltz.output_root
+      ? `${boltz.output_root}`.replace(/\/$/, '')
+      : `${remoteTarget}/designs/_boltzgen/${runLabel}`;
+    const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
+    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
+      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
+    const specLines = remoteSpecs.map((spec) => `  --spec ${spec} \\`);
+    const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
+    const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    lines.push(
+      '',
+      `# Target ${pdb}`,
+      `INITBINDER_ROOT=${envRoot} INITBINDER_TARGET_ROOT=${envTargetRoot} \\`,
+      `python ${pipelinePath} pipeline ${pdb} \\`,
+      `  --run_label ${runLabel} \\`,
+      `  --num_designs ${designCount} \\`,
+      `  --output_root ${outputRoot} \\`,
+      `  --partition ${partition} --gpus ${gpus} --cpus ${cpus} --mem ${memLabel} --time_h ${timeHours} \\`,
+      ...specLines,
+      cacheLine,
+      extraLine,
+      '  --submit',
+      '',
+      '# Monitor',
+      `ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`,
+      `ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`,
+      '',
+      '# Pull results back',
+      `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/_boltzgen/${runLabel}/`,
+    );
+  });
+
+  return lines.filter(Boolean).join('\n');
+}
+
 async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
   if (!pdbId) {
     showAlert('Missing PDB ID for manual command.');
@@ -970,6 +1076,22 @@ async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
     specs = target.configs.map((cfg) => cfg.config_path).filter(Boolean);
   }
   const text = buildRunCommandText(pdbId, specs, epitopeName);
+  if (el.boltzRunBody) el.boltzRunBody.textContent = text;
+}
+
+async function showRunCommandAll() {
+  if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
+  if (el.boltzRunTitle) el.boltzRunTitle.textContent = 'Manual run · all targets';
+  toggleModal(el.boltzRunModal, true);
+  if (!state.clusterStatus) {
+    await loadClusterStatus();
+  }
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    if (el.boltzRunBody) el.boltzRunBody.textContent = '# No BoltzGen targets detected.';
+    return;
+  }
+  const text = buildAllRunCommandsText(targets);
   if (el.boltzRunBody) el.boltzRunBody.textContent = text;
 }
 
@@ -1502,11 +1624,12 @@ function init() {
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);
   if (el.boltzRefresh) el.boltzRefresh.addEventListener('click', () => loadBoltzConfigs({ silent: true }));
+  if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
-  if (el.epitopePlotRefresh) el.epitopePlotRefresh.addEventListener('click', refreshEpitopePlots);
+  if (el.epitopeReportDownload) el.epitopeReportDownload.addEventListener('click', downloadEpitopeReportHtml);
   document.addEventListener('click', (evt) => {
     const closeTarget = evt.target?.dataset?.close;
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);

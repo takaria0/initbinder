@@ -195,12 +195,52 @@ def _write_sbatch_script(
 
 def _write_launcher(entries: List[PipelineEntry], launcher_path: Path) -> None:
     _ensure_dir(launcher_path.parent)
-    lines = ["#!/bin/bash", "set -euo pipefail", ""]
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        "",
+        "TIME_H=''",
+        "",
+        "while [[ $# -gt 0 ]]; do",
+        "  case \"$1\" in",
+        "    --time_h)",
+        "      TIME_H=\"${2:-}\"",
+        "      shift 2",
+        "      ;;",
+        "    --time_h=*)",
+        "      TIME_H=\"${1#*=}\"",
+        "      shift",
+        "      ;;",
+        "    -h|--help)",
+        "      echo \"Usage: $0 [--time_h HOURS]\"",
+        "      exit 0",
+        "      ;;",
+        "    *)",
+        "      echo \"Unknown argument: $1\" >&2",
+        "      exit 2",
+        "      ;;",
+        "  esac",
+        "done",
+        "",
+        "SBATCH_ARGS=()",
+        "if [[ -n \"$TIME_H\" ]]; then",
+        "  if ! [[ \"$TIME_H\" =~ ^[0-9]+$ ]]; then",
+        "    echo \"Invalid --time_h: $TIME_H\" >&2",
+        "    exit 2",
+        "  fi",
+        "  if [[ \"$TIME_H\" -lt 1 ]]; then",
+        "    TIME_H=1",
+        "  fi",
+        "  TIME_FMT=$(printf \"%02d:00:00\" \"$TIME_H\")",
+        "  SBATCH_ARGS+=(\"--time=${TIME_FMT}\")",
+        "fi",
+        "",
+    ]
     for entry in entries:
         lines.extend(
             [
                 f'echo "[launch] {entry.job_name}"',
-                f'sbatch {entry.script_path}',
+                f'sbatch "${{SBATCH_ARGS[@]}}" {entry.script_path}',
             ]
         )
     launcher_path.write_text("\n".join(lines) + "\n")

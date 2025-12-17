@@ -101,7 +101,7 @@
             <section id="epitope-plot-section" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <h2 style="margin: 0;">Epitope plots</h2>
-                <button type="button" id="epitope-plot-refresh" class="ghost">Refresh plots</button>
+                <button type="button" id="epitope-report-download" class="ghost">Download report (HTML)</button>
               </div>
               <div id="epitope-plot-grid" class="catalog-viewer"></div>
             </section>
@@ -115,6 +115,7 @@
                   <div id="boltz-config-summary" class="badge" hidden></div>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
                   <label>Epitope design num
                     <input type="number" id="boltz-design-count" value="100" min="1">
                   </label>

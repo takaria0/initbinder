@@ -802,6 +802,7 @@ PY
             "mock": self.cfg.mock,
             "control_path": str(self.control_path) if self.control_path else None,
             "control_master": False,
+            "local_root": str(self.local_root) if self.local_root else None,
             "remote_root": str(self.cfg.remote_root) if self.cfg.remote_root else None,
             "remote_root_exists": False,
             "target_root": str(self.target_root) if self.target_root else None,
