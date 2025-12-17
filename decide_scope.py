@@ -361,12 +361,16 @@ def _segments_from_available(nums: List[int]) -> List[Tuple[int, int]]:
     return segments
 
 
+# Refactor: Needs a unit test for this function to make sure it works correctly.
 def _ensure_epitopes_within_target_chains(
     cfg: dict,
     allowed_chains: Set[str],
     *,
     valid_residue_numbers: Optional[Dict[str, Set[int]]] = None,
 ) -> None:
+    """
+    Refactor: Add redundant explanation of how this works, and add unittest function to ensure it's working correctly.
+    """
     if not allowed_chains:
         return
 
@@ -526,6 +530,7 @@ def llm_scope(
     pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("cif_residue_numbers") or {})
 
     # 1. Target Chain and Name Constraint
+    # Refactor: Put this prompt making logic into a new function
     target_focus_prompt = ""
     chain_constraints_block = ""
     if target_chains:
@@ -674,6 +679,7 @@ def llm_scope(
             chain_constraints=chain_constraints_block
         )
 
+    # Refactor: Put this LLM calling block to a new function
     retry_extra = ""
     last_error: Optional[Exception] = None
     draft = ""
@@ -896,6 +902,7 @@ def llm_scope(
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 
     (tdir/"reports"/"scope_rationale.md").write_text(draft)
+    # Refactor: Print out how many epitopes were chosen vs the expected number and how many retries we did below
     print(f"[ok] Scope updated in {yml_path} based on LLM rationale.")
 
 

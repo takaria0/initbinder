@@ -180,6 +180,73 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     target_chains = _normalize_chain_ids(cfg.get("chains"))
     if not target_chains:
         raise ValueError("[prep_target] target.yaml must include non-empty 'chains'.")
+    print(f"[info] Requested target chain(s) from target.yaml: {target_chains}")
+    # Refactor: print how many epitopes are defined in target.yaml
+
+    # --- Detect auth→label chain id mapping for mmCIF ---
+    # Some YAMLs store auth_asym_id while we now prefer label_asym_id. When the
+    # chains are mismatched, the prepared PDB/CIF can end up empty. Build a
+    # mapping so we can transparently translate auth ids to label ids.
+    try:
+        from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+
+        cif_dict = MMCIF2Dict(str(raw_cif_path))
+        auth_ids_raw = cif_dict.get("_atom_site.auth_asym_id", [])
+        label_ids_raw = cif_dict.get("_atom_site.label_asym_id", [])
+        # Normalize + ensure equal length
+        auth_ids = [str(x).strip().upper() for x in auth_ids_raw]
+        label_ids = [str(x).strip().upper() for x in label_ids_raw]
+        auth_ids_set = set(auth_ids)
+        label_ids_set = set(label_ids)
+        if auth_ids_set:
+            print(f"[debug] mmCIF auth_asym_id unique: {sorted(auth_ids_set)}")
+        if label_ids_set:
+            label_sorted = sorted(label_ids_set)
+            preview = label_sorted[:12]
+            suffix = "..." if len(label_sorted) > len(preview) else ""
+            print(f"[debug] mmCIF label_asym_id unique (preview): {preview}{suffix} (total={len(label_sorted)})")
+        auth_to_label_counts = defaultdict(lambda: defaultdict(int))
+        for a, l in zip(auth_ids, label_ids):
+            auth_to_label_counts[a][l] += 1
+
+        auth_to_label = {}
+        for auth_id, label_count in auth_to_label_counts.items():
+            # choose the most frequent label for this auth id
+            label_sorted = sorted(label_count.items(), key=lambda kv: (-kv[1], kv[0]))
+            auth_to_label[auth_id] = label_sorted[0][0]
+
+        requested = set(target_chains)
+        requested_in_auth = sorted(requested & auth_ids_set)
+        requested_in_label = sorted(requested & label_ids_set)
+        if requested_in_auth:
+            # Treat YAML chain IDs as auth_asym_id whenever they appear in auth_asym_id.
+            # Important edge case: the same string can exist in both auth and label IDs;
+            # in that case we still prefer auth→label remapping to avoid selecting the
+            # wrong physical chain.
+            remapped = []
+            for cid in target_chains:
+                if cid in auth_to_label:
+                    new_cid = auth_to_label[cid]
+                    if new_cid != cid:
+                        print(
+                            f"[warn] Remapping chain '{cid}' (auth_asym_id) → '{new_cid}' (label_asym_id) for mmCIF selection."
+                        )
+                    remapped.append(new_cid)
+                else:
+                    print(
+                        f"[warn] Chain '{cid}' is present in mmCIF auth_asym_id but no auth→label mapping was inferred; "
+                        "keeping it unchanged."
+                    )
+                    remapped.append(cid)
+            target_chains = _normalize_chain_ids(remapped)
+            if requested_in_label:
+                print(
+                    f"[debug] Requested chain(s) also exist as label_asym_id: {requested_in_label} "
+                    f"(treated as auth_asym_id due to overlap with auth_asym_id={requested_in_auth})."
+                )
+    except Exception as exc:
+        # Mapping is best-effort; continue with original target_chains on failure.
+        print(f"[warn] Failed to infer auth→label chain mapping from CIF: {exc}")
 
     # allow YAML override
     sasa_cutoff = float(cfg.get("sasa_cutoff", sasa_cutoff))
@@ -258,16 +325,22 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     if long_ids:
         print(f"[warn] Some chain IDs are not 1 character and may not round-trip in PDB cleanly: {long_ids}. "
               "Freesasa operates on PDB; consider restricting to 1-char label_asym_id chains or rely on CIF-only tools.")
-    io.save(str(prepared_pdb_path), selector)
+    # `sel_struct` is already pruned by re-parsing prepared.cif; avoid re-applying the
+    # original selector here because chain IDs can differ between auth/label views.
+    io.save(str(prepared_pdb_path))
     print(f"[ok] Selected chains {target_chains} from raw mmCIF -> prepared.cif + prepared.pdb")
 
     # Sanity: ensure prepared.pdb has at least one ATOM/HETATM line
     with open(prepared_pdb_path, "r") as f:
         has_atom = any(line.startswith(("ATOM", "HETATM")) for line in f)
     if not has_atom:
+        # If CIF has atoms but PDB is empty, this is usually a chain-id view mismatch.
+        sel_atoms = sum(1 for _ in sel_struct.get_atoms())
+        sel_chains = sorted({str(c.id) for c in sel_struct.get_chains()})
         raise RuntimeError(
-            f"Prepared PDB has no atoms for chains={target_chains}. "
-            "Likely chain mismatch; check target.yaml chains vs mmCIF label_asym_id."
+            f"Prepared PDB has no atoms for chains={target_chains} "
+            f"(selected CIF chains={sel_chains}, selected CIF atoms={sel_atoms}). "
+            "Likely chain mismatch between target.yaml and mmCIF auth/label IDs."
         )
 
     # --- 1.5) Build residue maps from selected structure (label_seq_id space when supported) ---
@@ -328,7 +401,6 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     struct = freesasa.Structure(str(selected_pdb_path))
     result = freesasa.calc(struct)
 
-    from collections import defaultdict
     res_sasa = defaultdict(float)
     chain_labels = set()
     for i in range(struct.nAtoms()):

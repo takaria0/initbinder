@@ -72,6 +72,9 @@ def _dedupe(seq: Iterable[str]) -> list[str]:
 
 
 def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str, str]) -> dict[str, dict[str, object]]:
+    """
+    # Refactor: How do you infer chains from this? It's deprecated if we keep using the sino biological alignment logic?
+    """
     if not isinstance(entry, dict):
         return {}
 
@@ -176,44 +179,6 @@ def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str,
 
     return chain_details
 
-def convert_cif_to_pdb_with_chainmap(cif_path, pdb_path, chainmap_path=None):
-    """
-    Convert mmCIF → PDB, remapping long chain IDs to single-character IDs
-    (required by PDB format). Writes an old→new chain map JSON if requested.
-    Returns the dict {old_chain_id: new_chain_id}.
-    """
-    from Bio.PDB import MMCIFParser, PDBIO
-    import json
-
-    parser = MMCIFParser(QUIET=True)
-    struct = parser.get_structure("cif", str(cif_path))
-
-    id_pool = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz")
-    used_new, mapping = set(), {}
-
-    for model in struct:
-        for chain in model:
-            old = str(chain.id)
-            if len(old) == 1 and old not in used_new and old not in mapping.values():
-                new = old
-            else:
-                while id_pool and id_pool[0] in used_new: id_pool.pop(0)
-                if not id_pool: raise RuntimeError("Ran out of single-character chain IDs.")
-                new = id_pool.pop(0)
-            mapping[old], used_new = new, used_new | {new}
-
-    for model in struct:
-        for chain in model:
-            chain.id = mapping[str(chain.id)]
-
-    io = PDBIO()
-    io.set_structure(struct)
-    io.save(str(pdb_path))
-
-    if chainmap_path is not None:
-        chainmap_path.write_text(json.dumps({"old_to_new": mapping}, indent=2))
-
-    return mapping
 
 def init_target(
     pdb_id: str,
@@ -239,6 +204,8 @@ def init_target(
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     if force:
         print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
+        
+    # Refactor: separate this downloading logic into its own function
     tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
     _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
 
@@ -271,6 +238,7 @@ def init_target(
     yml_path = tdir/"target.yaml"
     
     # remove target.yaml if --force
+    # Refactor: separate this YAML initialization logic into its own function
     if force and yml_path.exists():
         yml_path.unlink()
         print(f"[info] Removed existing {yml_path} due to --force flag.")
@@ -318,6 +286,8 @@ def init_target(
 
     entry_json = _load_json(raw_dir / "entry.json") or _load_json(tdir / "entry.json")
     chainmap = _load_chainmap(raw_dir / "chainmap.json")
+    
+    # Refactor: separate this chain details extraction logic into its own function
     inferred_chain_details = _extract_chain_details_from_entry(entry_json, chainmap)
 
     existing_details: dict[str, dict[str, object]] = {}
@@ -367,6 +337,8 @@ def init_target(
     if existing_descriptions:
         config["chain_descriptions"] = existing_descriptions
 
+
+    # Refactor: Separate this PDB chain sequence extraction and sino aligmnment logic into its own function
     # Gather PDB chain sequences (debug)
     pdb_sequences: dict[str, str] = {}
     cif_residue_numbers: dict[str, list[str]] = {}
@@ -549,13 +521,6 @@ def _alignment_result_to_yaml(aln: AlignmentResult) -> dict:
         "mutations": mutations,
         "mutation_summary": mutation_summary,
     }
-
-def _format_residue_id(residue) -> str:
-    resseq = residue.get_id()[1]
-    icode = residue.get_id()[2]
-    icode_str = icode.strip() if isinstance(icode, str) else ""
-    return f"{resseq}{icode_str}" if icode_str else str(resseq)
-
 
 def _get_mmcif_chain_sequences(cif_path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Parse an mmCIF file and return sequences and *label* residue numbering for each polymer chain.
