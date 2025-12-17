@@ -21,6 +21,7 @@ const state = {
   binderPageSize: 100,
   binderCsvName: null,
   binderMessage: null,
+  binderPdbIds: [],
 };
 
 const el = {
@@ -68,6 +69,7 @@ const el = {
   binderPanel: document.querySelector('#boltz-binders-panel'),
   binderTable: document.querySelector('#boltz-binders-table tbody'),
   binderSummary: document.querySelector('#boltz-binders-summary'),
+  binderCsvNote: document.querySelector('#boltz-binders-csv'),
   binderRefresh: document.querySelector('#boltz-binders-refresh'),
   binderDownload: document.querySelector('#boltz-binders-download'),
   binderPagination: document.querySelector('#boltz-binders-pagination'),
@@ -707,10 +709,25 @@ async function refreshDiversity({ silent = false } = {}) {
     state.diversityMessage = data.message || null;
     state.diversityFiles = Array.isArray(data.metrics_files) ? data.metrics_files : [];
     state.diversityOutputDir = data.output_dir || null;
-    renderDiversityPlots(data.plots || []);
+    state.diversityPlots = Array.isArray(data.plots) ? data.plots : [];
+    const pdbIds = new Set();
+    (state.diversityPlots || []).forEach((plot) => {
+      const val = (plot.pdb_id || '').trim().toUpperCase();
+      if (val) pdbIds.add(val);
+    });
+    (state.diversityFiles || []).forEach((file) => {
+      const val = (file.pdb_id || '').trim().toUpperCase();
+      if (val) pdbIds.add(val);
+    });
+    state.binderPdbIds = Array.from(pdbIds);
+    if (state.diversityCsv) {
+      state.binderCsvName = state.binderCsvName || state.diversityCsv;
+    }
+    renderDiversityPlots(state.diversityPlots);
     if (!silent && data.message) {
       showAlert(data.message, false);
     }
+    await loadBinderTable({ page: 1, silent: true });
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
   }
@@ -821,6 +838,19 @@ function renderBinderRows(rows = []) {
     el.binderSummary.hidden = false;
   }
 
+  if (el.binderCsvNote) {
+    const csvName = state.binderCsvName || state.diversityCsv;
+    if (csvName) {
+      const outputDir = (state.diversityOutputDir || '').trim();
+      const fullPath = outputDir ? `${outputDir}/${csvName}` : csvName;
+      el.binderCsvNote.textContent = `Detected CSV: ${fullPath}`;
+      el.binderCsvNote.hidden = false;
+    } else {
+      el.binderCsvNote.hidden = true;
+      el.binderCsvNote.textContent = '';
+    }
+  }
+
   const totalPages = Math.max(1, Math.ceil((state.binderTotal || 0) / (state.binderPageSize || 1)));
   if (el.binderPagination && el.binderPageLabel) {
     el.binderPagination.hidden = totalPages <= 1;
@@ -834,7 +864,8 @@ function renderBinderRows(rows = []) {
   }
 
   if (el.binderDownload) {
-    el.binderDownload.hidden = !state.binderCsvName;
+    const csvName = state.binderCsvName || state.diversityCsv;
+    el.binderDownload.hidden = !csvName;
   }
 
   el.binderPanel.hidden = false;
@@ -842,11 +873,14 @@ function renderBinderRows(rows = []) {
 
 async function loadBinderTable({ page = 1, silent = false, force = false } = {}) {
   if (!el.binderPanel) return;
-  const ids = Array.from(new Set(
-    (state.bulkPreviewRows || [])
-      .map((row) => (row.resolved_pdb_id || row.pdb_id || '').trim().toUpperCase())
-      .filter(Boolean),
-  ));
+  const ids = Array.from(
+    new Set([
+      ...(Array.isArray(state.bulkPreviewRows)
+        ? state.bulkPreviewRows.map((row) => (row.resolved_pdb_id || row.pdb_id || '').trim().toUpperCase())
+        : []),
+      ...(Array.isArray(state.binderPdbIds) ? state.binderPdbIds : []),
+    ].filter(Boolean)),
+  );
   if (!ids.length) {
     el.binderPanel.hidden = true;
     return;
@@ -868,7 +902,7 @@ async function loadBinderTable({ page = 1, silent = false, force = false } = {})
     state.binderTotal = Number(body.total_rows || state.binderRows.length || 0);
     state.binderPage = Number(body.page || page || 1);
     state.binderPageSize = Number(body.page_size || state.binderPageSize || 100);
-    state.binderCsvName = body.csv_name || null;
+    state.binderCsvName = body.csv_name || state.diversityCsv || null;
     state.binderMessage = body.message || null;
     renderBinderRows(state.binderRows);
     if (!silent && body.message) {
@@ -883,13 +917,14 @@ async function loadBinderTable({ page = 1, silent = false, force = false } = {})
 }
 
 async function downloadBinderCsv() {
-  if (!state.binderCsvName) {
+  const csvName = state.binderCsvName || state.diversityCsv;
+  if (!csvName) {
     showAlert('No binder CSV available yet.');
     return;
   }
   if (el.binderDownload) el.binderDownload.disabled = true;
   try {
-    const url = `/api/bulk/file?name=${encodeURIComponent(state.binderCsvName)}`;
+    const url = `/api/bulk/file?name=${encodeURIComponent(csvName)}`;
     const res = await fetch(url);
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -898,7 +933,7 @@ async function downloadBinderCsv() {
     const blob = await res.blob();
     const cd = res.headers.get('content-disposition') || '';
     const match = cd.match(/filename=\"?([^\";]+)\"?/i);
-    const filename = match?.[1] || state.binderCsvName;
+    const filename = match?.[1] || csvName;
     const objUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = objUrl;

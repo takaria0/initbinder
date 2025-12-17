@@ -1719,69 +1719,85 @@ def list_boltzgen_binders(
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
 
+    report = build_boltzgen_diversity_report()
+    csv_name = report.csv_name
+    if not csv_name:
+        return BoltzgenBinderResponse(
+            message=report.message or "No BoltzGen metrics detected for the requested targets.",
+            page=page,
+            page_size=page_size,
+        )
+
+    csv_path = _output_dir() / csv_name
+    if not csv_path.exists():
+        return BoltzgenBinderResponse(
+            message=f"Aggregated metrics CSV missing: {csv_path}", page=page, page_size=page_size
+        )
+
+    by_pdb_counter: Dict[str, int] = defaultdict(int)
+    config_cache: Dict[str, Dict[str, dict]] = {}
     all_rows: List[BoltzgenBinderRow] = []
-    csv_rows: List[Dict[str, object]] = []
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-    for pdb_id in ids:
-        cfg_entries = _discover_boltzgen_configs(pdb_id)
-        cfg_map = _binder_config_map(cfg_entries)
-        try:
-            payload = load_boltzgen_metrics(pdb_id)
-        except FileNotFoundError:
-            print(f"[boltzgen-binders] no metrics for {pdb_id}")
-            traceback.print_exc()
-            continue
-        except Exception:
-            print(f"[boltzgen-binders] failed to load metrics for {pdb_id}")
-            traceback.print_exc()
-            continue
+    with csv_path.open("r", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            pdb_id = str(raw.get("PDB_ID") or raw.get("pdb_id") or "").strip().upper()
+            if not pdb_id or pdb_id not in ids:
+                continue
 
-        spec_dir = Path(payload.source_path).parent.parent
-        target_candidate = spec_dir / "full_target.cif"
-        target_path = str(target_candidate) if target_candidate.exists() else None
-
-        for row in payload.rows:
-            ep_label = (row.metadata or {}).get("spec") or spec_dir.name
-            ep_text = str(ep_label).strip() or "Epitope"
-            cfg_meta = cfg_map.get(ep_text) or {}
-            design_path = None
-            try:
-                design = resolve_boltz_design_path(spec_dir, row.metadata or {})
-                design_path = str(design) if design else None
-            except Exception:
-                design_path = None
-
-            binder_row = BoltzgenBinderRow(
-                pdb_id=payload.pdb_id,
-                epitope=ep_text,
-                rank=row.index,
-                iptm=row.iptm,
-                rmsd=row.rmsd_diego,
-                design_path=design_path,
-                metrics_path=str(payload.source_path),
-                run_label=payload.run_label,
-                config_path=cfg_meta.get("config_path"),
-                binding_label=cfg_meta.get("binding_label"),
-                include_label=cfg_meta.get("include_label"),
-                target_path=target_path,
+            epitope = (raw.get("epitope_name") or raw.get("spec") or raw.get("epitope") or "").strip() or None
+            run_label = (raw.get("datetime") or raw.get("run_label") or "").strip() or None
+            iptm_val = _safe_float(
+                raw.get("design_to_target_iptm")
+                or raw.get("iptm")
+                or raw.get("design_iptm")
+                or raw.get("af2_iptm")
             )
-            all_rows.append(binder_row)
-            csv_rows.append(
-                {
-                    "pdb_id": binder_row.pdb_id,
-                    "epitope": binder_row.epitope,
-                    "rank": binder_row.rank,
-                    "iptm": binder_row.iptm,
-                    "rmsd": binder_row.rmsd,
-                    "design_path": binder_row.design_path,
-                    "metrics_path": binder_row.metrics_path,
-                    "run_label": binder_row.run_label,
-                    "config_path": binder_row.config_path,
-                    "binding_label": binder_row.binding_label,
-                    "include_label": binder_row.include_label,
-                    "target_path": binder_row.target_path,
-                }
+            rmsd_val = _safe_float(
+                raw.get("filter_rmsd")
+                or raw.get("filter_rmsd_design")
+                or raw.get("bb_rmsd")
+                or raw.get("bb_target_aligned_rmsd_design")
+                or raw.get("native_rmsd")
+            )
+
+            by_pdb_counter[pdb_id] += 1
+            rank_val = _safe_int(raw.get("rank") or raw.get("index") or raw.get("af2_rank"), by_pdb_counter[pdb_id])
+
+            metrics_raw_path = str(raw.get("source_path") or "").strip()
+            metrics_path = Path(metrics_raw_path).expanduser() if metrics_raw_path else None
+            spec_dir = metrics_path.parent.parent if metrics_path else None
+            design_path = None
+            target_path = None
+            if spec_dir and spec_dir.exists():
+                try:
+                    design = resolve_boltz_design_path(spec_dir, raw)
+                    design_path = str(design) if design else None
+                except Exception:
+                    design_path = None
+                target_candidate = spec_dir / "full_target.cif"
+                target_path = str(target_candidate) if target_candidate.exists() else None
+
+            if pdb_id not in config_cache:
+                cfg_entries = _discover_boltzgen_configs(pdb_id)
+                config_cache[pdb_id] = _binder_config_map(cfg_entries)
+            cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+
+            all_rows.append(
+                BoltzgenBinderRow(
+                    pdb_id=pdb_id,
+                    epitope=epitope,
+                    rank=rank_val,
+                    iptm=iptm_val,
+                    rmsd=rmsd_val,
+                    design_path=design_path,
+                    metrics_path=str(metrics_path) if metrics_path else None,
+                    run_label=run_label,
+                    config_path=cfg_meta.get("config_path"),
+                    binding_label=cfg_meta.get("binding_label"),
+                    include_label=cfg_meta.get("include_label"),
+                    target_path=target_path,
+                )
             )
 
     all_rows.sort(key=lambda r: (r.pdb_id, r.epitope or "", r.rank))
@@ -1790,15 +1806,9 @@ def list_boltzgen_binders(
     end = start + page_size
     page_rows = all_rows[start:end]
 
-    csv_name = None
-    if csv_rows:
-        csv_headers = list(csv_rows[0].keys())
-        csv_name = f"boltzgen_binders_{timestamp}.csv"
-        _write_csv(_output_dir() / csv_name, csv_headers, csv_rows)
-
-    message = None
+    message = report.message
     if not all_rows:
-        message = "No BoltzGen metrics detected for the requested targets."
+        message = report.message or "No BoltzGen metrics detected for the requested targets."
     else:
         message = f"Showing {len(page_rows)} of {total_rows} binders"
 
