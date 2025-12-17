@@ -12,6 +12,9 @@ const state = {
   expandedTargets: new Set(),
   diversityCsv: null,
   diversityHtml: null,
+  diversityMessage: null,
+  diversityFiles: [],
+  diversityOutputDir: null,
 };
 
 const el = {
@@ -528,11 +531,50 @@ function renderEpitopePlots(items = []) {
 function renderDiversityPlots(items = []) {
   if (!el.diversityGrid || !el.diversitySection) return;
   el.diversityGrid.innerHTML = '';
+  const outputDir = (state.diversityOutputDir || '').trim();
+  if (outputDir) {
+    const dirNote = document.createElement('div');
+    dirNote.className = 'help-text';
+    dirNote.style.margin = '0 0 8px 0';
+    dirNote.textContent = `Output directory: ${outputDir}`;
+    el.diversityGrid.appendChild(dirNote);
+  }
+  const files = Array.isArray(state.diversityFiles) ? state.diversityFiles : [];
+  if (files.length) {
+    const details = document.createElement('details');
+    details.style.margin = '0 0 10px 0';
+    const summary = document.createElement('summary');
+    summary.textContent = `Detected ${files.length} all_designs_metrics.csv file${files.length === 1 ? '' : 's'}`;
+    summary.style.cursor = 'pointer';
+    summary.style.userSelect = 'none';
+    details.appendChild(summary);
+
+    const pre = document.createElement('pre');
+    pre.style.marginTop = '8px';
+    pre.style.maxHeight = '220px';
+    pre.style.overflow = 'auto';
+    pre.style.fontSize = '12px';
+    pre.style.background = '#0f172a';
+    pre.style.color = '#e2e8f0';
+    pre.style.padding = '10px 12px';
+    pre.style.borderRadius = '8px';
+    pre.textContent = files
+      .map((f) => (f && (f.path || f.metrics_path)) ? `${f.pdb_id || ''}\t${f.epitope_name || ''}\t${f.datetime || ''}\t${f.path || f.metrics_path}` : String(f))
+      .join('\n');
+    details.appendChild(pre);
+    el.diversityGrid.appendChild(details);
+  }
   const list = Array.isArray(items) ? items.filter((p) => p && (p.png_name || p.svg_name)) : [];
   if (!list.length) {
     state.diversityPlots = [];
-    el.diversitySection.hidden = true;
-    return;
+    const empty = document.createElement('div');
+    empty.className = 'help-text';
+    empty.style.margin = '0';
+    const message = (state.diversityMessage || '').trim();
+    empty.textContent =
+      message ||
+      'No BoltzGen diversity plots yet. Download metrics to targets/<PDB>/designs/boltzgen/*/*/final_ranked_designs/all_designs_metrics.csv, then click Refresh.';
+    el.diversityGrid.appendChild(empty);
   }
   state.diversityPlots = list;
   list.forEach((plot) => {
@@ -562,6 +604,16 @@ function renderDiversityPlots(items = []) {
     }
     header.appendChild(linkBar);
     card.appendChild(header);
+
+    const pathRow = document.createElement('div');
+    pathRow.className = 'snapshot-note';
+    const pngPath = plot.png_path || (plot.png_name ? `${outputDir}/${plot.png_name}` : '');
+    const svgPath = plot.svg_path || (plot.svg_name ? `${outputDir}/${plot.svg_name}` : '');
+    const parts = [];
+    if (pngPath) parts.push(`PNG: ${pngPath}`);
+    if (svgPath) parts.push(`SVG: ${svgPath}`);
+    pathRow.textContent = parts.length ? parts.join(' · ') : 'Plot paths unavailable';
+    card.appendChild(pathRow);
 
     if (plot.png_name) {
       const imgBox = document.createElement('div');
@@ -639,6 +691,9 @@ async function refreshDiversity({ silent = false } = {}) {
     const data = await res.json();
     state.diversityCsv = data.csv_name || null;
     state.diversityHtml = data.html_name || null;
+    state.diversityMessage = data.message || null;
+    state.diversityFiles = Array.isArray(data.metrics_files) ? data.metrics_files : [];
+    state.diversityOutputDir = data.output_dir || null;
     renderDiversityPlots(data.plots || []);
     if (!silent && data.message) {
       showAlert(data.message, false);
@@ -648,14 +703,41 @@ async function refreshDiversity({ silent = false } = {}) {
   }
 }
 
-function downloadDiversityFile(kind) {
+async function downloadDiversityFile(kind) {
   const name = kind === 'csv' ? state.diversityCsv : state.diversityHtml;
   if (!name) {
     showAlert(`No ${kind.toUpperCase()} available yet.`);
     return;
   }
-  const url = `/api/bulk/file?name=${encodeURIComponent(name)}`;
-  window.open(url, '_blank');
+
+  const button = kind === 'csv' ? el.diversityDownloadCsv : el.diversityDownloadHtml;
+  if (button) button.disabled = true;
+
+  try {
+    const url = `/api/bulk/file?name=${encodeURIComponent(name)}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to download (${res.status})`);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] || name;
+
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+  } catch (err) {
+    showAlert(err.message || `Unable to download ${kind.toUpperCase()}.`);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 async function loadSnapshotMetadata(names) {
@@ -1513,8 +1595,11 @@ function updateJobUI(job) {
   const seen = new Set();
   const makeSrc = (val) => {
     if (!val) return null;
-    if (/^([A-Za-z]:)?\//.test(val)) return val.startsWith('file://') ? val : `file://${val}`;
-    return `/api/bulk/file?name=${encodeURIComponent(val)}&t=${Date.now()}`;
+    const text = String(val);
+    // Never use `file://` for assets from an HTTP-served page; browsers typically block it.
+    // Instead, always ask the backend to serve the basename from the bulk output directory.
+    const baseName = text.split('/').pop();
+    return `/api/bulk/file?name=${encodeURIComponent(baseName || text)}&t=${Date.now()}`;
   };
   epPlotFiles.forEach((name) => {
     const label = (name || '').split('/').pop();

@@ -239,14 +239,25 @@ class BulkRunResponse(BaseModel):
 class BoltzgenDiversityPlot(BaseModel):
     pdb_id: str
     png_name: Optional[str] = None
+    png_path: Optional[str] = None
     svg_name: Optional[str] = None
+    svg_path: Optional[str] = None
     epitope_colors: Dict[str, str] = Field(default_factory=dict)
+
+
+class BoltzgenMetricsFile(BaseModel):
+    pdb_id: str
+    epitope_name: str
+    datetime: str
+    path: str
 
 
 class BoltzgenDiversityResponse(BaseModel):
     csv_name: Optional[str] = None
+    output_dir: Optional[str] = None
     html_name: Optional[str] = None
     plots: List[BoltzgenDiversityPlot] = Field(default_factory=list)
+    metrics_files: List[BoltzgenMetricsFile] = Field(default_factory=list)
     message: Optional[str] = None
 
 

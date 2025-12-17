@@ -802,7 +802,12 @@ async def api_bulk_design_import(payload: BulkDesignImportRequest) -> BulkRunRes
 
 @app.get("/api/bulk/file")
 async def api_bulk_file(name: str) -> FileResponse:
-    base = Path(cfg.log_dir) / "webapp" / "bulk"
+    # Most of the bulk outputs are written under `<log_dir>/bulk` (see `webapp/bulk.py:_output_dir`).
+    # Some older deployments used `<log_dir>/webapp/bulk` depending on how `log_dir` was configured.
+    log_root = Path(cfg.log_dir)
+    primary = log_root / "bulk"
+    legacy = log_root / "webapp" / "bulk"
+    base = primary if primary.exists() else legacy
     safe_name = Path(name).name
     candidate = (base / safe_name).resolve()
     if not str(candidate).startswith(str(base.resolve())):

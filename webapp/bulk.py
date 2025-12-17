@@ -9,6 +9,7 @@ import re
 import time
 import shutil
 import base64
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -1392,13 +1393,17 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     if not targets_dir.exists():
-        return BoltzgenDiversityResponse(message=f"Targets directory missing: {targets_dir}")
+        return BoltzgenDiversityResponse(message=f"Targets directory missing: {targets_dir}", output_dir=str(_output_dir()))
 
     out_dir = _output_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
     aggregate_rows: List[Dict[str, object]] = []
-    metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: {"rmsd": [], "iptm": []}))
+    metrics: Dict[str, Dict[str, Dict[str, List[object]]]] = defaultdict(
+        lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
+    )
+    seen_metrics: set[str] = set()
+    metrics_files: List[Dict[str, str]] = []
 
     for pdb_dir in sorted(targets_dir.iterdir()):
         if not pdb_dir.is_dir():
@@ -1407,16 +1412,52 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
         design_root = pdb_dir / "designs" / "boltzgen"
         if not design_root.exists():
             continue
-        for ep_dir in sorted(design_root.iterdir()):
-            if not ep_dir.is_dir():
+
+        # Accept both layouts:
+        #   A) designs/boltzgen/<epitope>/<run_label>/final_ranked_designs/all_designs_metrics.csv
+        #   B) designs/boltzgen/<run_label>/<epitope>/final_ranked_designs/all_designs_metrics.csv
+        # Some older/experimental layouts may also place the CSV directly under a second-level directory.
+        for first_dir in sorted(design_root.iterdir()):
+            if not first_dir.is_dir():
                 continue
-            epitope_name = ep_dir.name
-            for run_dir in sorted(ep_dir.iterdir()):
-                if not run_dir.is_dir():
+            for second_dir in sorted(first_dir.iterdir()):
+                if not second_dir.is_dir():
                     continue
-                metrics_path = run_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+                metrics_path = second_dir / "final_ranked_designs" / "all_designs_metrics.csv"
                 if not metrics_path.exists():
                     continue
+                metrics_key = str(metrics_path.resolve())
+                if metrics_key in seen_metrics:
+                    continue
+                seen_metrics.add(metrics_key)
+
+                # Heuristic mapping:
+                # - If the run label contains a YYYYMMDD_HHMM stamp, treat it as run_label.
+                # - Otherwise default to the legacy intention (epitope first).
+                first_name = first_dir.name
+                second_name = second_dir.name
+                is_first_run = bool(re.search(r"\d{8}_\d{4}", first_name))
+                is_second_run = bool(re.search(r"\d{8}_\d{4}", second_name))
+                if is_first_run and not is_second_run:
+                    run_label = first_name
+                    epitope_name = second_name
+                elif is_second_run and not is_first_run:
+                    run_label = second_name
+                    epitope_name = first_name
+                else:
+                    # Default to epitope/run_label (expected layout going forward).
+                    epitope_name = first_name
+                    run_label = second_name
+
+                metrics_files.append(
+                    {
+                        "pdb_id": pdb_id,
+                        "epitope_name": epitope_name,
+                        "datetime": run_label,
+                        "path": str(metrics_path),
+                    }
+                )
+
                 try:
                     with metrics_path.open("r", encoding="utf-8-sig") as handle:
                         reader = csv.DictReader(handle)
@@ -1424,7 +1465,7 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
                             record: Dict[str, object] = dict(row)
                             record.setdefault("PDB_ID", pdb_id)
                             record.setdefault("epitope_name", epitope_name)
-                            record.setdefault("datetime", run_dir.name)
+                            record.setdefault("datetime", run_label)
                             record.setdefault("source_path", str(metrics_path))
                             aggregate_rows.append(record)
 
@@ -1438,11 +1479,22 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
                                 metrics[pdb_id][epitope_name]["rmsd"].append(rmsd_val)
                             if iptm_val is not None:
                                 metrics[pdb_id][epitope_name]["iptm"].append(iptm_val)
-                except Exception:
+                            if iptm_val is not None and rmsd_val is not None:
+                                metrics[pdb_id][epitope_name]["pairs"].append((iptm_val, rmsd_val))
+                except Exception as exc:
+                    print(f"[boltzgen-diversity] failed to parse metrics: {metrics_path}")
+                    print(exc)
+                    traceback.print_exc()
                     continue
 
     if not aggregate_rows:
-        return BoltzgenDiversityResponse(message="No BoltzGen metrics found under targets directory.")
+        if metrics_files:
+            return BoltzgenDiversityResponse(
+                metrics_files=metrics_files,
+                message="Detected BoltzGen metrics files, but none could be parsed into rows (check CSV format/permissions).",
+                output_dir=str(out_dir),
+            )
+        return BoltzgenDiversityResponse(message="No BoltzGen metrics found under targets directory.", output_dir=str(out_dir))
 
     all_keys: List[str] = []
     seen_keys: set[str] = set()
@@ -1468,10 +1520,15 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.colors as mcolors
-    except Exception:
+    except Exception as exc:
+        print("[boltzgen-diversity] matplotlib unavailable; generated CSV only.")
+        print(exc)
+        traceback.print_exc()
         return BoltzgenDiversityResponse(
             csv_name=csv_path.name,
+            metrics_files=metrics_files,
             message="Matplotlib unavailable; generated CSV only.",
+            output_dir=str(out_dir),
         )
 
     html_sections: List[str] = []
@@ -1517,15 +1574,28 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
 
         png_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.png"
         svg_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.svg"
-        fig.savefig(png_path, dpi=200)
-        fig.savefig(svg_path)
-        plt.close(fig)
+        saved_ok = True
+        try:
+            fig.savefig(png_path, dpi=200)
+            fig.savefig(svg_path)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[boltzgen-diversity] failed to save plot for {pdb_id}: {png_path} / {svg_path}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig)
+
+        if not saved_ok:
+            continue
 
         plot_entries.append(
             BoltzgenDiversityPlot(
                 pdb_id=pdb_id,
                 png_name=png_path.name,
+                png_path=str(png_path),
                 svg_name=svg_path.name,
+                svg_path=str(svg_path),
                 epitope_colors=color_map,
             )
         )
@@ -1537,8 +1607,67 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
                 + ", ".join(f"<span style='color:{color_map[name]}'>{name}</span>" for name in ep_names)
                 + f"</p><img alt='{pdb_id} diversity' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[boltzgen-diversity] failed to embed plot into HTML: {png_path}")
+            print(exc)
+            traceback.print_exc()
+
+        # Scatter: ipTM vs RMSD (colored by epitope).
+        scatter_pairs = {
+            name: [(x, y) for x, y in (ep_data[name].get("pairs") or []) if x is not None and y is not None]
+            for name in ep_names
+        }
+        if any(scatter_pairs.values()):
+            fig_scatter, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+            for name in ep_names:
+                pairs = scatter_pairs.get(name) or []
+                if not pairs:
+                    continue
+                xs = [float(x) for x, _ in pairs]
+                ys = [float(y) for _, y in pairs]
+                ax.scatter(xs, ys, s=18, alpha=0.75, color=color_map[name], label=name, edgecolors="none")
+            ax.set_title(f"{pdb_id} ipTM vs RMSD (by epitope)")
+            ax.set_xlabel("ipTM")
+            ax.set_ylabel("RMSD (Å)")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=9)
+            plt.tight_layout()
+
+            scatter_png = out_dir / f"boltzgen_scatter_{pdb_id}_{timestamp}.png"
+            scatter_svg = out_dir / f"boltzgen_scatter_{pdb_id}_{timestamp}.svg"
+            saved_ok = True
+            try:
+                fig_scatter.savefig(scatter_png, dpi=200)
+                fig_scatter.savefig(scatter_svg)
+            except Exception as exc:
+                saved_ok = False
+                print(f"[boltzgen-diversity] failed to save scatter plot for {pdb_id}: {scatter_png} / {scatter_svg}")
+                print(exc)
+                traceback.print_exc()
+            finally:
+                plt.close(fig_scatter)
+
+            if saved_ok:
+                plot_entries.append(
+                    BoltzgenDiversityPlot(
+                        pdb_id=f"{pdb_id} scatter",
+                        png_name=scatter_png.name,
+                        png_path=str(scatter_png),
+                        svg_name=scatter_svg.name,
+                        svg_path=str(scatter_svg),
+                        epitope_colors=color_map,
+                    )
+                )
+                try:
+                    encoded = base64.b64encode(scatter_png.read_bytes()).decode("ascii")
+                    html_sections.append(
+                        f"<section><h2>{pdb_id} scatter</h2><p>ipTM vs RMSD colored by epitope.</p>"
+                        + f"<img alt='{pdb_id} scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+                    )
+                except Exception as exc:
+                    print(f"[boltzgen-diversity] failed to embed scatter into HTML: {scatter_png}")
+                    print(exc)
+                    traceback.print_exc()
 
     html_path = out_dir / f"boltzgen_diversity_{timestamp}.html"
     html_content = "\n".join(
@@ -1558,8 +1687,10 @@ def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
 
     return BoltzgenDiversityResponse(
         csv_name=csv_path.name,
+        output_dir=str(out_dir),
         html_name=html_path.name,
         plots=plot_entries,
+        metrics_files=metrics_files,
         message=f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets.",
     )
 
@@ -1980,7 +2111,7 @@ def _safe_int(value: object, fallback: int) -> int:
         return fallback
 
 
-def _safe_float(value: object, fallback: float) -> float:
+def _safe_float(value: object, fallback: float | None = None) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -2050,4 +2181,3 @@ def import_design_configs(
         message="Bulk design submissions queued",
         details={"design_jobs": submitted, "submitted_designs": len(submitted)},
     )
-

@@ -260,7 +260,21 @@ def _estimate_row_count(path: Path, *, limit: int = 20000) -> int:
 def _boltzgen_root(pdb_id: str) -> Path:
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    # Prefer the new canonical directory, but fall back for older runs.
+    primary = (targets_dir / pdb_id.upper() / "designs" / "boltzgen").resolve()
+    if primary.exists():
+        return primary
     return (targets_dir / pdb_id.upper() / "designs" / "_boltzgen").resolve()
+
+
+def _looks_like_run_label(name: str) -> bool:
+    value = (name or "").strip()
+    if not value:
+        return False
+    if re.search(r"\d{8}_\d{4}", value):
+        return True
+    lowered = value.lower()
+    return lowered.startswith(("boltz", "run", "job"))
 
 
 def _discover_boltzgen_run_dir(pdb_id: str, run_label: Optional[str]) -> tuple[Path, Optional[str]]:
@@ -270,14 +284,67 @@ def _discover_boltzgen_run_dir(pdb_id: str, run_label: Optional[str]) -> tuple[P
     if run_label:
         run_dir = root / run_label
         if not run_dir.exists():
+            # Support spec-first layout: <root>/<spec>/<run_label>/...
+            for spec_dir in root.iterdir():
+                if not spec_dir.is_dir():
+                    continue
+                candidate = spec_dir / run_label
+                if candidate.is_dir():
+                    return candidate, run_label
             raise FileNotFoundError(f"BoltzGen run '{run_label}' not found under {root}")
         return run_dir, run_label
-    runs = [p for p in root.iterdir() if p.is_dir()]
-    if not runs:
+
+    # Choose the newest run directory across either layout.
+    candidates: List[tuple[Path, str, float]] = []
+    seen: set[str] = set()
+
+    for first_dir in root.iterdir():
+        if not first_dir.is_dir():
+            continue
+
+        direct_metrics = first_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+        if direct_metrics.exists():
+            try:
+                mtime = first_dir.stat().st_mtime
+            except FileNotFoundError:
+                mtime = 0.0
+            key = str(first_dir.resolve())
+            if key not in seen:
+                seen.add(key)
+                candidates.append((first_dir, first_dir.name, mtime))
+
+        for second_dir in first_dir.iterdir():
+            if not second_dir.is_dir():
+                continue
+            metrics = second_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+            if not metrics.exists():
+                continue
+
+            first_name = first_dir.name
+            second_name = second_dir.name
+            if _looks_like_run_label(first_name) and not _looks_like_run_label(second_name):
+                run_dir, label = first_dir, first_name
+            elif _looks_like_run_label(second_name) and not _looks_like_run_label(first_name):
+                run_dir, label = second_dir, second_name
+            else:
+                run_dir, label = first_dir, first_name
+
+            try:
+                mtime = run_dir.stat().st_mtime
+            except FileNotFoundError:
+                mtime = 0.0
+            key = str(run_dir.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((run_dir, label, mtime))
+
+    if not candidates:
         raise FileNotFoundError(f"No BoltzGen runs found under {root}")
-    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    selected = runs[0]
-    return selected, selected.name
+
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    selected_dir, selected_label, _ = candidates[0]
+    return selected_dir, selected_label
 
 
 def _load_csv(path: Path) -> List[Dict[str, str]]:
@@ -293,33 +360,53 @@ def list_boltzgen_runs(pdb_id: str) -> List[Dict[str, object]]:
         return []
     if not root.exists():
         return []
-    runs: List[Dict[str, object]] = []
-    for run_dir in root.iterdir():
-        if not run_dir.is_dir():
+    run_map: Dict[str, Dict[str, Dict[str, object]]] = {}
+    run_mtime: Dict[str, float] = {}
+
+    # Accept both layouts:
+    #   A) <root>/<run_label>/<spec>/final_ranked_designs/all_designs_metrics.csv
+    #   B) <root>/<spec>/<run_label>/final_ranked_designs/all_designs_metrics.csv
+    for first_dir in root.iterdir():
+        if not first_dir.is_dir():
             continue
-        specs: List[Dict[str, object]] = []
-        for spec_dir in run_dir.iterdir():
-            if not spec_dir.is_dir():
+        for second_dir in first_dir.iterdir():
+            if not second_dir.is_dir():
                 continue
-            metrics = spec_dir / "final_ranked_designs" / "all_designs_metrics.csv"
-            specs.append(
-                {
-                    "name": spec_dir.name,
-                    "has_metrics": metrics.exists(),
-                    "metrics_path": str(metrics) if metrics.exists() else None,
-                }
-            )
-        try:
-            mtime = run_dir.stat().st_mtime
-        except FileNotFoundError:
-            continue
-        specs.sort(key=lambda item: item["name"])
+            metrics = second_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+            if not metrics.exists():
+                continue
+            first_name = first_dir.name
+            second_name = second_dir.name
+            if _looks_like_run_label(first_name) and not _looks_like_run_label(second_name):
+                run_label, spec_name = first_name, second_name
+            elif _looks_like_run_label(second_name) and not _looks_like_run_label(first_name):
+                run_label, spec_name = second_name, first_name
+            else:
+                run_label, spec_name = first_name, second_name
+
+            run_map.setdefault(run_label, {})
+            run_map[run_label][spec_name] = {
+                "name": spec_name,
+                "has_metrics": True,
+                "metrics_path": str(metrics),
+            }
+
+            try:
+                mtime = max(first_dir.stat().st_mtime, second_dir.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            run_mtime[run_label] = max(run_mtime.get(run_label, 0.0), mtime)
+
+    runs: List[Dict[str, object]] = []
+    for run_label, specs in run_map.items():
+        spec_list = list(specs.values())
+        spec_list.sort(key=lambda item: item["name"])
         runs.append(
             {
-                "run_label": run_dir.name,
-                "specs": specs,
-                "updated_at": mtime,
-                "local_path": str(run_dir),
+                "run_label": run_label,
+                "specs": spec_list,
+                "updated_at": run_mtime.get(run_label, 0.0),
+                "local_path": str(root / run_label) if (root / run_label).exists() else None,
             }
         )
     runs.sort(key=lambda item: item["updated_at"], reverse=True)
@@ -334,21 +421,32 @@ def load_boltzgen_metrics(
     limit: Optional[int] = None,
 ) -> RankingPayload:
     run_dir, resolved_label = _discover_boltzgen_run_dir(pdb_id, run_label)
+
+    direct_metrics = run_dir / "final_ranked_designs" / "all_designs_metrics.csv"
     spec_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
-    if not spec_dirs:
-        raise FileNotFoundError(f"No BoltzGen specs found under {run_dir}")
     selected_spec: Optional[Path] = None
-    if spec_name:
-        for candidate in spec_dirs:
-            if candidate.name == spec_name:
-                selected_spec = candidate
-                break
-        if selected_spec is None:
-            raise FileNotFoundError(f"Spec '{spec_name}' not found under {run_dir}")
+    inferred_spec_name: Optional[str] = None
+
+    if direct_metrics.exists():
+        selected_spec = run_dir
+        inferred_spec_name = run_dir.parent.name
+    elif spec_dirs:
+        if spec_name:
+            for candidate in spec_dirs:
+                if candidate.name == spec_name:
+                    selected_spec = candidate
+                    break
+            if selected_spec is None:
+                raise FileNotFoundError(f"Spec '{spec_name}' not found under {run_dir}")
+        else:
+            spec_dirs.sort(key=lambda p: p.name)
+            selected_spec = spec_dirs[0]
+        inferred_spec_name = selected_spec.name
+        direct_metrics = selected_spec / "final_ranked_designs" / "all_designs_metrics.csv"
     else:
-        spec_dirs.sort(key=lambda p: p.name)
-        selected_spec = spec_dirs[0]
-    metrics_path = selected_spec / "final_ranked_designs" / "all_designs_metrics.csv"
+        raise FileNotFoundError(f"No BoltzGen specs found under {run_dir}")
+
+    metrics_path = direct_metrics
     if not metrics_path.exists():
         raise FileNotFoundError(f"BoltzGen metrics CSV not found: {metrics_path}")
 
@@ -376,7 +474,7 @@ def load_boltzgen_metrics(
             ],
         )
         metadata = dict(raw)
-        metadata["spec"] = selected_spec.name
+        metadata["spec"] = inferred_spec_name or (selected_spec.name if selected_spec else "")
         parsed.append(
             RankingRowData(
                 index=idx,
