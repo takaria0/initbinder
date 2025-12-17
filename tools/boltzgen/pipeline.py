@@ -25,6 +25,7 @@ DEFAULT_TIME_H = int(os.getenv("BOLTZGEN_SLURM_TIME_H", "12"))
 ROOT = Path(os.getenv("INITBINDER_ROOT", Path.cwd())).expanduser()
 TARGETS_ROOT = Path(os.getenv("INITBINDER_TARGET_ROOT", ROOT / "targets")).expanduser()
 SLURM_LOG_DIR = ROOT / "slurm_logs"
+ARTIFACT_ROOT = TARGETS_ROOT.parent if TARGETS_ROOT.parent != TARGETS_ROOT else ROOT
 
 
 def _ensure_dir(path: Path) -> None:
@@ -40,6 +41,21 @@ def _resolve(path_like: str | Path, *, base: Path) -> Path:
 
 def _sanitize_token(token: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", token)
+
+
+def _derive_spec_token(raw_spec: str | Path) -> str:
+    """Build a token for naming from the user-supplied spec path.
+
+    Use the path components as provided (pre-resolve) so we keep epitope
+    directory names even when the file itself is a symlink.
+    """
+    p = Path(raw_spec)
+    ep_component = next((part for part in reversed(p.parts) if re.search(r"epitope", part, re.IGNORECASE)), None)
+    for candidate in (ep_component, p.parent.name, p.stem):
+        token = _sanitize_token(candidate) if candidate else ""
+        if token:
+            return token
+    return "spec"
 
 
 @dataclass
@@ -100,10 +116,19 @@ def _write_sbatch_script(
             "eval \"$(conda shell.bash hook)\"",
             "conda deactivate >/dev/null 2>&1 || true",
             "conda deactivate >/dev/null 2>&1 || true",
+            "conda activate bg",
         ]
     )
     if conda_activate:
-        lines.append(conda_activate)
+        activate_line = conda_activate.strip()
+        if activate_line:
+            lines.append(activate_line)
+    lines.extend(
+        [
+            'echo "[INFO] Using python: $(which python)"',
+            'echo "[INFO] BoltzGen CLI: $(which boltzgen)"',
+        ]
+    )
 
     cache_env = ""
     if cache_dir:
@@ -133,7 +158,7 @@ def _write_sbatch_script(
             f'echo "[boltzgen] protocol={protocol} num_designs={num_designs} budget={budget or "default"}"',
             "mkdir -p $(dirname {log})".format(log=stdout_log),
             "mkdir -p {out}".format(out=entry.output_path),
-            "cd {root}".format(root=ROOT),
+            f'cd "{ROOT}"',
             " ".join(cmd_parts),
         ]
     )
@@ -157,12 +182,25 @@ def _write_launcher(entries: List[PipelineEntry], launcher_path: Path) -> None:
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
-    spec_paths = args.spec or []
-    if not spec_paths:
+    raw_specs = args.spec or []
+    if not raw_specs:
         raise SystemExit("At least one --spec argument is required.")
 
-    scripts_dir = _resolve(args.scripts_dir, base=ROOT)
-    launcher_dir = _resolve(args.launcher_dir, base=ROOT)
+    # Deduplicate spec paths after resolving to absolute paths (preserve order).
+    specs: List[tuple[str, Path]] = []
+    seen_specs: set[Path] = set()
+    for spec in raw_specs:
+        resolved = _resolve(spec, base=ROOT).resolve()
+        if resolved in seen_specs:
+            print(f"[warn] duplicate spec ignored: {resolved}")
+            continue
+        seen_specs.add(resolved)
+        specs.append((spec, resolved))
+    if not specs:
+        raise SystemExit("No valid spec paths after deduplication.")
+
+    scripts_dir = _resolve(args.scripts_dir, base=ARTIFACT_ROOT)
+    launcher_dir = _resolve(args.launcher_dir, base=ARTIFACT_ROOT)
     run_label = args.run_label or time.strftime("%Y%m%d_%H%M%S")
     if args.output_root:
         output_root = _resolve(args.output_root, base=ROOT)
@@ -179,11 +217,17 @@ def run_pipeline(args: argparse.Namespace) -> None:
     entries: List[PipelineEntry] = []
     pdb_token = _sanitize_token(args.pdb)
     label_token = _sanitize_token(run_label)
-    for spec in spec_paths:
-        spec_path = _resolve(spec, base=ROOT)
+    seen_tokens: set[str] = set()
+    for raw_spec, spec_path in specs:
         if not spec_path.exists():
             raise SystemExit(f"Spec file not found: {spec_path}")
-        spec_token = _sanitize_token(spec_path.stem)
+        base_token = _derive_spec_token(raw_spec)
+        spec_token = base_token
+        counter = 1
+        while spec_token in seen_tokens:
+            spec_token = f"{base_token}_{counter}"
+            counter += 1
+        seen_tokens.add(spec_token)
         job_name = f"boltzgen_{pdb_token}_{label_token}_{spec_token}"
         out_dir = output_root / spec_token
         script_path = scripts_dir / f"submit_{job_name}.sh"
