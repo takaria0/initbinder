@@ -248,7 +248,7 @@ def _prepared_structure_path_for_target(pdb_id: str) -> Path:
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     target_dir = targets_dir / pdb_id.upper()
-    cif = target_dir / "prep" / "prepared.cif"
+    cif = target_dir / "raw" / f"{pdb_id.upper()}.cif"
     if cif.exists():
         return cif
     mmcif = target_dir / "prep" / "prepared.mmcif"
