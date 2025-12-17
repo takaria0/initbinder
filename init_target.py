@@ -71,9 +71,113 @@ def _dedupe(seq: Iterable[str]) -> list[str]:
     return ordered
 
 
-def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str, str]) -> dict[str, dict[str, object]]:
+def _download_rcsb_assets(pdb_id: str, tdir: Path, *, force: bool = False) -> Path:
+    """Ensure target directories exist and download required RCSB assets.
+
+    Returns the path to the preferred mmCIF file (downloaded if necessary).
     """
-    # Refactor: How do you infer chains from this? It's deprecated if we keep using the sino biological alignment logic?
+    _ensure_dir(tdir / "raw")
+    _ensure_dir(tdir / "prep")
+    _ensure_dir(tdir / "reports")
+    _ensure_dir(tdir / "configs")
+
+    downloads = [
+        (RCSB_ENTRY.format(pdb=pdb_id), tdir / "raw" / "entry.json"),
+        (RCSB_ASSEM.format(pdb=pdb_id, asm="1"), tdir / "raw" / "assembly_1.json"),
+        (f"https://files.rcsb.org/download/{pdb_id.upper()}.cif", tdir / "raw" / f"{pdb_id}.cif"),
+        # Optional: keep PDB download for legacy tooling.
+        (RCSB_PDB.format(pdb=pdb_id), tdir / "raw" / f"{pdb_id}.pdb"),
+    ]
+
+    for url, out in downloads:
+        if out.exists() and not force:
+            continue
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            out.write_bytes(r.content)
+            print(f"[ok] Downloaded {out.name}")
+        except Exception as e:
+            print(f"[warn] Fetch failed {url}: {e}")
+
+    raw_cif = tdir / "raw" / f"{pdb_id}.cif"
+    if not raw_cif.exists():
+        cif_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.cif"
+        try:
+            r = requests.get(cif_url, timeout=20)
+            r.raise_for_status()
+            raw_cif.write_bytes(r.content)
+            print(f"[ok] Downloaded {raw_cif.name}")
+        except Exception as e:
+            print(f"[error] Failed to download mmCIF {cif_url}: {e}")
+            raise
+
+    return raw_cif
+
+
+def _initialize_target_yaml(
+    pdb_id: str,
+    *,
+    chain_id: str | None,
+    target_name: str | None,
+    antigen_url: str,
+    tdir: Path,
+    force: bool,
+) -> tuple[Path, Path, dict]:
+    """Create or refresh ``target.yaml`` and supporting directories."""
+    yml_path = tdir / "target.yaml"
+
+    if force and yml_path.exists():
+        yml_path.unlink()
+        print(f"[info] Removed existing {yml_path} due to --force flag.")
+
+    prep_dir = tdir / "prep"
+    if force and prep_dir.exists():
+        for item in prep_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                import shutil
+
+                shutil.rmtree(item)
+        print(f"[info] Cleared existing {prep_dir} contents due to --force flag.")
+
+    if not yml_path.exists():
+        skel = {
+            "id": pdb_id.upper(),
+            "target_name": target_name or "",
+            "assembly_id": "1",
+            "chains": [chain_id.upper()] if chain_id else [],
+            "target_chains": [],
+            "antigen_catalog_url": antigen_url,
+            "sequences": {"pdb": {}, "accession": {"id": "", "aa": ""}},
+            "epitopes": [],
+            "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}},
+        }
+        yml_path.write_text(yaml.safe_dump(skel, sort_keys=False))
+        print(f"[ok] Wrote skeleton to {yml_path}")
+
+    with yml_path.open("r") as f:
+        config = yaml.safe_load(f) or {}
+
+    if config.get("chains"):
+        config["chains"] = _normalize_chain_ids(config.get("chains"))
+    if config.get("target_chains"):
+        config["target_chains"] = _normalize_chain_ids(config.get("target_chains"))
+
+    config["antigen_catalog_url"] = antigen_url
+
+    return yml_path, prep_dir, config
+
+
+def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str, str]) -> dict[str, dict[str, object]]:
+    """Infer per-chain metadata from the RCSB entry payload.
+
+    The entry JSON lists polymer entities and their instances. We first gather
+    descriptive information at the entity level (names, organism, polymer type)
+    and then map each entity instance to the *chain* identifiers that appear in
+    the structure. The optional ``chainmap`` argument allows remapping auth IDs
+    to label IDs when an external mapping is available.
     """
     if not isinstance(entry, dict):
         return {}
@@ -180,168 +284,19 @@ def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str,
     return chain_details
 
 
-def init_target(
+def _populate_sequences_and_alignment(
     pdb_id: str,
-    chain_id: str | None = None,
-    target_name: str | None = None,
-    antigen_url: str = "",
-    target_accession: str | None = None,
-    force: bool = False,
-):
-    """Downloads PDB data and creates the initial directory structure.
-
-    Required:
-      - antigen_url: vendor product page (currently tuned for Sino Biological)
-    """
-    if chain_id:
-        chain_id = str(chain_id).strip().upper()
-
-    if not antigen_url or not isinstance(antigen_url, str):
-        raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
-
-    target_accession = (target_accession or "").strip()
-
-    print(f"--- Initializing Target: {pdb_id.upper()} ---")
-    if force:
-        print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
-        
-    # Refactor: separate this downloading logic into its own function
-    tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
-    _ensure_dir(tdir/"raw"); _ensure_dir(tdir/"prep"); _ensure_dir(tdir/"reports"); _ensure_dir(tdir/"configs")
-
-    for url, out in [
-        (RCSB_ENTRY.format(pdb=pdb_id), tdir/"raw"/"entry.json"),
-        (RCSB_ASSEM.format(pdb=pdb_id, asm="1"), tdir/"raw"/"assembly_1.json"),
-        (f"https://files.rcsb.org/download/{pdb_id.upper()}.cif", tdir/"raw"/f"{pdb_id}.cif"),
-        # Optional: keep PDB download for legacy tooling.
-        (RCSB_PDB.format(pdb=pdb_id), tdir/"raw"/f"{pdb_id}.pdb"),
-    ]:
-        try:
-            r = requests.get(url, timeout=20); r.raise_for_status(); out.write_bytes(r.content)
-            print(f"[ok] Downloaded {out.name}")
-        except Exception as e:
-            print(f"[warn] Fetch failed {url}: {e}")
-
-    raw_dir = tdir / "raw"
-    raw_cif = raw_dir / f"{pdb_id}.cif"
-    if not raw_cif.exists():
-        # Hard requirement now: prefer mmCIF for canonical label_asym_id/label_seq_id indexing.
-        cif_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.cif"
-        try:
-            r = requests.get(cif_url, timeout=20); r.raise_for_status()
-            raw_cif.write_bytes(r.content)
-            print(f"[ok] Downloaded {raw_cif.name}")
-        except Exception as e:
-            print(f"[error] Failed to download mmCIF {cif_url}: {e}")
-            raise
-
-    yml_path = tdir/"target.yaml"
-    
-    # remove target.yaml if --force
-    # Refactor: separate this YAML initialization logic into its own function
-    if force and yml_path.exists():
-        yml_path.unlink()
-        print(f"[info] Removed existing {yml_path} due to --force flag.")
-        
-    # remove prep dir if --force
-    prep_dir = tdir / "prep"
-    if force and prep_dir.exists():
-        for item in prep_dir.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                import shutil
-                shutil.rmtree(item)
-        print(f"[info] Cleared existing {prep_dir} contents due to --force flag.")
-
-    if not yml_path.exists():
-        skel = {
-            "id": pdb_id.upper(),
-            "target_name": target_name or "",
-            "assembly_id": "1",
-            "chains": [chain_id.upper()] if chain_id else [],
-            "target_chains": [],  # added (will be populated below)
-            "antigen_catalog_url": antigen_url,  # added
-            "sequences": {                      # added (debug info)
-                "pdb": {},
-                "accession": {"id": "", "aa": ""},
-            },
-            "epitopes": [],
-            "deliverables": {"constraints": {"avoid_motif": ["N-X-S/T"]}},
-        }
-        yml_path.write_text(yaml.safe_dump(skel, sort_keys=False))
-        print(f"[ok] Wrote skeleton to {yml_path}")
-
-    # Load current config
-    with yml_path.open('r') as f:
-        config = yaml.safe_load(f) or {}
-
-    if config.get("chains"):
-        config["chains"] = _normalize_chain_ids(config.get("chains"))
-    if config.get("target_chains"):
-        config["target_chains"] = _normalize_chain_ids(config.get("target_chains"))
-
-    # Always set/refresh antigen URL
-    config["antigen_catalog_url"] = antigen_url
-
-    entry_json = _load_json(raw_dir / "entry.json") or _load_json(tdir / "entry.json")
-    chainmap = _load_chainmap(raw_dir / "chainmap.json")
-    
-    # Refactor: separate this chain details extraction logic into its own function
-    inferred_chain_details = _extract_chain_details_from_entry(entry_json, chainmap)
-
-    existing_details: dict[str, dict[str, object]] = {}
-    raw_existing_details = config.get("chain_details")
-    if isinstance(raw_existing_details, dict):
-        for key, value in raw_existing_details.items():
-            chain_id = str(key).strip().upper()
-            if not chain_id:
-                continue
-            if isinstance(value, dict):
-                cleaned = {k: v for k, v in value.items() if v not in (None, "", [])}
-                if cleaned:
-                    existing_details[chain_id] = cleaned
-            elif isinstance(value, str) and value.strip():
-                existing_details[chain_id] = {"summary": value.strip()}
-
-    for chain_id, detail in inferred_chain_details.items():
-        if chain_id not in existing_details:
-            existing_details[chain_id] = detail
-        else:
-            current = existing_details[chain_id]
-            if not isinstance(current, dict):
-                existing_details[chain_id] = detail
-            else:
-                for key, value in detail.items():
-                    if key not in current or not current.get(key):
-                        current[key] = value
-
-    if existing_details:
-        config["chain_details"] = existing_details
-
-    existing_descriptions: dict[str, str] = {}
-    raw_descriptions = config.get("chain_descriptions")
-    if isinstance(raw_descriptions, dict):
-        for key, value in raw_descriptions.items():
-            chain_id = str(key).strip().upper()
-            if not chain_id:
-                continue
-            if isinstance(value, str) and value.strip():
-                existing_descriptions[chain_id] = value.strip()
-
-    for chain_id, detail in inferred_chain_details.items():
-        summary = detail.get("summary") if isinstance(detail, dict) else None
-        if isinstance(summary, str) and summary.strip() and chain_id not in existing_descriptions:
-            existing_descriptions[chain_id] = summary.strip()
-
-    if existing_descriptions:
-        config["chain_descriptions"] = existing_descriptions
-
-
-    # Refactor: Separate this PDB chain sequence extraction and sino aligmnment logic into its own function
-    # Gather PDB chain sequences (debug)
+    antigen_url: str,
+    tdir: Path,
+    raw_cif: Path,
+    config: dict,
+    *,
+    target_accession: str | None,
+) -> tuple[list[str], dict[str, str]]:
+    """Populate sequence fields and vendor alignment metadata in-place."""
     pdb_sequences: dict[str, str] = {}
     cif_residue_numbers: dict[str, list[str]] = {}
+
     if raw_cif.exists():
         pdb_sequences, cif_residue_numbers = _get_mmcif_chain_sequences(raw_cif)
         if pdb_sequences:
@@ -354,11 +309,11 @@ def init_target(
     else:
         print(f"[warn] PDB file missing at {raw_cif}")
 
-    # Vendor-specific verification (Sino Biological)
     chosen_chains: list[str] = []
-    accession_id, accession_seq, expressed_seq = "", "", ""
+    accession_id = accession_seq = expressed_seq = ""
     vendor_range: Optional[tuple[int, int]] = None
     alignment_summary: Optional[AlignmentResult] = None
+    verification_result: Optional[dict] = None
 
     if "sinobiological.com" in antigen_url:
         verification_result = _verify_antigen_compatibility(
@@ -390,7 +345,6 @@ def init_target(
                             start_label = end_label = ""
                         if not start_label or not end_label:
                             continue
-                        # Ensure numeric ordering when possible (while preserving insertion codes)
                         start_disp, end_disp = start_label, end_label
                         try:
                             start_match = re.match(r"^-?\d+", start_label)
@@ -411,7 +365,6 @@ def init_target(
     else:
         print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
 
-    # Sequences.accession (debug) — preserve existing values unless new ones are provided
     config.setdefault("sequences", {})
     existing_acc = (config["sequences"].get("accession") or {}).copy()
     accession_block = config["sequences"].setdefault("accession", {})
@@ -445,40 +398,7 @@ def init_target(
                 vendor_meta["molecular_weight_kda"] = mw_val
 
     normalized_chosen = _normalize_chain_ids(chosen_chains)
-
-    if normalized_chosen:
-        existing = _normalize_chain_ids(config.get("chains"))
-        supporting: list[str] = []
-        for ch in existing:
-            if ch not in normalized_chosen and ch not in supporting:
-                supporting.append(ch)
-
-        # Preserve any pre-existing supporting list while avoiding duplicates
-        prior_supporting = _normalize_chain_ids(config.get("supporting_chains"))
-        for ch in prior_supporting:
-            if ch not in normalized_chosen and ch not in supporting:
-                supporting.append(ch)
-
-        if supporting:
-            config["supporting_chains"] = supporting
-            print(f"[info] Marking non-target chains as supporting: {supporting}")
-        else:
-            config.pop("supporting_chains", None)
-
-        config["chains"] = list(normalized_chosen)
-        config["target_chains"] = list(normalized_chosen)
-    elif config.get("chains"):
-        config["target_chains"] = _normalize_chain_ids(config["chains"])
-    elif pdb_sequences:
-        config["target_chains"] = _normalize_chain_ids(pdb_sequences.keys())
-    else:
-        config.setdefault("target_chains", [])
-
-    # Save updated YAML
-    with yml_path.open('w') as f:
-        yaml.safe_dump(config, f, sort_keys=False)
-    print(f"[ok] Updated {yml_path} with antigen_catalog_url, sequences.*, and target_chains.")
-
+    return normalized_chosen, pdb_sequences
 
 
 def _alignment_result_to_yaml(aln: AlignmentResult) -> dict:
@@ -793,3 +713,139 @@ def _verify_antigen_compatibility(
         "molecular_weight_kda": molecular_weight,
         "product_form": product_form,
     }
+
+
+def init_target(
+    pdb_id: str,
+    chain_id: str | None = None,
+    target_name: str | None = None,
+    antigen_url: str = "",
+    target_accession: str | None = None,
+    force: bool = False,
+):
+    """Downloads PDB data and creates the initial directory structure.
+
+    Required:
+      - antigen_url: vendor product page (currently tuned for Sino Biological)
+    """
+    if chain_id:
+        chain_id = str(chain_id).strip().upper()
+
+    if not antigen_url or not isinstance(antigen_url, str):
+        raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
+
+    target_accession = (target_accession or "").strip()
+
+    print(f"--- Initializing Target: {pdb_id.upper()} ---")
+    if force:
+        print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
+
+    tdir = TARGETS_ROOT_LOCAL / pdb_id.upper()
+    raw_cif = _download_rcsb_assets(pdb_id, tdir, force=force)
+    yml_path, prep_dir, config = _initialize_target_yaml(
+        pdb_id,
+        chain_id=chain_id,
+        target_name=target_name,
+        antigen_url=antigen_url,
+        tdir=tdir,
+        force=force,
+    )
+
+    raw_dir = tdir / "raw"
+    entry_json = _load_json(raw_dir / "entry.json") or _load_json(tdir / "entry.json")
+    chainmap = _load_chainmap(raw_dir / "chainmap.json")
+    
+    # Refactor: separate this chain details extraction logic into its own function
+    inferred_chain_details = _extract_chain_details_from_entry(entry_json, chainmap)
+
+    existing_details: dict[str, dict[str, object]] = {}
+    raw_existing_details = config.get("chain_details")
+    if isinstance(raw_existing_details, dict):
+        for key, value in raw_existing_details.items():
+            chain_id = str(key).strip().upper()
+            if not chain_id:
+                continue
+            if isinstance(value, dict):
+                cleaned = {k: v for k, v in value.items() if v not in (None, "", [])}
+                if cleaned:
+                    existing_details[chain_id] = cleaned
+            elif isinstance(value, str) and value.strip():
+                existing_details[chain_id] = {"summary": value.strip()}
+
+    for chain_id, detail in inferred_chain_details.items():
+        if chain_id not in existing_details:
+            existing_details[chain_id] = detail
+        else:
+            current = existing_details[chain_id]
+            if not isinstance(current, dict):
+                existing_details[chain_id] = detail
+            else:
+                for key, value in detail.items():
+                    if key not in current or not current.get(key):
+                        current[key] = value
+
+    if existing_details:
+        config["chain_details"] = existing_details
+
+    existing_descriptions: dict[str, str] = {}
+    raw_descriptions = config.get("chain_descriptions")
+    if isinstance(raw_descriptions, dict):
+        for key, value in raw_descriptions.items():
+            chain_id = str(key).strip().upper()
+            if not chain_id:
+                continue
+            if isinstance(value, str) and value.strip():
+                existing_descriptions[chain_id] = value.strip()
+
+    for chain_id, detail in inferred_chain_details.items():
+        summary = detail.get("summary") if isinstance(detail, dict) else None
+        if isinstance(summary, str) and summary.strip() and chain_id not in existing_descriptions:
+            existing_descriptions[chain_id] = summary.strip()
+
+    if existing_descriptions:
+        config["chain_descriptions"] = existing_descriptions
+
+
+    normalized_chosen, pdb_sequences = _populate_sequences_and_alignment(
+        pdb_id,
+        antigen_url,
+        tdir,
+        raw_cif,
+        config,
+        target_accession=target_accession,
+    )
+
+    if normalized_chosen:
+        existing = _normalize_chain_ids(config.get("chains"))
+        supporting: list[str] = []
+        for ch in existing:
+            if ch not in normalized_chosen and ch not in supporting:
+                supporting.append(ch)
+
+        # Preserve any pre-existing supporting list while avoiding duplicates
+        prior_supporting = _normalize_chain_ids(config.get("supporting_chains"))
+        for ch in prior_supporting:
+            if ch not in normalized_chosen and ch not in supporting:
+                supporting.append(ch)
+
+        if supporting:
+            config["supporting_chains"] = supporting
+            print(f"[info] Marking non-target chains as supporting: {supporting}")
+        else:
+            config.pop("supporting_chains", None)
+
+        config["chains"] = list(normalized_chosen)
+        config["target_chains"] = list(normalized_chosen)
+    elif config.get("chains"):
+        config["target_chains"] = _normalize_chain_ids(config["chains"])
+    elif pdb_sequences:
+        config["target_chains"] = _normalize_chain_ids(pdb_sequences.keys())
+    else:
+        config.setdefault("target_chains", [])
+
+    # Save updated YAML
+    with yml_path.open('w') as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+    print(f"[ok] Updated {yml_path} with antigen_catalog_url, sequences.*, and target_chains.")
+
+

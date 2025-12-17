@@ -361,15 +361,262 @@ def _segments_from_available(nums: List[int]) -> List[Tuple[int, int]]:
     return segments
 
 
-# Refactor: Needs a unit test for this function to make sure it works correctly.
+def _build_scope_prompt_blocks(
+    target_chains: List[str],
+    target_name_from_yaml: str,
+    allowed_range_str: Optional[str],
+    pdb_number_map: Dict[str, List[str]],
+) -> tuple[str, str, str, str, List[dict]]:
+    """Assemble reusable prompt sections for LLM scope generation."""
+    target_focus_prompt = ""
+    chain_constraints_block = ""
+    if target_chains:
+        chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
+        antigen_context_sentence = (
+            f"Commercial antigen verification confirmed that only chain(s) {chain_list_str} are supported."
+        )
+        if target_name_from_yaml:
+            target_focus_prompt = textwrap.dedent(
+                f"""
+                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
+                {antigen_context_sentence}
+                You are defining epitopes for the protein named '{target_name_from_yaml}'.
+                - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
+                - The `chains` **and** `target_chains` fields MUST be exactly [{chain_list_str}].
+                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
+                - Ignore any other polymer chains in the PDB; they are background context only.
+                --- END CRITICAL INSTRUCTION ---
+                """
+            )
+        else:
+            target_focus_prompt = textwrap.dedent(
+                f"""
+                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
+                {antigen_context_sentence}
+                - The `chains` **and** `target_chains` fields in your YAML MUST be exactly [{chain_list_str}].
+                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
+                - Ignore any other polymer chains in the PDB; they are background context only.
+                --- END CRITICAL INSTRUCTION ---
+                """
+            )
+
+        chain_constraints_block = textwrap.dedent(
+            f"""
+            --- ANTIGEN VALIDATION SUMMARY ---
+            Validated antigen-supported chain(s): {chain_list_str}
+            These chains were experimentally matched to the commercial antigen and must remain fixed in your plan.
+            --- END ANTIGEN VALIDATION SUMMARY ---
+            """
+        )
+    elif target_name_from_yaml:
+        target_focus_prompt = textwrap.dedent(
+            f"""
+            --- CRITICAL INSTRUCTION: TARGET FOCUS ---
+            You are defining epitopes for the protein named '{target_name_from_yaml}'.
+            - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
+            --- END CRITICAL INSTRUCTION ---
+            """
+        )
+
+    range_constraint_prompt = ""
+    if allowed_range_str:
+        range_constraint_prompt = textwrap.dedent(f"""
+            --- CRITICAL INSTRUCTION: ALLOWED RESIDUE RANGE ---
+            Based on verification against a commercial antigen, all epitope `residues` you propose for the target chain(s) MUST be ENTIRELY within the inclusive residue range of {allowed_range_str}.
+            For example, if the range is 100-200, a residue selection of "A:150-160" is valid, but "A:195-205" is NOT.
+            Any residue or range outside these boundaries is invalid and will be rejected. This is a hard constraint.
+            --- END CRITICAL INSTRUCTION ---
+        """)
+
+    numbering_prompt = ""
+    numbering_debug: List[dict] = []
+    if pdb_number_map:
+        numbering_lines = []
+        for chain_id in sorted(pdb_number_map.keys()):
+            entries = pdb_number_map.get(chain_id) or []
+            if not entries:
+                continue
+            first_label = str(entries[0])
+            last_label = str(entries[-1])
+            has_insertions = any(not str(x).isdigit() for x in entries)
+            try:
+                numeric_vals = []
+                for tok in entries:
+                    m = re.match(r"^-?\d+", str(tok).strip())
+                    if m:
+                        numeric_vals.append(int(m.group(0)))
+                min_val = min(numeric_vals) if numeric_vals else first_label
+                max_val = max(numeric_vals) if numeric_vals else last_label
+            except ValueError:
+                min_val, max_val = first_label, last_label
+            insertion_note = ""
+            ins_examples: List[str] = []
+            if has_insertions:
+                ins_examples = [str(tok) for tok in entries if not str(tok).isdigit()][:3]
+                insertion_note = f" (includes insertion codes such as {', '.join(ins_examples)})"
+
+            numbering_lines.append(
+                f"Chain {chain_id}: residues {first_label}-{last_label} (numeric span {min_val}-{max_val}){insertion_note}"
+            )
+            numbering_debug.append(
+                {
+                    "chain": chain_id,
+                    "first_label": first_label,
+                    "last_label": last_label,
+                    "min_numeric": min_val,
+                    "max_numeric": max_val,
+                    "has_insertions": has_insertions,
+                    "examples": ins_examples,
+                }
+            )
+
+        if numbering_lines:
+            numbering_prompt = textwrap.dedent(
+                "\n".join(
+                    [
+                        "--- PDB CHAIN NUMBERING SUMMARY ---",
+                        *numbering_lines,
+                        "Use the above numbering when specifying residue ranges in the YAML output.",
+                        "--- END PDB CHAIN NUMBERING SUMMARY ---",
+                    ]
+                )
+            )
+
+    return target_focus_prompt, chain_constraints_block, range_constraint_prompt, numbering_prompt, numbering_debug
+
+
+def _run_scope_llm_with_retries(
+    compose_prompt: callable,
+    *,
+    tdir: Path,
+    model: str,
+    provider: str,
+    max_new_tokens: int,
+    max_llm_retries: int,
+    groq_key: Optional[str],
+) -> tuple[str, int, str]:
+    """Execute the LLM call with retry/backoff and prompt logging."""
+    retry_extra = ""
+    last_error: Optional[Exception] = None
+    draft = ""
+    attempts_used = 0
+    last_prompt = ""
+
+    print(f"[info] LLM provider: {provider} · model: {model}")
+
+    for attempt in range(max(0, max_llm_retries) + 1):
+        attempts_used = attempt + 1
+        final_prompt = compose_prompt(retry_extra)
+        last_prompt = final_prompt
+        prompt_path = tdir / "reports" / f"scope_prompt_attempt_{attempt + 1}.md"
+        prompt_path.write_text(final_prompt)
+        stats_path = prompt_path.with_name(f"{prompt_path.stem}_stats.json")
+        stats_payload = {
+            "attempt": attempt + 1,
+            "char_length": len(final_prompt),
+            "word_count": len(final_prompt.split()),
+            "approx_tokens": max(1, round(len(final_prompt) / 4)),
+        }
+        stats_path.write_text(json.dumps(stats_payload, indent=2))
+
+        if provider == "groq":
+            groq_api_key = groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
+            if not groq_api_key:
+                raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
+            resp = None
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {groq_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "temperature": 0.1,
+                        "max_tokens": max_new_tokens,
+                        "messages": [
+                            {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
+                            {"role": "user", "content": final_prompt},
+                        ],
+                    },
+                    timeout=120,
+                )
+                if resp.status_code == 429:
+                    raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
+                resp.raise_for_status()
+                data = resp.json()
+                draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+                draft = draft.strip()
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt == max(0, max_llm_retries):
+                    raise
+                delay = 0
+                status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
+                if status == 429:
+                    retry_after = None
+                    if resp is not None:
+                        retry_after = resp.headers.get("Retry-After")
+                    try:
+                        delay = int(retry_after) if retry_after else 0
+                    except (TypeError, ValueError):
+                        delay = 0
+                    delay = delay if delay and delay > 0 else min(90, 10 * (attempt + 1))
+                    print(f"[warn] Groq rate limit hit (429). Retrying in {delay} seconds...")
+                else:
+                    delay = min(60, 5 * (attempt + 1))
+                    print(f"[warn] LLM call failed on attempt {attempt + 1}; retrying in {delay} seconds...")
+                if delay > 0:
+                    time.sleep(delay)
+                retry_extra = "\\nLLM call failed; please retry.\\n"
+                continue
+        elif provider == "gemini":
+            import google.generativeai as genai
+
+            genai.configure(api_key=GOOGLE_API_KEY)
+            model_client = genai.GenerativeModel(
+                model_name=model,
+                system_instruction="You are a protein design assistant. Output exactly one YAML block.",
+            )
+            response = model_client.generate_content(
+                final_prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.2),
+            )
+            draft = response.text or ""
+            draft = draft.strip()
+            break
+        else:
+            draft = call_gpt(
+                final_prompt,
+                model=model,
+                temperature=0.1,
+                max_new_tokens=max_new_tokens,
+            )
+            break
+
+    if not draft and last_error:
+        raise last_error
+
+    return draft, attempts_used, last_prompt
+
+
 def _ensure_epitopes_within_target_chains(
     cfg: dict,
     allowed_chains: Set[str],
     *,
     valid_residue_numbers: Optional[Dict[str, Set[int]]] = None,
 ) -> None:
-    """
-    Refactor: Add redundant explanation of how this works, and add unittest function to ensure it's working correctly.
+    """Trim chain + residue selections so they remain on validated chains.
+
+    Steps:
+      1. Remove any configured ``chains`` or ``target_chains`` values that are
+         not present in ``allowed_chains``.
+      2. Inspect each epitope's residue ranges, dropping spans that fall
+         entirely outside the ``valid_residue_numbers`` lookup.
+      3. When a span partially overlaps the prepared numbering, shrink it to the
+         contiguous residues that remain.
     """
     if not allowed_chains:
         return
@@ -529,115 +776,20 @@ def llm_scope(
     allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
     pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("cif_residue_numbers") or {})
 
-    # 1. Target Chain and Name Constraint
-    # Refactor: Put this prompt making logic into a new function
-    target_focus_prompt = ""
-    chain_constraints_block = ""
-    if target_chains:
-        chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
-        antigen_context_sentence = (
-            f"Commercial antigen verification confirmed that only chain(s) {chain_list_str} are supported."
-        )
-        if target_name_from_yaml:
-            target_focus_prompt = textwrap.dedent(
-                f"""
-                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
-                {antigen_context_sentence}
-                You are defining epitopes for the protein named '{target_name_from_yaml}'.
-                - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
-                - The `chains` **and** `target_chains` fields MUST be exactly [{chain_list_str}].
-                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
-                - Ignore any other polymer chains in the PDB; they are background context only.
-                --- END CRITICAL INSTRUCTION ---
-                """
-            )
-        else:
-            target_focus_prompt = textwrap.dedent(
-                f"""
-                --- CRITICAL INSTRUCTION: TARGET FOCUS ---
-                {antigen_context_sentence}
-                - The `chains` **and** `target_chains` fields in your YAML MUST be exactly [{chain_list_str}].
-                - ALL proposed epitopes and their `residues` fields MUST remain on these validated chain(s).
-                - Ignore any other polymer chains in the PDB; they are background context only.
-                --- END CRITICAL INSTRUCTION ---
-                """
-            )
+    (
+        target_focus_prompt,
+        chain_constraints_block,
+        range_constraint_prompt,
+        numbering_prompt,
+        numbering_debug,
+    ) = _build_scope_prompt_blocks(
+        target_chains,
+        target_name_from_yaml,
+        allowed_range_str,
+        pdb_number_map,
+    )
 
-        chain_constraints_block = textwrap.dedent(
-            f"""
-            --- ANTIGEN VALIDATION SUMMARY ---
-            Validated antigen-supported chain(s): {chain_list_str}
-            These chains were experimentally matched to the commercial antigen and must remain fixed in your plan.
-            --- END ANTIGEN VALIDATION SUMMARY ---
-            """
-        )
-    elif target_name_from_yaml:
-        target_focus_prompt = textwrap.dedent(
-            f"""
-            --- CRITICAL INSTRUCTION: TARGET FOCUS ---
-            You are defining epitopes for the protein named '{target_name_from_yaml}'.
-            - The `target_name` in your final YAML output MUST be '{target_name_from_yaml}'.
-            --- END CRITICAL INSTRUCTION ---
-            """
-        )
-
-    # 2. Allowed Residue Range Constraint (from antigen verification)
-    range_constraint_prompt = ""
-    if allowed_range_str:
-        range_constraint_prompt = textwrap.dedent(f"""
-            --- CRITICAL INSTRUCTION: ALLOWED RESIDUE RANGE ---
-            Based on verification against a commercial antigen, all epitope `residues` you propose for the target chain(s) MUST be ENTIRELY within the inclusive residue range of {allowed_range_str}.
-            For example, if the range is 100-200, a residue selection of "A:150-160" is valid, but "A:195-205" is NOT.
-            Any residue or range outside these boundaries is invalid and will be rejected. This is a hard constraint.
-            --- END CRITICAL INSTRUCTION ---
-        """)
-
-    numbering_prompt = ""
-    numbering_debug: List[dict] = []
-    if pdb_number_map:
-        numbering_lines = []
-        for chain_id in sorted(pdb_number_map.keys()):
-            entries = pdb_number_map.get(chain_id) or []
-            if not entries:
-                continue
-            first_label = str(entries[0])
-            last_label = str(entries[-1])
-            has_insertions = any(not str(x).isdigit() for x in entries)
-            try:
-                numeric_vals = []
-                for tok in entries:
-                    m = re.match(r"^-?\d+", str(tok).strip())
-                    if m:
-                        numeric_vals.append(int(m.group(0)))
-                min_val = min(numeric_vals) if numeric_vals else first_label
-                max_val = max(numeric_vals) if numeric_vals else last_label
-            except ValueError:
-                min_val, max_val = first_label, last_label
-            insertion_note = ""
-            ins_examples: List[str] = []
-            if has_insertions:
-                ins_examples = [str(tok) for tok in entries if not str(tok).isdigit()][:3]
-                insertion_note = f" (includes insertion codes such as {', '.join(ins_examples)})"
-            numbering_lines.append(
-                f"  - Chain {chain_id}: PDB residues {first_label} → {last_label} (numeric span {min_val}-{max_val}){insertion_note}."
-            )
-            numbering_debug.append({
-                "chain": chain_id,
-                "first_label": first_label,
-                "last_label": last_label,
-                "min_numeric": min_val,
-                "max_numeric": max_val,
-                "has_insertions": has_insertions,
-                "insertion_examples": ins_examples if has_insertions else [],
-            })
-        if numbering_lines:
-            numbering_prompt = "\n" + "\n".join(["--- CRITICAL INSTRUCTION: PDB NUMBERING ---",
-                                                   "Use the exact PDB residue numbering shown below. Do NOT renumber to UniProt or vendor coordinates.",
-                                                   *numbering_lines,
-                                                   "When specifying residue ranges, you must use these PDB indices (e.g., chain B begins at 501, not 1).",
-                                                   "--- END CRITICAL INSTRUCTION ---"]) + "\n"
-    
-    # === Build Final Prompt ===
+# === Build Final Prompt ===
     meta_raw = json.loads((tdir/"raw"/"entry.json").read_text())
     meta = _prune_pdb_metadata(meta_raw)
     bundle = fetch_uniprot_bundle_for_pdb(pdb_id, meta_raw, max_accessions=max_accessions)
@@ -679,146 +831,35 @@ def llm_scope(
             chain_constraints=chain_constraints_block
         )
 
-    # Refactor: Put this LLM calling block to a new function
-    retry_extra = ""
-    last_error: Optional[Exception] = None
-    draft = ""
-    cfg = None
+    # Delegate the LLM call to a helper for clarity
+    draft, attempts_used, final_prompt = _run_scope_llm_with_retries(
+        _compose_prompt,
+        tdir=tdir,
+        model=MODEL,
+        provider=_llm_provider,
+        max_new_tokens=_max_new,
+        max_llm_retries=max_llm_retries,
+        groq_key=_groq_key,
+    )
 
-    print(f"[info] LLM provider: {_llm_provider} · model: {MODEL}")
+    m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
+    if not m:
+        (tdir/"reports"/"scope_draft.md").write_text(draft)
+        raise RuntimeError("No YAML block returned; see reports/scope_draft.md")
 
-    for attempt in range(max(0, max_llm_retries) + 1):
-        final_prompt = _compose_prompt(retry_extra)
-        prompt_path = tdir/"reports"/f"scope_prompt_attempt_{attempt+1}.md"
-        prompt_path.write_text(final_prompt)
-        stats_path = prompt_path.with_name(f"{prompt_path.stem}_stats.json")
-        stats_payload = {
-            "attempt": attempt + 1,
-            "char_length": len(final_prompt),
-            "word_count": len(final_prompt.split()),
-            "approx_tokens": max(1, round(len(final_prompt) / 4)),  # rough byte-pair estimate
-        }
-        stats_path.write_text(json.dumps(stats_payload, indent=2))
+    cfg = yaml.safe_load(m.group(1))
+    validate(cfg, SCHEMA)
 
-        if _llm_provider == "groq":
-            groq_key = _groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-            if not groq_key:
-                raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
-            resp = None
-            try:
-                resp = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {groq_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": MODEL,
-                        "temperature": 0.1,
-                        "max_tokens": _max_new,
-                        "messages": [
-                            {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
-                            {"role": "user", "content": final_prompt},
-                        ],
-                    },
-                    timeout=120,
-                )
-                # Explicitly handle rate limits with backoff guidance instead of failing hard.
-                if resp.status_code == 429:
-                    raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
-                resp.raise_for_status()
-                data = resp.json()
-                draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
-                draft = draft.strip()
-            except Exception as exc:
-                last_error = exc
-                if attempt == max(0, max_llm_retries):
-                    raise
-                delay = 0
-                status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
-                if status == 429:
-                    retry_after = None
-                    if resp is not None:
-                        retry_after = resp.headers.get("Retry-After")
-                    try:
-                        delay = int(retry_after) if retry_after else 0
-                    except (TypeError, ValueError):
-                        delay = 0
-                    delay = delay if delay and delay > 0 else min(90, 10 * (attempt + 1))
-                    print(f"[warn] Groq rate limit hit (429). Retrying in {delay} seconds...")
-                else:
-                    delay = min(60, 5 * (attempt + 1))
-                    print(f"[warn] LLM call failed on attempt {attempt+1}; retrying in {delay} seconds...")
-                if delay > 0:
-                    time.sleep(delay)
-                retry_extra = "\\nLLM call failed; please retry.\\n"
-                continue
-        elif _llm_provider == "gemini":
-            import google.generativeai as genai
-            genai.configure(api_key=GOOGLE_API_KEY)
-            model = genai.GenerativeModel(model_name=MODEL, system_instruction="You are a protein design assistant. Output exactly one YAML block.")
-            response = model.generate_content(final_prompt, generation_config=genai.types.GenerationConfig(temperature=0.2))
-            draft = (response.text or "").strip()
-        else:
-            raise RuntimeError(f"Unsupported LLM_PROVIDER '{_llm_provider}'. Use 'groq' or 'gemini'.")
-
-        m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
-        if not m:
-            (tdir/"reports"/f"scope_draft_attempt_{attempt+1}.md").write_text(draft)
-            last_error = RuntimeError("No YAML block returned; see reports/scope_draft.md")
-            if attempt == max(0, max_llm_retries):
-                raise last_error
-            retry_extra = textwrap.dedent(
-                """
-                --- CRITICAL REMINDER: YAML OUTPUT REQUIRED ---
-                You must respond with exactly one YAML code block that conforms to the target schema.
-                Do not include free-form commentary outside the YAML block.
-                --- END CRITICAL REMINDER ---
-                """
+    if expected_epitopes is not None and expected_epitopes > 0:
+        epi_list = cfg.get("epitopes") or []
+        if len(epi_list) != expected_epitopes:
+            raise ValueError(
+                f"Expected {expected_epitopes} epitopes, but LLM returned {len(epi_list)}."
             )
-            continue
 
-        try:
-            cfg = yaml.safe_load(m.group(1)); validate(cfg, SCHEMA)
-        except Exception as exc:
-            last_error = exc
-            if attempt == max(0, max_llm_retries):
-                raise
-            retry_extra = textwrap.dedent(
-                """
-                --- CRITICAL REMINDER: YAML SCHEMA ---
-                The YAML must match the provided schema exactly. Ensure all required fields are present
-                and properly formatted before responding.
-                --- END CRITICAL REMINDER ---
-                """
-            )
-            continue
-
-        if expected_epitopes is not None and expected_epitopes > 0:
-            epi_list = cfg.get("epitopes") or []
-            if len(epi_list) != expected_epitopes:
-                last_error = ValueError(
-                    f"Expected {expected_epitopes} epitopes, but LLM returned {len(epi_list)}."
-                )
-                if attempt == max(0, max_llm_retries):
-                    raise last_error
-                retry_extra = textwrap.dedent(
-                    f"""
-                    --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
-                    You must propose exactly {expected_epitopes} epitopes. Update your selection so that the
-                    `epitopes` list contains exactly {expected_epitopes} entries. Use mmCIF label_asym_id and label_seq_id (Mol bottom-right index), not author numbering.
-                    --- END CRITICAL REMINDER ---
-                    """
-                )
-                continue
-
-        # Success
-        (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
-        if draft:
-            (tdir/"reports"/"scope_draft.md").write_text(draft)
-        break
-    else:
-        raise last_error or RuntimeError("LLM scope failed after retries.")
+    (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
+    if draft:
+        (tdir/"reports"/"scope_draft.md").write_text(draft)
 
     assert cfg is not None
 
@@ -902,7 +943,11 @@ def llm_scope(
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 
     (tdir/"reports"/"scope_rationale.md").write_text(draft)
-    # Refactor: Print out how many epitopes were chosen vs the expected number and how many retries we did below
+    epitope_count = len(base.get("epitopes") or [])
+    expected_display = expected_epitopes if expected_epitopes is not None else "unspecified"
+    print(
+        f"[info] LLM attempts: {attempts_used}; epitopes selected: {epitope_count} (expected {expected_display})."
+    )
     print(f"[ok] Scope updated in {yml_path} based on LLM rationale.")
 
 

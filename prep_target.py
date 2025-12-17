@@ -181,7 +181,8 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     if not target_chains:
         raise ValueError("[prep_target] target.yaml must include non-empty 'chains'.")
     print(f"[info] Requested target chain(s) from target.yaml: {target_chains}")
-    # Refactor: print how many epitopes are defined in target.yaml
+    epitope_count = len(cfg.get("epitopes") or [])
+    print(f"[info] target.yaml currently defines {epitope_count} epitope(s).")
 
     # --- Detect auth→label chain id mapping for mmCIF ---
     # Some YAMLs store auth_asym_id while we now prefer label_asym_id. When the
