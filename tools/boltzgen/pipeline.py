@@ -1,4 +1,30 @@
 #!/usr/bin/env python3
+"""Generate and submit BoltzGen design pipeline sbatch scripts.
+
+INITBINDER_ROOT=/pub/inagakit/Projects/initbinder INITBINDER_TARGET_ROOT=/pub/inagakit/Projects/initbinder/targets \
+python /pub/inagakit/Projects/initbinder/tools/boltzgen/pipeline.py pipeline 5WT9 \
+  --run_label boltz_5WT9_20251216_1605 \
+  --num_designs 10 \
+  --output_root /pub/inagakit/Projects/initbinder/targets/5WT9/designs/_boltzgen/boltz_5WT9_20251216_1605 \
+  --partition gpu --gpus A30:1 --cpus 8 --mem 64G --time_h 2 \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_1/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_10/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_2/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_3/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_4/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_5/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_6/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_7/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_8/boltzgen_config.yaml \
+  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_9/boltzgen_config.yaml
+  
+  --scripts_dir /pub/inagakit/Projects/initbinder/tools/boltzgen \
+  --launcher_dir /pub/inagakit/Projects/initbinder/tools/launchers
+
+"""
+#!/usr/bin/env python3
+"""Generate and submit BoltzGen design pipeline sbatch scripts."""
+#!/usr/bin/env python3
 """Generate and submit BoltzGen design pipeline sbatch scripts."""
 
 from __future__ import annotations
@@ -297,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pipe.add_argument("--run_label", help="Run label used to group outputs.", default=None)
     p_pipe.add_argument("--num_designs", type=int, default=1000, help="Designs per spec/job.")
-    p_pipe.add_argument("--protocol", default="protein-anything", help="BoltzGen protocol to use.")
+    p_pipe.add_argument("--protocol", default="nanobody-anything", help="BoltzGen protocol to use.")
     p_pipe.add_argument("--budget", type=int, default=None, help="Filtering budget (optional).")
     p_pipe.add_argument(
         "--output_root",

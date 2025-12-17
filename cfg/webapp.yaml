@@ -31,7 +31,7 @@ cluster:
     output_root: null
     extra_run_args: []
     nanobody_scaffolds:
-      - /pub/inagakit/boltzgen/example/nanobody_scaffolds/7eow.yaml
-      - /pub/inagakit/boltzgen/example/nanobody_scaffolds/7xl0.yaml
-      - /pub/inagakit/boltzgen/example/nanobody_scaffolds/8coh.yaml
-      - /pub/inagakit/boltzgen/example/nanobody_scaffolds/8z8v.yaml
+      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/7eow.yaml
+      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/7xl0.yaml
+      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8coh.yaml
+      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8z8v.yaml

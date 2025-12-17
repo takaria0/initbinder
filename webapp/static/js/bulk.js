@@ -860,11 +860,14 @@ async function showBoltzLog(jobId, title = 'Job log') {
 function clusterDefaults() {
   const info = state.clusterStatus || {};
   const boltz = info.boltzgen || {};
-  const workspaceRoot = (info.remote_root || info.target_root || '<remote_root>').toString().replace(/\/$/, '');
-  const targetBaseRaw = (info.target_root || info.remote_root || '<remote_root>').toString().replace(/\/$/, '');
+  const baseRootRaw = (info.target_root || info.remote_root || '<remote_root>').toString().replace(/\/$/, '');
+  const workspaceRoot = baseRootRaw.toLowerCase().endsWith('/targets')
+    ? baseRootRaw.replace(/\/+targets$/i, '')
+    : baseRootRaw;
+  const targetBaseRaw = (info.target_root || `${workspaceRoot}/targets`).toString().replace(/\/$/, '');
   const lastSegment = targetBaseRaw.split('/').filter(Boolean).pop() || '';
   const targetRoot = lastSegment.toLowerCase() === 'targets' ? targetBaseRaw : `${targetBaseRaw}/targets`;
-  const toolsRoot = (info.remote_root || workspaceRoot || '<remote_root>').toString().replace(/\/$/, '');
+  const toolsRoot = workspaceRoot || '<remote_root>';
   return {
     remoteRoot: workspaceRoot,
     targetRoot,
