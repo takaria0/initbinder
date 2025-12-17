@@ -110,7 +110,7 @@ try:
 except Exception:
     _GROQ_API_KEY = None
 GROQ_API_KEY = _GROQ_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-GROQ_FLASH_MODEL_NAME = os.getenv("GROQ_FLASH_MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_FLASH_MODEL_NAME = os.getenv("GROQ_FLASH_MODEL_NAME", "openai/gpt-oss-20b")
 if not USE_LLM and GROQ_API_KEY:
     # Even if Gemini is unavailable, allow runs when Groq credentials are present.
     USE_LLM = True

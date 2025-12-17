@@ -523,7 +523,7 @@ def llm_scope(
         target_chains = _normalize_chain_ids(cfg_from_yaml.get("chains"))
     target_name_from_yaml = cfg_from_yaml.get("target_name", "")
     allowed_range_str = cfg_from_yaml.get("allowed_epitope_range")
-    pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("pdb_residue_numbers") or {})
+    pdb_number_map = ((cfg_from_yaml.get("sequences") or {}).get("cif_residue_numbers") or {})
 
     # 1. Target Chain and Name Constraint
     target_focus_prompt = ""
@@ -800,7 +800,7 @@ def llm_scope(
                     f"""
                     --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
                     You must propose exactly {expected_epitopes} epitopes. Update your selection so that the
-                    `epitopes` list contains exactly {expected_epitopes} entries.
+                    `epitopes` list contains exactly {expected_epitopes} entries. Use mmCIF label_asym_id and label_seq_id (Mol bottom-right index), not author numbering.
                     --- END CRITICAL REMINDER ---
                     """
                 )
@@ -820,9 +820,11 @@ def llm_scope(
     if not validated_target_chains:
         validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("chains")))
 
-    pdb_residue_numbers_cfg = ((cfg_from_yaml.get("sequences") or {}).get("pdb_residue_numbers") or {})
+    seq_block = (cfg_from_yaml.get("sequences") or {})
+    # Prefer canonical mmCIF label_seq_id indices. Fall back to legacy keys if present.
+    cif_residue_numbers_cfg = (seq_block.get("cif_residue_numbers") or seq_block.get("pdb_residue_numbers") or {})
     valid_residue_numbers: Dict[str, Set[int]] = {}
-    for chain_id, entries in pdb_residue_numbers_cfg.items():
+    for chain_id, entries in cif_residue_numbers_cfg.items():
         norm_chain = str(chain_id).strip().upper()
         numbers: Set[int] = set()
         for token in entries or []:

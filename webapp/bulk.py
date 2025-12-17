@@ -123,24 +123,30 @@ def _find_index(headers: Sequence[str], candidates: Iterable[str]) -> Optional[i
 
 
 # -----------------------------
-# PDB residue-index shifting
+# Residue index handling (mmCIF label_* indexing)
 # -----------------------------
+#
+# IMPORTANT:
+# - BoltzGen expects residue indices in the canonical mmCIF label indexing:
+#     (label_asym_id, label_seq_id)  where label_seq_id is 1-based.
+# - PDB author numbering (auth_* / PDB resseq) may be shifted and can cause
+#   "hotspot out of range" errors if used directly.
+#
+# Therefore:
+# - We do NOT apply any chain-wise shifting.
+# - If a prepared mmCIF is available, we validate residues against the observed
+#   label_seq_id range per label_asym_id and drop out-of-range residues.
+
+from typing import Tuple
+
 
 _RES_TOKEN_RE = re.compile(
-    r"^\s*(?P<chain>[A-Za-z]+)\s*[:_\-]?\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
+    r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_\-]?\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
 )
 
 
 def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
-    """
-    Parse tokens like:
-      - "A35"
-      - "A:35"
-      - "A_35"
-      - "A-35"
-      - "A35A"  (insertion code supported but ignored for shifting)
-    Returns (CHAIN, RESNUM, ICODE).
-    """
+    """Parse residue tokens like 'A35', 'A:35', 'A_35', 'A-35', or 'A35A'."""
     if token is None:
         return None
     text = str(token).strip()
@@ -149,7 +155,7 @@ def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     m = _RES_TOKEN_RE.match(text)
     if not m:
         return None
-    chain = (m.group("chain") or "").upper()
+    chain = (m.group("chain") or "").strip()
     res_s = m.group("resnum")
     icode = (m.group("icode") or "").strip()
     try:
@@ -161,91 +167,73 @@ def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     return chain, resnum, icode
 
 
-def _read_pdb_chain_min_resseq(pdb_path: Path) -> Dict[str, int]:
-    """
-    Return {chain_id: min_resseq} using Bio.PDB.
-
-    - Uses integer residue sequence number (resseq).
-    - Ignores insertion codes.
-    - Considers standard residues only (skips waters unless they are numbered residues).
-    """
+def _read_mmcif_chain_label_seq_range(mmcif_path: Path) -> Dict[str, Tuple[int, int]]:
+    """Return {label_asym_id: (min_label_seq_id, max_label_seq_id)} from an mmCIF file."""
     try:
-        from Bio.PDB import PDBParser
+        from Bio.PDB.MMCIF2Dict import MMCIF2Dict
     except ImportError as exc:
         raise ImportError(
-            "BioPython is required for PDB parsing. "
-            "Install with: pip install biopython"
+            "BioPython is required for mmCIF parsing (MMCIF2Dict). Install with: pip install biopython"
         ) from exc
 
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure(pdb_path.stem, str(pdb_path))
+    mmcif = MMCIF2Dict(str(mmcif_path))
+    asym = mmcif.get("_atom_site.label_asym_id")
+    seq = mmcif.get("_atom_site.label_seq_id")
+    if not asym or not seq:
+        return {}
+    if not isinstance(asym, list):
+        asym = [asym]
+    if not isinstance(seq, list):
+        seq = [seq]
 
-    chain_min: Dict[str, int] = {}
-
-    for model in structure:
-        for chain in model:
-            chain_id = chain.id.strip().upper()
-            if not chain_id:
-                continue
-
-            for residue in chain:
-                # residue.id = (hetero_flag, resseq, insertion_code)
-                _, resseq, _ = residue.id
-                if not isinstance(resseq, int):
-                    continue
-
-                prev = chain_min.get(chain_id)
-                if prev is None or resseq < prev:
-                    chain_min[chain_id] = resseq
-
-        # Only first model is typically relevant for prepared.pdb
-        break
-
-    return chain_min
-
-
-def _shift_resnum(chain: str, resnum: int, chain_min: Dict[str, int]) -> Optional[int]:
-    """
-    Shift residue numbering so that the minimum residue index in each chain becomes 1.
-    new = old - min(chain) + 1
-    """
-    if not chain or chain not in chain_min:
-        return None
-    base = chain_min[chain]
-    return (resnum - base) + 1
+    out: Dict[str, Tuple[int, int]] = {}
+    for a, s in zip(asym, seq):
+        chain_id = str(a).strip()
+        s_txt = str(s).strip()
+        if not chain_id or s_txt in {".", "?", ""}:
+            continue
+        try:
+            label_seq = int(float(s_txt))
+        except Exception:
+            continue
+        prev = out.get(chain_id)
+        if prev is None:
+            out[chain_id] = (label_seq, label_seq)
+        else:
+            lo, hi = prev
+            out[chain_id] = (min(lo, label_seq), max(hi, label_seq))
+    return out
 
 
-def _shift_residue_tokens(tokens: Sequence[object], pdb_path: Path) -> List[str]:
-    """
-    Shift a list of residue tokens based on the chain-wise minimum residue index in `pdb_path`.
-    Unparseable tokens are dropped; tokens with unknown chains are preserved as-is (stringified).
-    Output tokens are formatted as "{CHAIN}{SHIFTED_RESNUM}" (1-based).
-    """
+def _shift_residue_tokens(tokens: Sequence[object], structure_path: Path) -> List[str]:
+    """Normalize residue tokens; for mmCIF, drop residues outside observed label_seq_id range."""
     if not tokens:
         return []
-    chain_min = _read_pdb_chain_min_resseq(pdb_path)
+
+    ranges: Dict[str, Tuple[int, int]] = {}
+    if structure_path.exists() and structure_path.suffix.lower() in {".cif", ".mmcif"}:
+        try:
+            ranges = _read_mmcif_chain_label_seq_range(structure_path)
+        except Exception:
+            ranges = {}
+
     out: List[str] = []
     for tok in tokens:
         parsed = _parse_chain_res_token(tok)
         if not parsed:
-            # Preserve unknown formatting rather than silently losing user info.
             txt = str(tok).strip()
             if txt:
                 out.append(txt)
             continue
         chain, resnum, _icode = parsed
-        shifted = _shift_resnum(chain, resnum, chain_min)
-        if shifted is None:
-            # Chain not found in PDB; preserve original token.
-            out.append(f"{chain}{resnum}")
+        if resnum < 1:
             continue
-        # IMPORTANT: start from 1, not 0
-        if shifted < 1:
-            # Defensive: if the PDB has weird numbering, keep original.
-            out.append(f"{chain}{resnum}")
-            continue
-        out.append(f"{chain}{shifted}")
-    # Normalize + de-dup while preserving order
+        if ranges and chain in ranges:
+            lo, hi = ranges[chain]
+            if resnum < lo or resnum > hi:
+                continue
+        out.append(f"{chain}{resnum}")
+
     seen = set()
     deduped: List[str] = []
     for t in out:
@@ -255,10 +243,17 @@ def _shift_residue_tokens(tokens: Sequence[object], pdb_path: Path) -> List[str]
     return deduped
 
 
-def _prepared_pdb_path_for_target(pdb_id: str) -> Path:
+def _prepared_structure_path_for_target(pdb_id: str) -> Path:
+    """Prefer prepared.cif / prepared.mmcif; fall back to prepared.pdb for legacy targets."""
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     target_dir = targets_dir / pdb_id.upper()
+    cif = target_dir / "prep" / "prepared.cif"
+    if cif.exists():
+        return cif
+    mmcif = target_dir / "prep" / "prepared.mmcif"
+    if mmcif.exists():
+        return mmcif
     return target_dir / "prep" / "prepared.pdb"
 
 
@@ -370,8 +365,8 @@ def _format_ranges(numbers: Iterable[int]) -> str:
 def _format_binding_from_ep(ep: dict, *, pdb_path: Optional[Path] = None) -> Optional[str]:
     """
     Create BoltzGen binding label like "A:1..10;B:3,7".
-    If `pdb_path` is provided and exists, residue indices are shifted so each chain starts at 1
-    based on the minimum residue index in that PDB.
+    If `pdb_path` is provided and exists and is an mmCIF, residues are validated against the
+    observed label_seq_id range per label_asym_id (1-based). No shifting is applied.
     """
     hotspots = [h for h in ep.get("hotspots") or [] if h]
     mask = [m for m in ep.get("mask_residues") or [] if m]
@@ -379,7 +374,7 @@ def _format_binding_from_ep(ep: dict, *, pdb_path: Optional[Path] = None) -> Opt
     if not source:
         return None
 
-    # Optional shifting (chain-wise) using prepared.pdb
+    # Optional validation using prepared structure (mmCIF label_* indexing)
     shifted_source = source
     if pdb_path and pdb_path.exists():
         shifted_source = _shift_residue_tokens(source, pdb_path)
@@ -515,9 +510,13 @@ def _write_boltzgen_configs(
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     target_dir = targets_dir / pdb_id.upper()
     prep_dir = target_dir / "prep"
-    prepared_pdb = prep_dir / "prepared.pdb"
-    if not prepared_pdb.exists():
-        msg = f"  [boltzgen-config] Missing prepared.pdb for {pdb_id.upper()} (expected {prepared_pdb}); skipping spec export."
+
+    prepared_structure = _prepared_structure_path_for_target(pdb_id)
+    if not prepared_structure.exists():
+        msg = (
+            f"  [boltzgen-config] Missing prepared structure for {pdb_id.upper()} "
+            f"(expected {prepared_structure}); skipping spec export."
+        )
         log(msg)
         print(msg)
         return
@@ -526,9 +525,6 @@ def _write_boltzgen_configs(
     config_root.mkdir(parents=True, exist_ok=True)
     engine = BoltzGenEngine()
     scaffold_paths = engine._resolve_nanobody_scaffolds()
-
-    # Compute chain-wise shifting from prepared.pdb once per target
-    chain_min = _read_pdb_chain_min_resseq(prepared_pdb)
 
     for idx, ep in enumerate(epitopes, start=1):
         ep_dir = config_root / f"epitope_{idx}"
@@ -540,20 +536,20 @@ def _write_boltzgen_configs(
         raw_hotspots = ep.get("hotspots") or []
         raw_mask = ep.get("mask_residues") or []
 
-        # Shift indices so each chain starts from 1 based on PDB chain min resseq
-        shifted_hotspots = _shift_residue_tokens(raw_hotspots, prepared_pdb) if chain_min else list(raw_hotspots)
-        shifted_mask = _shift_residue_tokens(raw_mask, prepared_pdb) if chain_min else list(raw_mask)
+        # Normalize tokens; for mmCIF, drop residues that are outside (label_asym_id,label_seq_id) range.
+        hotspot_keys = _shift_residue_tokens(raw_hotspots, prepared_structure)
+        epitope_residues = _shift_residue_tokens(raw_mask, prepared_structure)
 
         try:
             info = engine._write_spec(
                 workspace=workspace,
                 spec_path=spec_path,
-                prepared_pdb=prepared_pdb,
+                prepared_pdb=prepared_structure,
                 pdb_id=pdb_id,
                 run_label="configs",
                 arm=name,
-                hotspot_keys=shifted_hotspots,
-                epitope_residues=shifted_mask,
+                hotspot_keys=hotspot_keys,
+                epitope_residues=epitope_residues,
                 num_designs=count,
                 scaffold_paths=scaffold_paths,
                 binding_override=None,
@@ -574,7 +570,7 @@ def _write_boltzgen_configs(
                 pdb_id=pdb_id,
                 ep_index=idx,
                 ep_data=ep,
-                prepared_pdb=prepared_pdb,
+                prepared_pdb=prepared_structure,
                 log=log,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -1608,7 +1604,7 @@ def run_bulk_workflow(
         if design_settings.model_engine == "boltzgen":
             epitopes = _load_epitopes_for_target(pdb_id)
             design_splits = []
-            prepared_pdb = _prepared_pdb_path_for_target(pdb_id)
+            prepared_pdb = _prepared_structure_path_for_target(pdb_id)
 
             if epitopes and not design_settings.boltz_binding:
                 design_splits = _distribute_designs(design_settings.total_designs, len(epitopes))
@@ -1618,7 +1614,7 @@ def run_bulk_workflow(
                     except Exception as exc:  # pragma: no cover - defensive
                         log(f"  ! Failed to write BoltzGen configs: {exc}")
                 for ep_idx, ep in enumerate(epitopes, start=1):
-                    # IMPORTANT: binding string should match shifted indexing
+                    # IMPORTANT: binding string must use mmCIF label_seq_id (1-based) indexing
                     binding_str = _format_binding_from_ep(ep, pdb_path=prepared_pdb if prepared_pdb.exists() else None)
                     run_label = _epitope_run_label(run_label_base, ep.get("name"), ep_idx)
                     queue_design_job({

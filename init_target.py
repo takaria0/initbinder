@@ -2,7 +2,7 @@ from utils import _ensure_dir, ROOT, TARGETS_ROOT_LOCAL, RCSB_ENTRY, RCSB_ASSEM,
 import requests
 import json
 import yaml
-from Bio.PDB import PDBIO, PDBParser
+from Bio.PDB import PDBIO, PDBParser, MMCIFParser
 from pathlib import Path
 import re
 from bs4 import BeautifulSoup
@@ -245,6 +245,8 @@ def init_target(
     for url, out in [
         (RCSB_ENTRY.format(pdb=pdb_id), tdir/"raw"/"entry.json"),
         (RCSB_ASSEM.format(pdb=pdb_id, asm="1"), tdir/"raw"/"assembly_1.json"),
+        (f"https://files.rcsb.org/download/{pdb_id.upper()}.cif", tdir/"raw"/f"{pdb_id}.cif"),
+        # Optional: keep PDB download for legacy tooling.
         (RCSB_PDB.format(pdb=pdb_id), tdir/"raw"/f"{pdb_id}.pdb"),
     ]:
         try:
@@ -254,23 +256,17 @@ def init_target(
             print(f"[warn] Fetch failed {url}: {e}")
 
     raw_dir = tdir / "raw"
-    raw_pdb = raw_dir / f"{pdb_id}.pdb"
-    if not raw_pdb.exists():
+    raw_cif = raw_dir / f"{pdb_id}.cif"
+    if not raw_cif.exists():
+        # Hard requirement now: prefer mmCIF for canonical label_asym_id/label_seq_id indexing.
+        cif_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.cif"
         try:
-            raw_cif = raw_dir / f"{pdb_id}.cif"
-            cif_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.cif"
             r = requests.get(cif_url, timeout=20); r.raise_for_status()
             raw_cif.write_bytes(r.content)
             print(f"[ok] Downloaded {raw_cif.name}")
-            
-            chainmap_json = raw_dir / "chainmap.json"
-            mapping = convert_cif_to_pdb_with_chainmap(raw_cif, raw_pdb, chainmap_json)
-            print(f"[ok] Converted {raw_cif.name} → {raw_pdb.name}")
-            if mapping:
-                preview = ", ".join(f"{k}->{v}" for k, v in list(mapping.items())[:8])
-                print(f"[info] Chain remap (old→new): {preview}{' ...' if len(mapping)>8 else ''}")
         except Exception as e:
-            print(f"[warn] CIF fallback failed: {e}")
+            print(f"[error] Failed to download mmCIF {cif_url}: {e}")
+            raise
 
     yml_path = tdir/"target.yaml"
     
@@ -373,18 +369,18 @@ def init_target(
 
     # Gather PDB chain sequences (debug)
     pdb_sequences: dict[str, str] = {}
-    pdb_residue_numbers: dict[str, list[str]] = {}
-    if raw_pdb.exists():
-        pdb_sequences, pdb_residue_numbers = _get_pdb_chain_sequences(raw_pdb)
+    cif_residue_numbers: dict[str, list[str]] = {}
+    if raw_cif.exists():
+        pdb_sequences, cif_residue_numbers = _get_mmcif_chain_sequences(raw_cif)
         if pdb_sequences:
             config.setdefault("sequences", {})
             config["sequences"]["pdb"] = pdb_sequences
-            config["sequences"]["pdb_residue_numbers"] = pdb_residue_numbers
+            config["sequences"]["cif_residue_numbers"] = cif_residue_numbers
             print(f"[ok] Extracted PDB AA sequences for {len(pdb_sequences)} chains.")
         else:
             print("[warn] No polymer sequences found in PDB file.")
     else:
-        print(f"[warn] PDB file missing at {raw_pdb}")
+        print(f"[warn] PDB file missing at {raw_cif}")
 
     # Vendor-specific verification (Sino Biological)
     chosen_chains: list[str] = []
@@ -561,12 +557,24 @@ def _format_residue_id(residue) -> str:
     return f"{resseq}{icode_str}" if icode_str else str(resseq)
 
 
-def _get_pdb_chain_sequences(pdb_path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
-    """Parses a PDB file and returns sequences and residue numbering for each polymer chain."""
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("PDB_STRUCTURE", pdb_path)
+def _get_mmcif_chain_sequences(cif_path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Parse an mmCIF file and return sequences and *label* residue numbering for each polymer chain.
+
+    Notes
+    -----
+    - Uses canonical mmCIF identifiers: label_asym_id (chain) and label_seq_id (residue index).
+    - Residue indices are returned as strings of integers (starting at 1 in most mmCIFs).
+    """
+    try:
+        parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False)
+    except TypeError:
+        # Older Biopython without auth_* flags; fall back (may use auth ids).
+        parser = MMCIFParser(QUIET=True)
+    structure = parser.get_structure("MMCIF_STRUCTURE", str(cif_path))
+
     sequences: dict[str, str] = {}
     residue_numbers: dict[str, list[str]] = {}
+
     for model in structure:
         for chain in model:
             chain_id = str(chain.id).strip()
@@ -576,17 +584,23 @@ def _get_pdb_chain_sequences(pdb_path: Path) -> tuple[dict[str, str], dict[str, 
             seq = ""
             resnums: list[str] = []
             for residue in chain:
-                if residue.get_id()[0] == ' ':
-                    try:
-                        seq += index_to_one(three_to_index(residue.get_resname()))
-                    except (KeyError, ValueError):
-                        seq += 'X'
-                    resnums.append(_format_residue_id(residue))
+                # Only standard polymer residues
+                hetflag, resseq, icode = residue.get_id()
+                if hetflag != " ":
+                    continue
+                if resseq is None:
+                    continue
+                try:
+                    seq += index_to_one(three_to_index(residue.get_resname()))
+                except (KeyError, ValueError):
+                    seq += "X"
+                resnums.append(str(int(resseq)))
             if seq:
                 sequences[norm_chain_id] = seq
                 residue_numbers[norm_chain_id] = resnums
-        break
+        break  # first model only
     return sequences, residue_numbers
+
 
 
 def _analyze_sino_product(url: str, gene_hint: Optional[str] = None, protein_name: Optional[str] = None):
@@ -709,11 +723,11 @@ def _verify_antigen_compatibility(
 
     # 3. Load PDB chain sequences
     print("[3/5] Extracting PDB chain sequences...")
-    raw_pdb = tdir / "raw" / f"{pdb_id.upper()}.pdb"
-    if not raw_pdb.exists():
-        print(f"[fail] PDB file not found at {raw_pdb}. Cannot perform verification.")
+    raw_cif = tdir / "raw" / f"{pdb_id.upper()}.cif"
+    if not raw_cif.exists():
+        print(f"[fail] PDB file not found at {raw_cif}. Cannot perform verification.")
         return None
-    pdb_sequences, pdb_residue_numbers = _get_pdb_chain_sequences(raw_pdb)
+    pdb_sequences, cif_residue_numbers = _get_mmcif_chain_sequences(raw_cif)
     if not pdb_sequences:
         print("[fail] No polymer sequences found in PDB file.")
         return None
@@ -749,7 +763,7 @@ def _verify_antigen_compatibility(
             expressed_seq,
             pdb_sequences,
             vendor_range=vendor_range,
-            chain_residue_numbers=pdb_residue_numbers,
+            chain_residue_numbers=cif_residue_numbers,
         )
     except ImportError as exc:
         print(f"[fail] {exc}")

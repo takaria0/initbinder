@@ -167,10 +167,14 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     # --- I/O & config ---
     tdir = ROOT / "targets" / pdb_id.upper()
     cfg_path = tdir / "target.yaml"
-    raw_pdb_path = tdir / "raw" / f"{pdb_id}.pdb"
+    # Prefer mmCIF (.cif) as the canonical source-of-truth for chain + residue indexing
+    raw_cif_path = tdir / "raw" / f"{pdb_id}.cif"
+    if not raw_cif_path.exists():
+        alt = tdir / "raw" / f"{pdb_id}.mmcif"
+        raw_cif_path = alt if alt.exists() else raw_cif_path
 
     if not cfg_path.exists(): raise FileNotFoundError(cfg_path)
-    if not raw_pdb_path.exists(): raise FileNotFoundError(raw_pdb_path)
+    if not raw_cif_path.exists(): raise FileNotFoundError(raw_cif_path)
 
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
     target_chains = _normalize_chain_ids(cfg.get("chains"))
@@ -188,10 +192,30 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
     prep_dir = tdir / "prep"
     prep_dir.mkdir(exist_ok=True)
 
-    # --- 1) Chain selection from raw PDB ---
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("raw", str(raw_pdb_path))
-    io = PDBIO(); io.set_structure(structure)
+    # --- 1) Chain selection from raw mmCIF (.cif) ---
+    # We treat chain IDs and residue indices as canonical mmCIF labels:
+    #   - chain id: label_asym_id
+    #   - residue index: label_seq_id (1-based)
+
+    try:
+        from Bio.PDB import MMCIFParser, MMCIFIO
+    except Exception as exc:
+        raise ImportError("Biopython with MMCIF support is required (pip install biopython).") from exc
+
+    # Prefer label_* numbering/chain ids when supported by installed Biopython.
+    parser = None
+    try:
+        parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False)
+        structure = parser.get_structure("raw", str(raw_cif_path))
+        using_label = True
+    except TypeError:
+        # Older Biopython versions don't accept auth_* flags; they typically default to auth numbering.
+        # This can break alignment with BoltzGen/Mol* label_seq_id expectations.
+        print("[warn] Biopython MMCIFParser does not support auth_chains/auth_residues flags. "
+              "Your Biopython may be old; consider upgrading to ensure label_seq_id indexing.")
+        parser = MMCIFParser(QUIET=True)
+        structure = parser.get_structure("raw", str(raw_cif_path))
+        using_label = False
 
     class _KeepChains(Select):
         def __init__(self, chains):
@@ -201,31 +225,56 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
             return str(chain.id).strip().upper() in self.chains
 
     selector = _KeepChains(target_chains)
-    selected_pdb_path = prep_dir / "prepared.pdb"
-    io.save(str(selected_pdb_path), selector)
-    print(f"[ok] Selected chains {target_chains} from raw PDB -> {selected_pdb_path.name}")
+
+    # Write prepared.cif (canonical, label indexing) and prepared.pdb (for legacy tools like freesasa)
+    prepared_cif_path = prep_dir / "prepared.cif"
+    prepared_pdb_path = prep_dir / "prepared.pdb"
+
+    # Normalize chain IDs to uppercase in-memory first.
+    for chain in structure.get_chains():
+        new_id = str(chain.id).strip().upper()
+        if chain.id != new_id:
+            chain.id = new_id
+
+    # Save selected chains to mmCIF
+    cif_io = MMCIFIO()
+    cif_io.set_structure(structure)
+    cif_io.save(str(prepared_cif_path), select=selector)
+
+    # Re-parse the selected structure from prepared.cif to ensure we only keep selected chains.
+    # (MMCIFIO does not always prune non-selected entities perfectly across Biopython versions.)
+    try:
+        sel_parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False) if using_label else MMCIFParser(QUIET=True)
+    except TypeError:
+        sel_parser = MMCIFParser(QUIET=True)
+    sel_struct = sel_parser.get_structure("sel", str(prepared_cif_path))
+
+    # Write selected chains to PDB for freesasa.
+    # NOTE: PDB is legacy and may not support multi-character chain ids; if encountered, we warn.
+    io = PDBIO()
+    io.set_structure(sel_struct)
+    # Warn if any chain id is not 1 character (PDB limitation).
+    long_ids = sorted({str(c.id) for c in sel_struct.get_chains() if len(str(c.id)) != 1})
+    if long_ids:
+        print(f"[warn] Some chain IDs are not 1 character and may not round-trip in PDB cleanly: {long_ids}. "
+              "Freesasa operates on PDB; consider restricting to 1-char label_asym_id chains or rely on CIF-only tools.")
+    io.save(str(prepared_pdb_path), selector)
+    print(f"[ok] Selected chains {target_chains} from raw mmCIF -> prepared.cif + prepared.pdb")
 
     # Sanity: ensure prepared.pdb has at least one ATOM/HETATM line
-    with open(selected_pdb_path, "r") as f:
+    with open(prepared_pdb_path, "r") as f:
         has_atom = any(line.startswith(("ATOM", "HETATM")) for line in f)
     if not has_atom:
         raise RuntimeError(
             f"Prepared PDB has no atoms for chains={target_chains}. "
-            "Likely chain mismatch; check target.yaml chains vs raw PDB."
+            "Likely chain mismatch; check target.yaml chains vs mmCIF label_asym_id."
         )
 
-    # --- 1.5) Build residue maps from selected structure ---
-    sel_struct = parser.get_structure("sel", str(selected_pdb_path))
-    # Normalize chain IDs in prepared structure to uppercase for downstream tools (e.g., AF3)
-    need_resave = False
+    # --- 1.5) Build residue maps from selected structure (label_seq_id space when supported) ---
+    # Ensure chain IDs are uppercase for downstream tools (e.g., AF3)
     for chain in sel_struct.get_chains():
-        new_id = str(chain.id).strip().upper()
-        if chain.id != new_id:
-            chain.id = new_id
-            need_resave = True
-    if need_resave:
-        io_norm = PDBIO(); io_norm.set_structure(sel_struct)
-        io_norm.save(str(selected_pdb_path))
+        chain.id = str(chain.id).strip().upper()
+
     resname_lookup = {}
     ca_xyz = {}
     res_bfac = {}
@@ -234,42 +283,48 @@ def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
 
     for model in sel_struct:
         for chain in model:
-            ch = chain.id
+            ch = str(chain.id).strip().upper()
             seq = []
-            idx_map=[]
+            idx_map = []
             for res in chain:
                 if res.id[0] != " ":  # skip HETATM/waters
                     continue
-                resseq = res.id[1]
-                key = make_key(ch, resseq)
+                resseq = res.id[1]  # in label mode this is label_seq_id (1-based)
+                key = make_key(ch, int(resseq))
                 resname = res.get_resname()
                 if key not in resname_lookup:
                     resname_lookup[key] = resname
 
-                # CA座標 or 全原子重心
+                # CA coordinate or centroid
                 if "CA" in res:
-                    ca = res["CA"]; ca_xyz[key] = tuple(float(x) for x in ca.get_coord())
+                    ca = res["CA"]
+                    ca_xyz[key] = tuple(float(x) for x in ca.get_coord())
                 else:
-                    xs=[]; ys=[]; zs=[]
+                    xs = []; ys = []; zs = []
                     for atom in res.get_atoms():
-                        x,y,z = atom.get_coord()
+                        x, y, z = atom.get_coord()
                         xs.append(float(x)); ys.append(float(y)); zs.append(float(z))
                     ca_xyz[key] = (sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs)) if xs else None
 
-                # B-factor 平均
-                bvals=[]
+                # Mean B-factor
+                bvals = []
                 for atom in res.get_atoms():
-                    try: bvals.append(float(atom.get_bfactor()))
-                    except: pass
+                    try:
+                        bvals.append(float(atom.get_bfactor()))
+                    except Exception:
+                        pass
                 res_bfac[key] = (sum(bvals)/len(bvals)) if bvals else 0.0
 
                 one = THREE2ONE.get(resname.upper(), "X")
-                seq.append(one); idx_map.append((resseq,resname))
-            norm_ch = ch.strip().upper()
-            chain_seq[norm_ch] = "".join(seq)
-            chain_index_map[norm_ch] = idx_map
+                seq.append(one)
+                idx_map.append((int(resseq), resname))
 
-    # --- 2) SASA (FreeSASA on selected PDB) ---
+            chain_seq[ch] = "".join(seq)
+            chain_index_map[ch] = idx_map
+
+    # Keep legacy variable name for downstream code
+    selected_pdb_path = prepared_pdb_path
+# --- 2) SASA (FreeSASA on selected PDB) ---
     struct = freesasa.Structure(str(selected_pdb_path))
     result = freesasa.calc(struct)
 
