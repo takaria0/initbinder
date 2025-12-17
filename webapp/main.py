@@ -34,6 +34,9 @@ from .models import (
     AssessmentRunResponse,
     AssessmentRunSummary,
     AssessmentSyncResponse,
+    BoltzgenBinderPymolRequest,
+    BoltzgenBinderPymolResponse,
+    BoltzgenBinderResponse,
     BoltzgenConfigContent,
     BoltzgenConfigListResponse,
     BoltzgenConfigRunRequest,
@@ -87,12 +90,14 @@ from .designs import list_design_engines
 from .pipeline import get_target_status
 from .bulk import (
     build_boltzgen_diversity_report,
+    list_boltzgen_binders,
     list_boltzgen_config_state,
     load_boltzgen_config_content,
     preview_bulk_targets,
 )
 from .pymol import (
     PyMolLaunchError,
+    launch_boltzgen_binder,
     launch_boltzgen_top_binders,
     launch_hotspots,
     launch_top_binders,
@@ -822,6 +827,16 @@ async def api_boltzgen_diversity() -> BoltzgenDiversityResponse:
     return build_boltzgen_diversity_report()
 
 
+@app.get("/api/bulk/boltzgen/binders", response_model=BoltzgenBinderResponse)
+async def api_boltzgen_binders(
+    pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+) -> BoltzgenBinderResponse:
+    ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
+    return list_boltzgen_binders(ids, page=page, page_size=page_size)
+
+
 @app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)
 async def api_boltzgen_config_list(
     pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
@@ -845,6 +860,29 @@ async def api_boltzgen_config_run(payload: BoltzgenConfigRunRequest) -> Boltzgen
     job_id = submit_boltzgen_config_run(payload, job_store=store)
     message = "Queued BoltzGen config run"
     return BoltzgenConfigRunResponse(job_id=job_id, message=message)
+
+
+@app.post("/api/bulk/boltzgen/binder/pymol", response_model=BoltzgenBinderPymolResponse)
+async def api_boltzgen_binder_pymol(
+    payload: BoltzgenBinderPymolRequest,
+) -> BoltzgenBinderPymolResponse:
+    try:
+        session_dir, script_path, launched = launch_boltzgen_binder(
+            payload.pdb_id,
+            design_path=payload.design_path,
+            epitope_label=payload.epitope_label,
+            binding_label=payload.binding_label,
+            include_label=payload.include_label,
+            target_path=payload.target_path,
+        )
+    except PyMolLaunchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return BoltzgenBinderPymolResponse(
+        session_dir=str(session_dir),
+        script_path=str(script_path),
+        launched=launched,
+    )
 
 
 @app.get("/api/pymol/snapshot")

@@ -261,6 +261,30 @@ class BoltzgenDiversityResponse(BaseModel):
     message: Optional[str] = None
 
 
+class BoltzgenBinderRow(BaseModel):
+    pdb_id: str
+    epitope: Optional[str] = None
+    rank: int
+    iptm: Optional[float] = None
+    rmsd: Optional[float] = None
+    design_path: Optional[str] = None
+    metrics_path: Optional[str] = None
+    run_label: Optional[str] = None
+    config_path: Optional[str] = None
+    binding_label: Optional[str] = None
+    include_label: Optional[str] = None
+    target_path: Optional[str] = None
+
+
+class BoltzgenBinderResponse(BaseModel):
+    rows: List[BoltzgenBinderRow] = Field(default_factory=list)
+    total_rows: int = 0
+    page: int = 1
+    page_size: int = 100
+    csv_name: Optional[str] = None
+    message: Optional[str] = None
+
+
 class BoltzgenEpitopeConfig(BaseModel):
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None
@@ -314,6 +338,21 @@ class BoltzgenConfigRunRequest(BaseModel):
 class BoltzgenConfigRunResponse(BaseModel):
     job_id: str
     message: str
+
+
+class BoltzgenBinderPymolRequest(BaseModel):
+    pdb_id: str
+    design_path: str
+    epitope_label: Optional[str] = None
+    binding_label: Optional[str] = None
+    include_label: Optional[str] = None
+    target_path: Optional[str] = None
+
+
+class BoltzgenBinderPymolResponse(BaseModel):
+    session_dir: str
+    script_path: str
+    launched: bool
 
 
 class AlignmentResponse(BaseModel):

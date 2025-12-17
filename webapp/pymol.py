@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import load_config
+from .designs import BoltzGenEngine
 from .dms import DMSLibraryMetadata, DMSResidueSummary, build_residue_selection
 from .result_collectors import (
     RankingPayload,
@@ -388,6 +389,12 @@ def _resolve_boltz_design_path(spec_dir: Path, metadata: Dict[str, object]) -> O
     return None
 
 
+def resolve_boltz_design_path(spec_dir: Path, metadata: Dict[str, object]) -> Optional[Path]:
+    """Public wrapper for locating a BoltzGen design structure."""
+
+    return _resolve_boltz_design_path(spec_dir, metadata)
+
+
 def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str] = None,
                        launch: bool = True) -> tuple[Optional[Path], bool]:
     _require_pymol_utils()
@@ -537,6 +544,128 @@ def launch_boltzgen_top_binders(
         _launch_pymol(script_path)
         launched = True
     return script_path, launched
+
+
+def _selection_from_labels(binding_label: Optional[str], include_label: Optional[str]) -> Optional[str]:
+    tokens: list[str] = []
+    for raw in (binding_label, include_label):
+        if not raw:
+            continue
+        if isinstance(raw, str):
+            tokens.extend([tok.strip() for tok in raw.split(";") if tok.strip()])
+        elif isinstance(raw, (list, tuple, set)):
+            tokens.extend([str(tok).strip() for tok in raw if str(tok).strip()])
+    if not tokens:
+        return None
+
+    try:
+        mapping = BoltzGenEngine._expand_epitope_residues(tokens)
+    except Exception:
+        return None
+
+    selectors: list[str] = []
+    for chain, residues in mapping.items():
+        if not residues:
+            continue
+        cleaned: list[int] = []
+        for res in residues:
+            try:
+                cleaned.append(int(float(res)))
+            except (TypeError, ValueError):
+                continue
+        if not cleaned:
+            continue
+        resi_tokens = "+".join(str(num) for num in sorted(set(cleaned)))
+        selectors.append(f"(chain {chain} and resi {resi_tokens})")
+
+    if not selectors:
+        return None
+    return " or ".join(selectors)
+
+
+def launch_boltzgen_binder(
+    pdb_id: str,
+    *,
+    design_path: str,
+    epitope_label: Optional[str] = None,
+    binding_label: Optional[str] = None,
+    include_label: Optional[str] = None,
+    target_path: Optional[str] = None,
+    launch: bool = True,
+) -> tuple[Path, Path, bool]:
+    _ensure_env()
+    design_src = Path(design_path).expanduser()
+    if not design_src.exists():
+        raise PyMolLaunchError(f"Design file not found: {design_src}")
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    label = _sanitize_design_token(epitope_label or design_src.stem)
+    dest_root = _cache_dir("pymol_boltzgen_binder")
+    session_dir = dest_root / f"{pdb_id.upper()}_{label}_{timestamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    design_dest = session_dir / design_src.name
+    shutil.copy2(design_src, design_dest)
+
+    target_dest: Optional[Path] = None
+    if target_path:
+        candidate = Path(target_path).expanduser()
+        if candidate.exists():
+            target_dest = session_dir / candidate.name
+            shutil.copy2(candidate, target_dest)
+
+    selection = _selection_from_labels(binding_label, include_label)
+    selection_obj = "target" if target_dest else "complex"
+
+    script_lines = [
+        "reinitialize",
+        "bg_color white",
+        "set ray_opaque_background, off",
+        "set cartoon_fancy_helices, on",
+        "set cartoon_smooth_loops, on",
+        f"load {design_dest.name}, complex",
+        "hide everything, complex",
+        "show cartoon, complex",
+        "color skyblue, complex",
+    ]
+
+    if target_dest:
+        script_lines.extend(
+            [
+                f"load {target_dest.name}, target",
+                "hide everything, target",
+                "show cartoon, target",
+                "color lightgrey, target",
+                "set cartoon_transparency, 0.45, target",
+            ]
+        )
+
+    if selection:
+        script_lines.extend(
+            [
+                f"select epitope, {selection_obj} and ({selection})",
+                "color hotpink, epitope",
+                "show sticks, epitope",
+                "set stick_radius, 0.2, epitope",
+            ]
+        )
+
+    script_lines.extend(
+        [
+            "orient",
+            "zoom",
+        ]
+    )
+
+    script_path = session_dir / "boltzgen_binder.pml"
+    script_path.write_text("\n".join(script_lines) + "\n", encoding="utf-8")
+
+    launched = False
+    if launch:
+        _launch_pymol(script_path)
+        launched = True
+
+    return session_dir, script_path, launched
 
 
 def render_gallery_movie(
@@ -849,7 +978,9 @@ __all__ = [
     "launch_hotspots",
     "launch_top_binders",
     "launch_boltzgen_top_binders",
+    "launch_boltzgen_binder",
     "render_gallery_movie",
     "launch_dms_library",
     "PyMolLaunchError",
+    "resolve_boltz_design_path",
 ]

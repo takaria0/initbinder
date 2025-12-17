@@ -15,6 +15,12 @@ const state = {
   diversityMessage: null,
   diversityFiles: [],
   diversityOutputDir: null,
+  binderRows: [],
+  binderTotal: 0,
+  binderPage: 1,
+  binderPageSize: 100,
+  binderCsvName: null,
+  binderMessage: null,
 };
 
 const el = {
@@ -59,6 +65,13 @@ const el = {
   boltzTimeHours: document.querySelector('#boltz-time-hours'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
+  binderPanel: document.querySelector('#boltz-binders-panel'),
+  binderTable: document.querySelector('#boltz-binders-table tbody'),
+  binderSummary: document.querySelector('#boltz-binders-summary'),
+  binderRefresh: document.querySelector('#boltz-binders-refresh'),
+  binderDownload: document.querySelector('#boltz-binders-download'),
+  binderPagination: document.querySelector('#boltz-binders-pagination'),
+  binderPageLabel: document.querySelector('#boltz-binders-page-label'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
@@ -740,6 +753,198 @@ async function downloadDiversityFile(kind) {
   }
 }
 
+function renderBinderRows(rows = []) {
+  if (!el.binderTable || !el.binderPanel) return;
+  const tbody = el.binderTable;
+  tbody.innerHTML = '';
+
+  const noteRow = () => {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.style.color = '#64748b';
+    td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No BoltzGen binders found.');
+    tr.appendChild(td);
+    return tr;
+  };
+
+  if (!rows.length) {
+    tbody.appendChild(noteRow());
+  } else {
+    rows.forEach((row, idx) => {
+      const tr = document.createElement('tr');
+      const values = [
+        row.pdb_id || '—',
+        row.epitope || '—',
+        row.rank ?? '—',
+        row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
+        row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
+      ];
+      values.forEach((val) => {
+        const td = document.createElement('td');
+        td.textContent = val;
+        tr.appendChild(td);
+      });
+
+      const pathTd = document.createElement('td');
+      if (row.design_path) {
+        const link = document.createElement('a');
+        link.href = `file://${row.design_path}`;
+        link.textContent = row.design_path.split('/').pop() || row.design_path;
+        link.title = row.design_path;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        pathTd.appendChild(link);
+      } else {
+        pathTd.textContent = '—';
+      }
+      tr.appendChild(pathTd);
+
+      const pymolTd = document.createElement('td');
+      const pymolBtn = document.createElement('button');
+      pymolBtn.type = 'button';
+      pymolBtn.textContent = 'PyMOL';
+      pymolBtn.dataset.action = 'pymol-binder';
+      pymolBtn.dataset.index = String(idx);
+      if (!row.design_path) pymolBtn.disabled = true;
+      pymolTd.appendChild(pymolBtn);
+      tr.appendChild(pymolTd);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  if (el.binderSummary) {
+    const msg = state.binderMessage || '';
+    const summaryText = msg || `Showing ${rows.length} of ${state.binderTotal || rows.length} binders`;
+    el.binderSummary.textContent = summaryText;
+    el.binderSummary.hidden = false;
+  }
+
+  const totalPages = Math.max(1, Math.ceil((state.binderTotal || 0) / (state.binderPageSize || 1)));
+  if (el.binderPagination && el.binderPageLabel) {
+    el.binderPagination.hidden = totalPages <= 1;
+    el.binderPageLabel.textContent = `Page ${state.binderPage || 1} of ${totalPages}`;
+    const buttons = el.binderPagination.querySelectorAll('button[data-page-nav]');
+    buttons.forEach((btn) => {
+      const dir = btn.dataset.pageNav;
+      if (dir === 'prev') btn.disabled = (state.binderPage || 1) <= 1;
+      if (dir === 'next') btn.disabled = (state.binderPage || 1) >= totalPages;
+    });
+  }
+
+  if (el.binderDownload) {
+    el.binderDownload.hidden = !state.binderCsvName;
+  }
+
+  el.binderPanel.hidden = false;
+}
+
+async function loadBinderTable({ page = 1, silent = false } = {}) {
+  if (!el.binderPanel) return;
+  const ids = Array.from(new Set(
+    (state.bulkPreviewRows || [])
+      .map((row) => (row.resolved_pdb_id || row.pdb_id || '').trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (!ids.length) {
+    el.binderPanel.hidden = true;
+    return;
+  }
+  const params = new URLSearchParams();
+  params.append('pdb_ids', ids.join(','));
+  params.append('page', String(page));
+  params.append('page_size', String(state.binderPageSize || 100));
+  try {
+    const res = await fetch(`/api/bulk/boltzgen/binders?${params.toString()}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to load binders (${res.status})`);
+    }
+    const body = await res.json();
+    state.binderRows = Array.isArray(body.rows) ? body.rows : [];
+    state.binderTotal = Number(body.total_rows || state.binderRows.length || 0);
+    state.binderPage = Number(body.page || page || 1);
+    state.binderPageSize = Number(body.page_size || state.binderPageSize || 100);
+    state.binderCsvName = body.csv_name || null;
+    state.binderMessage = body.message || null;
+    renderBinderRows(state.binderRows);
+    if (!silent && body.message) {
+      showAlert(body.message, false);
+    }
+  } catch (err) {
+    if (!silent) showAlert(err.message || String(err));
+    if (el.binderPanel) el.binderPanel.hidden = true;
+  }
+}
+
+async function downloadBinderCsv() {
+  if (!state.binderCsvName) {
+    showAlert('No binder CSV available yet.');
+    return;
+  }
+  if (el.binderDownload) el.binderDownload.disabled = true;
+  try {
+    const url = `/api/bulk/file?name=${encodeURIComponent(state.binderCsvName)}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to download binder CSV (${res.status})`);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+    const filename = match?.[1] || state.binderCsvName;
+    const objUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+  } catch (err) {
+    showAlert(err.message || 'Unable to download binder CSV.');
+  } finally {
+    if (el.binderDownload) el.binderDownload.disabled = false;
+  }
+}
+
+async function launchBinderPymol(index) {
+  const row = Array.isArray(state.binderRows) ? state.binderRows[index] : null;
+  if (!row) {
+    showAlert('No binder selected.');
+    return;
+  }
+  if (!row.design_path) {
+    showAlert('Design path unavailable for this binder.');
+    return;
+  }
+  try {
+    const payload = {
+      pdb_id: row.pdb_id,
+      design_path: row.design_path,
+      epitope_label: row.epitope,
+      binding_label: row.binding_label || null,
+      include_label: row.include_label || null,
+      target_path: row.target_path || null,
+    };
+    const res = await fetch('/api/bulk/boltzgen/binder/pymol', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `PyMOL launch failed (${res.status})`);
+    }
+    const body = await res.json();
+    showAlert(`PyMOL script ready: ${body.script_path}`, false);
+  } catch (err) {
+    showAlert(err.message || 'Failed to launch PyMOL.');
+  }
+}
+
 async function loadSnapshotMetadata(names) {
   if (!names || !names.length) {
     renderSnapshots([]);
@@ -995,6 +1200,7 @@ async function loadBoltzConfigs(options = {}) {
     state.boltzConfigs = targets;
     await loadBoltzRunStatuses(targets.map((t) => t.pdb_id));
     renderBoltzConfigs();
+    await loadBinderTable({ page: state.binderPage || 1, silent: true });
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
     if (el.boltzPanel) el.boltzPanel.hidden = true;
@@ -1363,6 +1569,28 @@ async function runBoltzEpitope(pdbId, configPath, triggerEl = null) {
   }
 }
 
+function handleBinderTableClick(event) {
+  const btn = event.target.closest('button[data-action="pymol-binder"]');
+  if (!btn) return;
+  const idx = Number(btn.dataset.index || -1);
+  if (Number.isFinite(idx) && idx >= 0) {
+    launchBinderPymol(idx);
+  }
+}
+
+function handleBinderPagination(event) {
+  const btn = event.target.closest('button[data-page-nav]');
+  if (!btn) return;
+  const dir = btn.dataset.pageNav;
+  const current = state.binderPage || 1;
+  const totalPages = Math.max(1, Math.ceil((state.binderTotal || 0) / (state.binderPageSize || 1)));
+  if (dir === 'prev' && current > 1) {
+    loadBinderTable({ page: current - 1, silent: true });
+  } else if (dir === 'next' && current < totalPages) {
+    loadBinderTable({ page: current + 1, silent: true });
+  }
+}
+
 function handleBoltzTableClick(event) {
   const btn = event.target.closest('button[data-action]');
   if (!btn) {
@@ -1477,8 +1705,10 @@ async function previewBulkCsv(options = {}) {
     }
     const body = await res.json();
     state.bulkPreviewRows = Array.isArray(body.rows) ? body.rows : [];
+    state.binderPage = 1;
     renderBulkPreview(state.bulkPreviewRows, body.message || '');
     loadBoltzConfigs({ silent: true });
+    loadBinderTable({ page: 1, silent: true });
     setBadge(el.bulkStatus, body.message || 'Preview ready', 'rgba(134, 239, 172, 0.25)');
     if (!silent) showAlert(body.message || 'Preview ready.', false);
   } catch (err) {
@@ -1837,6 +2067,10 @@ function init() {
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
+  if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
+  if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
+  if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => loadBinderTable({ page: state.binderPage || 1 }));
+  if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
