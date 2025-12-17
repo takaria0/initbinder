@@ -907,9 +907,11 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const specLines = remoteSpecs.map((spec) => `  --spec ${spec} \\`).join('\n');
   const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
   const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
-  const condaLine = condaActivate ? condaActivate : '# conda activate <env>';
+  const condaLine = condaActivate ? condaActivate : '# conda activate bg';
   const verifyLine = `ssh ${sshTarget} "ls ${remoteSpecs.join(' ')}"`;
   const envRoot = remoteRoot || '<remote_root>';
+  const envTargetRoot = targetRoot || `${envRoot}/targets`;
+  const pipelinePath = `${remoteRoot || '<remote_root>'}/tools/boltzgen/pipeline.py`;
   return [
     `# Manual BoltzGen submission${epitopeName ? ` (${epitopeName})` : ''}`,
     '',
@@ -922,7 +924,8 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     '',
     '# 3) Launch BoltzGen pipeline',
     condaLine,
-    `INITBINDER_ROOT=${envRoot} python tools/boltzgen/pipeline.py pipeline ${upper} \\`,
+    `INITBINDER_ROOT=${envRoot} INITBINDER_TARGET_ROOT=${envTargetRoot} \\`,
+    `python ${pipelinePath} pipeline ${upper} \\`,
     `  --run_label ${runLabel} \\`,
     `  --num_designs ${designCount} \\`,
     `  --output_root ${outputRoot} \\`,
