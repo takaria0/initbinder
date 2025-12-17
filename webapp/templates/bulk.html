@@ -108,6 +108,18 @@
 
             <section id="epitope-metrics-section" hidden style="display: none;"></section>
 
+            <section id="diversity-section" hidden>
+              <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <h2 style="margin: 0;">Designed binder diversity</h2>
+                <div class="flex-row" style="gap: 8px; flex-wrap: wrap; align-items: center;">
+                  <button type="button" id="diversity-download-html" class="ghost" hidden>Export HTML</button>
+                  <button type="button" id="diversity-download-csv" class="ghost" hidden>Download CSV</button>
+                  <button type="button" id="diversity-refresh" class="ghost">Refresh</button>
+                </div>
+              </div>
+              <div id="diversity-grid" class="catalog-viewer"></div>
+            </section>
+
             <section id="boltz-config-panel" class="table-scroll" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
                 <div>

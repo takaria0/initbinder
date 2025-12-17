@@ -5,10 +5,13 @@ const state = {
   snapshotNames: [],
   boltzConfigs: [],
   epitopePlots: [],
+  diversityPlots: [],
   lastJobStatus: null,
   clusterStatus: null,
   boltzLocalRuns: {},
   expandedTargets: new Set(),
+  diversityCsv: null,
+  diversityHtml: null,
 };
 
 const el = {
@@ -41,6 +44,11 @@ const el = {
   epitopePlotGrid: document.querySelector('#epitope-plot-grid'),
   epitopeReportDownload: document.querySelector('#epitope-report-download'),
   epitopeMetricsSection: document.querySelector('#epitope-metrics-section'),
+  diversitySection: document.querySelector('#diversity-section'),
+  diversityGrid: document.querySelector('#diversity-grid'),
+  diversityRefresh: document.querySelector('#diversity-refresh'),
+  diversityDownloadCsv: document.querySelector('#diversity-download-csv'),
+  diversityDownloadHtml: document.querySelector('#diversity-download-html'),
   boltzPanel: document.querySelector('#boltz-config-panel'),
   boltzTable: document.querySelector('#boltz-config-table tbody'),
   boltzSummary: document.querySelector('#boltz-config-summary'),
@@ -517,6 +525,82 @@ function renderEpitopePlots(items = []) {
   el.epitopePlotSection.hidden = false;
 }
 
+function renderDiversityPlots(items = []) {
+  if (!el.diversityGrid || !el.diversitySection) return;
+  el.diversityGrid.innerHTML = '';
+  const list = Array.isArray(items) ? items.filter((p) => p && (p.png_name || p.svg_name)) : [];
+  if (!list.length) {
+    state.diversityPlots = [];
+    el.diversitySection.hidden = true;
+    return;
+  }
+  state.diversityPlots = list;
+  list.forEach((plot) => {
+    const card = document.createElement('div');
+    card.className = 'snapshot-card';
+    const header = document.createElement('div');
+    header.className = 'snapshot-header';
+    const title = document.createElement('div');
+    title.textContent = plot.pdb_id || 'BoltzGen';
+    header.appendChild(title);
+    const linkBar = document.createElement('div');
+    linkBar.className = 'snapshot-links';
+    if (plot.png_name) {
+      const pngLink = document.createElement('a');
+      pngLink.href = `/api/bulk/file?name=${encodeURIComponent(plot.png_name)}`;
+      pngLink.textContent = 'PNG';
+      pngLink.target = '_blank';
+      linkBar.appendChild(pngLink);
+    }
+    if (plot.svg_name) {
+      const svgLink = document.createElement('a');
+      svgLink.href = `/api/bulk/file?name=${encodeURIComponent(plot.svg_name)}`;
+      svgLink.textContent = 'SVG';
+      svgLink.target = '_blank';
+      if (linkBar.childElementCount) linkBar.appendChild(document.createTextNode(' · '));
+      linkBar.appendChild(svgLink);
+    }
+    header.appendChild(linkBar);
+    card.appendChild(header);
+
+    if (plot.png_name) {
+      const imgBox = document.createElement('div');
+      imgBox.className = 'snapshot-image';
+      const img = document.createElement('img');
+      img.src = `/api/bulk/file?name=${encodeURIComponent(plot.png_name)}`;
+      img.alt = plot.pdb_id || 'BoltzGen diversity';
+      img.loading = 'lazy';
+      img.style.maxWidth = '100%';
+      img.style.border = '1px solid #e2e8f0';
+      img.style.borderRadius = '8px';
+      imgBox.appendChild(img);
+      card.appendChild(imgBox);
+    }
+
+    const legend = document.createElement('div');
+    legend.className = 'snapshot-note';
+    const colors = plot.epitope_colors || {};
+    if (Object.keys(colors).length) {
+      legend.innerHTML = Object.entries(colors)
+        .map(([name, color]) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:8px;"><span style="width:12px;height:12px;border-radius:999px;background:${color};display:inline-block;"></span>${name}</span>`)
+        .join('');
+    } else {
+      legend.textContent = 'Epitope colors not available';
+    }
+    card.appendChild(legend);
+
+    el.diversityGrid.appendChild(card);
+  });
+
+  if (el.diversityDownloadCsv) {
+    el.diversityDownloadCsv.hidden = !state.diversityCsv;
+  }
+  if (el.diversityDownloadHtml) {
+    el.diversityDownloadHtml.hidden = !state.diversityHtml;
+  }
+  el.diversitySection.hidden = false;
+}
+
 async function downloadEpitopeReportHtml() {
   if (el.epitopeReportDownload) el.epitopeReportDownload.disabled = true;
   try {
@@ -546,6 +630,32 @@ async function downloadEpitopeReportHtml() {
   } finally {
     if (el.epitopeReportDownload) el.epitopeReportDownload.disabled = false;
   }
+}
+
+async function refreshDiversity({ silent = false } = {}) {
+  try {
+    const res = await fetch('/api/bulk/boltzgen/diversity');
+    if (!res.ok) throw new Error('Unable to load diversity report');
+    const data = await res.json();
+    state.diversityCsv = data.csv_name || null;
+    state.diversityHtml = data.html_name || null;
+    renderDiversityPlots(data.plots || []);
+    if (!silent && data.message) {
+      showAlert(data.message, false);
+    }
+  } catch (err) {
+    if (!silent) showAlert(err.message || String(err));
+  }
+}
+
+function downloadDiversityFile(kind) {
+  const name = kind === 'csv' ? state.diversityCsv : state.diversityHtml;
+  if (!name) {
+    showAlert(`No ${kind.toUpperCase()} available yet.`);
+    return;
+  }
+  const url = `/api/bulk/file?name=${encodeURIComponent(name)}`;
+  window.open(url, '_blank');
 }
 
 async function loadSnapshotMetadata(names) {
@@ -923,7 +1033,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const memLabel = Number.isFinite(memVal) ? `${memVal}G` : `${memVal}`;
   const outputRoot = boltz.output_root
     ? `${boltz.output_root}`.replace(/\/$/, '')
-    : `${remoteTarget}/designs/_boltzgen/${runLabel}`;
+    : `${remoteTarget}/designs/boltzgen`;
   const cacheDir = boltz.cache_dir ? `${boltz.cache_dir}` : null;
   const extraArgs = Array.isArray(boltz.extra_args) ? boltz.extra_args : (boltz.extra_args ? [boltz.extra_args] : []);
   const specs = (specPaths && specPaths.length) ? specPaths : ['configs/*/boltzgen_config.yaml'];
@@ -964,7 +1074,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     `ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`,
     '',
     '# 5) Pull results back',
-    `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/_boltzgen/${runLabel}/`,
+    `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`,
   ].filter(Boolean).join('\n');
 }
 
@@ -1024,7 +1134,7 @@ function buildAllRunCommandsText(targets = []) {
     const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
     const outputRoot = boltz.output_root
       ? `${boltz.output_root}`.replace(/\/$/, '')
-      : `${remoteTarget}/designs/_boltzgen/${runLabel}`;
+      : `${remoteTarget}/designs/boltzgen`;
     const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
     const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
       .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
@@ -1049,7 +1159,7 @@ function buildAllRunCommandsText(targets = []) {
 
     monitorLines.push(`ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`);
     monitorLines.push(`ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`);
-    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/_boltzgen/${runLabel}/`);
+    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`);
   });
 
   if (monitorLines.length) {
@@ -1494,6 +1604,7 @@ function updateJobUI(job) {
       renderSnapshots([]);
     }
     renderEpitopePlots(epPlotNames);
+    refreshDiversity({ silent: true });
     stopJobPolling();
   } else {
     setBadge(el.bulkStatus, 'Bulk failed', 'rgba(248, 113, 113, 0.25)');
@@ -1509,6 +1620,9 @@ function startJobPolling(jobId) {
   stopJobPolling();
   renderSnapshots([]);
   renderEpitopePlots([]);
+  renderDiversityPlots([]);
+  state.diversityCsv = null;
+  state.diversityHtml = null;
   const poll = async () => {
     try {
       const job = await fetchJob(jobId);
@@ -1633,6 +1747,9 @@ function init() {
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);
   if (el.boltzRefresh) el.boltzRefresh.addEventListener('click', () => loadBoltzConfigs({ silent: true }));
+  if (el.diversityRefresh) el.diversityRefresh.addEventListener('click', () => refreshDiversity());
+  if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
+  if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
@@ -1645,6 +1762,8 @@ function init() {
     if (closeTarget === 'boltz-log') toggleModal(el.boltzLogModal, false);
     if (closeTarget === 'boltz-run') toggleModal(el.boltzRunModal, false);
   });
+
+  refreshDiversity({ silent: true });
 }
 
 document.addEventListener('DOMContentLoaded', init);

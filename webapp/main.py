@@ -45,6 +45,7 @@ from .models import (
     BulkPreviewResponse,
     BulkRunRequest,
     BulkRunResponse,
+    BoltzgenDiversityResponse,
     DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
@@ -85,6 +86,7 @@ from .models import (
 from .designs import list_design_engines
 from .pipeline import get_target_status
 from .bulk import (
+    build_boltzgen_diversity_report,
     list_boltzgen_config_state,
     load_boltzgen_config_content,
     preview_bulk_targets,
@@ -808,6 +810,11 @@ async def api_bulk_file(name: str) -> FileResponse:
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(candidate, filename=candidate.name)
+
+
+@app.get("/api/bulk/boltzgen/diversity", response_model=BoltzgenDiversityResponse)
+async def api_boltzgen_diversity() -> BoltzgenDiversityResponse:
+    return build_boltzgen_diversity_report()
 
 
 @app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)

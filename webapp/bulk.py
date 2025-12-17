@@ -9,6 +9,7 @@ import re
 import time
 import shutil
 import base64
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -26,6 +27,8 @@ from .models import (
     BoltzgenConfigRunResponse,
     BoltzgenEpitopeConfig,
     BoltzgenTargetConfig,
+    BoltzgenDiversityResponse,
+    BoltzgenDiversityPlot,
     BulkCsvRow,
     BulkDesignImportRequest,
     BulkPreviewRequest,
@@ -1381,6 +1384,184 @@ def _write_epitope_plots(
         print(msg)
 
     return saved
+
+
+def build_boltzgen_diversity_report() -> BoltzgenDiversityResponse:
+    """Aggregate BoltzGen metrics and render diversity plots."""
+
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    if not targets_dir.exists():
+        return BoltzgenDiversityResponse(message=f"Targets directory missing: {targets_dir}")
+
+    out_dir = _output_dir()
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    aggregate_rows: List[Dict[str, object]] = []
+    metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: {"rmsd": [], "iptm": []}))
+
+    for pdb_dir in sorted(targets_dir.iterdir()):
+        if not pdb_dir.is_dir():
+            continue
+        pdb_id = pdb_dir.name.upper()
+        design_root = pdb_dir / "designs" / "boltzgen"
+        if not design_root.exists():
+            continue
+        for ep_dir in sorted(design_root.iterdir()):
+            if not ep_dir.is_dir():
+                continue
+            epitope_name = ep_dir.name
+            for run_dir in sorted(ep_dir.iterdir()):
+                if not run_dir.is_dir():
+                    continue
+                metrics_path = run_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+                if not metrics_path.exists():
+                    continue
+                try:
+                    with metrics_path.open("r", encoding="utf-8-sig") as handle:
+                        reader = csv.DictReader(handle)
+                        for row in reader:
+                            record: Dict[str, object] = dict(row)
+                            record.setdefault("PDB_ID", pdb_id)
+                            record.setdefault("epitope_name", epitope_name)
+                            record.setdefault("datetime", run_dir.name)
+                            record.setdefault("source_path", str(metrics_path))
+                            aggregate_rows.append(record)
+
+                            rmsd_val = _safe_float(row.get("filter_rmsd") or row.get("native_rmsd"))
+                            iptm_val = _safe_float(
+                                row.get("design_to_target_iptm")
+                                or row.get("designfolding-design_to_target_iptm")
+                                or row.get("iptm")
+                            )
+                            if rmsd_val is not None:
+                                metrics[pdb_id][epitope_name]["rmsd"].append(rmsd_val)
+                            if iptm_val is not None:
+                                metrics[pdb_id][epitope_name]["iptm"].append(iptm_val)
+                except Exception:
+                    continue
+
+    if not aggregate_rows:
+        return BoltzgenDiversityResponse(message="No BoltzGen metrics found under targets directory.")
+
+    all_keys: List[str] = []
+    seen_keys: set[str] = set()
+    extra_cols = ["PDB_ID", "epitope_name", "datetime", "source_path"]
+    for col in extra_cols:
+        all_keys.append(col)
+        seen_keys.add(col)
+    for row in aggregate_rows:
+        for key in row.keys():
+            if key not in seen_keys:
+                all_keys.append(key)
+                seen_keys.add(key)
+
+    csv_path = out_dir / f"boltzgen_design_metrics_{timestamp}.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=all_keys)
+        writer.writeheader()
+        writer.writerows(aggregate_rows)
+
+    plot_entries: List[BoltzgenDiversityPlot] = []
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
+    except Exception:
+        return BoltzgenDiversityResponse(
+            csv_name=csv_path.name,
+            message="Matplotlib unavailable; generated CSV only.",
+        )
+
+    html_sections: List[str] = []
+    cmap = plt.get_cmap("tab20")
+
+    for pdb_id, ep_data in metrics.items():
+        ep_names = sorted(ep_data.keys())
+        if not ep_names:
+            continue
+        color_map = {
+            name: mcolors.to_hex(cmap(idx / max(1, len(ep_names)))) for idx, name in enumerate(ep_names)
+        }
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        rmsd_ax, iptm_ax = axes
+        has_rmsd = False
+        has_iptm = False
+        for name in ep_names:
+            rmsd_vals = [v for v in ep_data[name]["rmsd"] if v is not None]
+            iptm_vals = [v for v in ep_data[name]["iptm"] if v is not None]
+            if rmsd_vals:
+                rmsd_ax.hist(rmsd_vals, bins=min(20, max(6, len(rmsd_vals))), alpha=0.7, color=color_map[name], label=name)
+                has_rmsd = True
+            if iptm_vals:
+                iptm_ax.hist(iptm_vals, bins=min(20, max(6, len(iptm_vals))), alpha=0.7, color=color_map[name], label=name)
+                has_iptm = True
+        if has_rmsd:
+            rmsd_ax.set_title(f"{pdb_id} RMSD (by epitope)")
+            rmsd_ax.set_xlabel("RMSD (Å)")
+            rmsd_ax.set_ylabel("Designs")
+            rmsd_ax.legend()
+        else:
+            rmsd_ax.text(0.5, 0.5, "No RMSD data", ha="center", va="center")
+            rmsd_ax.axis("off")
+        if has_iptm:
+            iptm_ax.set_title(f"{pdb_id} ipTM (by epitope)")
+            iptm_ax.set_xlabel("ipTM")
+            iptm_ax.set_ylabel("Designs")
+            iptm_ax.legend()
+        else:
+            iptm_ax.text(0.5, 0.5, "No ipTM data", ha="center", va="center")
+            iptm_ax.axis("off")
+        plt.tight_layout()
+
+        png_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.png"
+        svg_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.svg"
+        fig.savefig(png_path, dpi=200)
+        fig.savefig(svg_path)
+        plt.close(fig)
+
+        plot_entries.append(
+            BoltzgenDiversityPlot(
+                pdb_id=pdb_id,
+                png_name=png_path.name,
+                svg_name=svg_path.name,
+                epitope_colors=color_map,
+            )
+        )
+
+        try:
+            encoded = base64.b64encode(png_path.read_bytes()).decode("ascii")
+            html_sections.append(
+                f"<section><h2>{pdb_id}</h2><p>Epitope colors: "
+                + ", ".join(f"<span style='color:{color_map[name]}'>{name}</span>" for name in ep_names)
+                + f"</p><img alt='{pdb_id} diversity' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+            )
+        except Exception:
+            pass
+
+    html_path = out_dir / f"boltzgen_diversity_{timestamp}.html"
+    html_content = "\n".join(
+        [
+            "<!doctype html>",
+            "<html><head><meta charset='utf-8'><title>BoltzGen binder diversity</title>",
+            "<style>body{font-family:Inter,system-ui,sans-serif;padding:20px;}h1{margin-top:0;}section{margin-bottom:24px;}img{border:1px solid #e2e8f0;border-radius:8px;padding:6px;background:#f8fafc;}</style>",
+            "</head><body>",
+            "<h1>BoltzGen binder diversity</h1>",
+            "<p>Aggregated metrics across targets and epitopes. PNG and SVG files are available alongside this HTML.",
+            "</p>",
+            *html_sections,
+            "</body></html>",
+        ]
+    )
+    html_path.write_text(html_content, encoding="utf-8")
+
+    return BoltzgenDiversityResponse(
+        csv_name=csv_path.name,
+        html_name=html_path.name,
+        plots=plot_entries,
+        message=f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets.",
+    )
 
 
 def run_bulk_workflow(
