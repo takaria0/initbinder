@@ -1506,11 +1506,32 @@ def build_boltzgen_diversity_report(
     )
     seen_metrics: set[str] = set()
     metrics_files: List[Dict[str, str]] = []
+    epitope_residues: Dict[str, Dict[str, str]] = defaultdict(dict)
 
     for pdb_dir in sorted(targets_dir.iterdir()):
         if not pdb_dir.is_dir():
             continue
         pdb_id = pdb_dir.name.upper()
+
+        # Collect epitope residue labels (shifted preferred) from epitope stats.
+        stats_root = pdb_dir / "configs"
+        for stats_file in stats_root.glob("epitope_*/epitope_stats.json"):
+            try:
+                print(f"[boltzgen-diversity] reading epitope stats: {stats_file}")
+                data = json.loads(stats_file.read_text())
+                dir_name = stats_file.parent.name
+                ep_name = str(data.get("epitope_name") or "").strip() or dir_name
+                residues = data.get("hotspots")
+                residues = [str(r).strip() for r in residues if str(r).strip()]
+                if residues:
+                    epitope_residues[pdb_id][ep_name] = ",".join(residues)
+                    if dir_name and dir_name != ep_name:
+                        epitope_residues[pdb_id][dir_name] = ",".join(residues)
+            except Exception as exc:
+                print(f"[boltzgen-diversity] failed to read epitope stats: {stats_file}")
+                print(exc)
+                traceback.print_exc()
+
         design_root = pdb_dir / "designs" / "boltzgen"
         if not design_root.exists():
             continue
@@ -1526,6 +1547,9 @@ def build_boltzgen_diversity_report(
                 if not second_dir.is_dir():
                     continue
                 metrics_path = second_dir / "final_ranked_designs" / "all_designs_metrics.csv"
+                # Handle single-level layout: designs/boltzgen/<epitope>/final_ranked_designs/all_designs_metrics.csv
+                if not metrics_path.exists() and second_dir.name == "final_ranked_designs":
+                    metrics_path = second_dir / "all_designs_metrics.csv"
                 if not metrics_path.exists():
                     continue
                 metrics_key = str(metrics_path.resolve())
@@ -1664,94 +1688,29 @@ def build_boltzgen_diversity_report(
         color_map = {
             name: mcolors.to_hex(cmap(idx / max(1, len(ep_names)))) for idx, name in enumerate(ep_names)
         }
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        rmsd_ax, iptm_ax = axes
-        has_rmsd = False
-        has_iptm = False
-        for name in ep_names:
-            rmsd_vals = [v for v in ep_data[name]["rmsd"] if v is not None]
-            iptm_vals = [v for v in ep_data[name]["iptm"] if v is not None]
-            if rmsd_vals:
-                rmsd_ax.hist(rmsd_vals, bins=min(20, max(6, len(rmsd_vals))), alpha=0.7, color=color_map[name], label=name)
-                has_rmsd = True
-            if iptm_vals:
-                iptm_ax.hist(iptm_vals, bins=min(20, max(6, len(iptm_vals))), alpha=0.7, color=color_map[name], label=name)
-                has_iptm = True
-        if has_rmsd:
-            rmsd_ax.set_title(f"{pdb_id} RMSD (by epitope)")
-            rmsd_ax.set_xlabel("RMSD (Å)")
-            rmsd_ax.set_ylabel("Designs")
-            rmsd_ax.legend()
-        else:
-            rmsd_ax.text(0.5, 0.5, "No RMSD data", ha="center", va="center")
-            rmsd_ax.axis("off")
-        if has_iptm:
-            iptm_ax.set_title(f"{pdb_id} ipTM (by epitope)")
-            iptm_ax.set_xlabel("ipTM")
-            iptm_ax.set_ylabel("Designs")
-            iptm_ax.legend()
-        else:
-            iptm_ax.text(0.5, 0.5, "No ipTM data", ha="center", va="center")
-            iptm_ax.axis("off")
-        plt.tight_layout()
-
-        png_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.png"
-        svg_path = out_dir / f"boltzgen_diversity_{pdb_id}_{timestamp}.svg"
-        saved_ok = True
-        try:
-            fig.savefig(png_path, dpi=200)
-            fig.savefig(svg_path)
-        except Exception as exc:
-            saved_ok = False
-            print(f"[boltzgen-diversity] failed to save plot for {pdb_id}: {png_path} / {svg_path}")
-            print(exc)
-            traceback.print_exc()
-        finally:
-            plt.close(fig)
-
-        if not saved_ok:
-            continue
-
-        plot_entries.append(
-            BoltzgenDiversityPlot(
-                pdb_id=pdb_id,
-                png_name=png_path.name,
-                png_path=str(png_path),
-                svg_name=svg_path.name,
-                svg_path=str(svg_path),
-                epitope_colors=color_map,
-            )
-        )
-
-        try:
-            encoded = base64.b64encode(png_path.read_bytes()).decode("ascii")
-            html_sections.append(
-                f"<section><h2>{pdb_id}</h2><p>Epitope colors: "
-                + ", ".join(f"<span style='color:{color_map[name]}'>{name}</span>" for name in ep_names)
-                + f"</p><img alt='{pdb_id} diversity' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
-            )
-        except Exception as exc:
-            print(f"[boltzgen-diversity] failed to embed plot into HTML: {png_path}")
-            print(exc)
-            traceback.print_exc()
-
         # Scatter: ipTM vs RMSD (colored by epitope).
         scatter_pairs = {
             name: [(x, y) for x, y in (ep_data[name].get("pairs") or []) if x is not None and y is not None]
             for name in ep_names
         }
+        design_counts = {name: len(scatter_pairs.get(name) or []) for name in ep_names}
         if any(scatter_pairs.values()):
             fig_scatter, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
             for name in ep_names:
                 pairs = scatter_pairs.get(name) or []
                 if not pairs:
                     continue
-                xs = [float(x) for x, _ in pairs]
-                ys = [float(y) for _, y in pairs]
-                ax.scatter(xs, ys, s=18, alpha=0.75, color=color_map[name], label=name, edgecolors="none")
-            ax.set_title(f"{pdb_id} ipTM vs RMSD (by epitope)")
-            ax.set_xlabel("ipTM")
-            ax.set_ylabel("RMSD (Å)")
+                xs = [float(y) for _, y in pairs]  # RMSD on x-axis
+                ys = [float(x) for x, _ in pairs]  # ipTM on y-axis
+                print(f'epitope_residues.get(pdb_id, ): {epitope_residues.get(pdb_id, {})}')
+                res_note = (epitope_residues.get(pdb_id, {}) or {}).get(name)
+                res_part = f"; {res_note}" if res_note else ""
+                label = f"{name} (n={design_counts.get(name, 0)}{res_part})"
+                ax.scatter(xs, ys, s=18, alpha=0.75, color=color_map[name], label=label, edgecolors="none")
+            ax.set_title(f"{pdb_id} RMSD vs ipTM (by epitope)")
+            ax.set_xlabel("RMSD (Å)")
+            ax.set_ylabel("ipTM")
+            ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=9)
             plt.tight_layout()
@@ -1789,6 +1748,72 @@ def build_boltzgen_diversity_report(
                     )
                 except Exception as exc:
                     print(f"[boltzgen-diversity] failed to embed scatter into HTML: {scatter_png}")
+                    print(exc)
+                    traceback.print_exc()
+
+        # Mean ipTM vs mean RMSD per epitope.
+        mean_points = []
+        for name in ep_names:
+            rmsd_vals = [float(v) for v in ep_data[name]["rmsd"] if v is not None]
+            iptm_vals = [float(v) for v in ep_data[name]["iptm"] if v is not None]
+            if rmsd_vals and iptm_vals:
+                mean_points.append((name, sum(rmsd_vals) / len(rmsd_vals), sum(iptm_vals) / len(iptm_vals)))
+        if mean_points:
+            fig_mean, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+            for name, mean_rmsd, mean_iptm in mean_points:
+                res_note = (epitope_residues.get(pdb_id, {}) or {}).get(name)
+                res_part = f"; {res_note}" if res_note else ""
+                label = f"{name} (n={design_counts.get(name, 0)}{res_part})"
+                ax.scatter(
+                    mean_rmsd,
+                    mean_iptm,
+                    s=70,
+                    alpha=0.9,
+                    color=color_map[name],
+                    label=label,
+                    edgecolors="none",
+                )
+            ax.set_title(f"{pdb_id} mean RMSD vs mean ipTM (per epitope)")
+            ax.set_xlabel("Mean RMSD (Å)")
+            ax.set_ylabel("Mean ipTM")
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=9)
+            plt.tight_layout()
+
+            mean_png = out_dir / f"boltzgen_mean_scatter_{pdb_id}_{timestamp}.png"
+            mean_svg = out_dir / f"boltzgen_mean_scatter_{pdb_id}_{timestamp}.svg"
+            saved_ok = True
+            try:
+                fig_mean.savefig(mean_png, dpi=200)
+                fig_mean.savefig(mean_svg)
+            except Exception as exc:
+                saved_ok = False
+                print(f"[boltzgen-diversity] failed to save mean scatter plot for {pdb_id}: {mean_png} / {mean_svg}")
+                print(exc)
+                traceback.print_exc()
+            finally:
+                plt.close(fig_mean)
+
+            if saved_ok:
+                plot_entries.append(
+                    BoltzgenDiversityPlot(
+                        pdb_id=f"{pdb_id} mean scatter",
+                        png_name=mean_png.name,
+                        png_path=str(mean_png),
+                        svg_name=mean_svg.name,
+                        svg_path=str(mean_svg),
+                        epitope_colors=color_map,
+                    )
+                )
+                try:
+                    encoded = base64.b64encode(mean_png.read_bytes()).decode("ascii")
+                    html_sections.append(
+                        f"<section><h2>{pdb_id} mean scatter</h2><p>Mean ipTM vs mean RMSD per epitope.</p>"
+                        + f"<img alt='{pdb_id} mean scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+                    )
+                except Exception as exc:
+                    print(f"[boltzgen-diversity] failed to embed mean scatter into HTML: {mean_png}")
                     print(exc)
                     traceback.print_exc()
 
