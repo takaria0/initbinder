@@ -161,6 +161,7 @@ def init_decide_prep(
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
 
+    job_store.append_log(job_id, f"[pipeline] init-target start for {pdb_id.upper()}")
     job_store.update(job_id, status=JobStatus.RUNNING, message="Initializing target")
     snapshot_dir = _snapshot_target_state(pdb_id)
     if snapshot_dir:
@@ -174,8 +175,13 @@ def init_decide_prep(
     if force:
         args.append("--force")
     run_manage_rfa("init-target", args, log=_log)
+    job_store.append_log(job_id, f"[pipeline] init-target complete for {pdb_id.upper()}")
 
     if run_decide:
+        job_store.append_log(
+            job_id,
+            f"[pipeline] decide-scope start for {pdb_id.upper()} (attempts={max(1, int(decide_scope_attempts or 1))})",
+        )
         job_store.update(job_id, message="Running decide-scope")
         decide_args_base = [pdb_id]
         if force:
@@ -201,6 +207,7 @@ def init_decide_prep(
             if cooldown > 0:
                 job_store.append_log(job_id, f"[decide-scope] cooling down {cooldown:.0f}s before attempt {attempt}")
                 time.sleep(cooldown)
+            job_store.append_log(job_id, f"[decide-scope] attempt {attempt} for {pdb_id.upper()}")
             try:
                 run_manage_rfa("decide-scope", decide_args, log=_log)
                 break
@@ -214,9 +221,11 @@ def init_decide_prep(
                 )
                 time.sleep(wait_next)
     if run_prep:
+        job_store.append_log(job_id, f"[pipeline] prep-target start for {pdb_id.upper()}")
         job_store.update(job_id, message="Running prep-target")
         # prep-target does not accept --force; init-target already cleared prep when force=True.
         run_manage_rfa("prep-target", [pdb_id], log=_log)
+        job_store.append_log(job_id, f"[pipeline] prep-target complete for {pdb_id.upper()}")
 
     if num_epitopes is not None:
         try:

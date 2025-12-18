@@ -367,12 +367,36 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
             )
         return entries
 
+    def _fallback_from_bundle() -> List[dict]:
+        candidates = [
+            target_dir / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle" / "bundle.json",
+        ]
+        for cand in candidates:
+            if not cand.exists():
+                continue
+            try:
+                data = json.loads(cand.read_text())
+            except Exception:
+                continue
+            entries: List[dict] = []
+            for ep in data.get("epitopes") or []:
+                parsed = _parse_epitope_metadata(ep, prep_dir)
+                if parsed:
+                    entries.append(parsed)
+            if entries:
+                return entries
+        return []
+
     if not meta_path.exists():
-        return _fallback_from_target_yaml()
+        bundle_eps = _fallback_from_bundle()
+        return bundle_eps if bundle_eps else _fallback_from_target_yaml()
     try:
         data = json.loads(meta_path.read_text())
     except Exception:
-        return _fallback_from_target_yaml()
+        bundle_eps = _fallback_from_bundle()
+        return bundle_eps if bundle_eps else _fallback_from_target_yaml()
 
     epitopes = data.get("epitopes") or []
     output = []
@@ -382,6 +406,9 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
             output.append(parsed)
     if output:
         return output
+    bundle_eps = _fallback_from_bundle()
+    if bundle_eps:
+        return bundle_eps
     return _fallback_from_target_yaml()
 
 

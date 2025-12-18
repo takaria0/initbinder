@@ -506,6 +506,7 @@ def prep_target(
     }
 
     tsv_rows: List[Dict[str, Any]] = []
+    meta_entries: List[Dict[str, Any]] = []
 
     for ep in epitopes:
         if not isinstance(ep, dict):
@@ -513,6 +514,7 @@ def prep_target(
         name = ep.get("name") or ep.get("display_name") or "Epitope"
         residues = ep.get("residues") or []
         spans = parse_residue_spans(residues)
+        mask_keys = _expand_spans_to_keys(spans)
 
         allowed: Optional[set[Tuple[str, int]]] = None
         if check and sasa_map:
@@ -525,8 +527,15 @@ def prep_target(
         hotspots = [_format_residue(ch, pos) for (ch, pos) in picks]
         ep["hotspots"] = hotspots
         ep["hotspot_count"] = len(hotspots)
+        ep["mask_residues"] = mask_keys
 
-        bundle_ep = {"name": str(name), "display_name": ep.get("display_name"), "residues": residues, "hotspots": hotspots}
+        bundle_ep = {
+            "name": str(name),
+            "display_name": ep.get("display_name"),
+            "residues": residues,
+            "mask_residues": mask_keys,
+            "hotspots": hotspots,
+        }
         bundle["epitopes"].append(bundle_ep)
 
         for (ch, pos) in picks:
@@ -537,17 +546,64 @@ def prep_target(
 
         # --- Legacy epitope exports (prep/epitope_*.json) for PyMOL and downstream tools ---
         san = _sanitize_epitope_name(str(name))
-        mask_keys = _expand_spans_to_keys(spans)
         mask_path = prep_dir / f"epitope_{san}.json"
         hotspot_path = prep_dir / f"epitope_{san}_hotspotsA.json"
         try:
             _write_json(mask_path, mask_keys)
             _write_json(hotspot_path, hotspots)
+            # Legacy default filename without suffix to aid older consumers.
+            try:
+                _write_json(prep_dir / f"epitope_{san}_hotspots.json", hotspots)
+            except Exception:
+                pass
             ep.setdefault("files", {})
             ep["files"]["mask_json"] = mask_path.name
             ep["files"]["hotspots_json"] = hotspot_path.name
         except Exception as exc:
             print(f"[warn] Failed to write legacy epitope exports for {name}: {exc}")
+
+        # Metadata entry (minimal but compatible with downstream expectations).
+        exposed_keys: List[str] = []
+        exposed_total_sasa: Optional[float] = None
+        if sasa_map:
+            total = 0.0
+            for key in mask_keys:
+                try:
+                    chain_part, pos_part = key.split(":", 1)
+                    pos_val = int(pos_part)
+                except Exception:
+                    continue
+                sasa_val = sasa_map.get((chain_part, pos_val))
+                if sasa_val is None:
+                    continue
+                exposed_keys.append(key)
+                total += float(sasa_val)
+            if exposed_keys:
+                exposed_total_sasa = total
+        declared_count = len(mask_keys) if mask_keys else len(spans)
+        exposed_fraction = None
+        if sasa_map and declared_count:
+            try:
+                exposed_fraction = round(len(exposed_keys) / declared_count, 3)
+            except Exception:
+                exposed_fraction = None
+        meta_entry: Dict[str, Any] = {
+            "name": str(name),
+            "display_name": ep.get("display_name"),
+            "residues": residues,
+            "mask_residues": mask_keys,
+            "hotspots": hotspots,
+            "declared_count": declared_count,
+            "exposed_count": len(exposed_keys) if sasa_map else None,
+            "exposed_fraction": exposed_fraction,
+            "hotspot_count": len(hotspots),
+            "files": {"mask_json": mask_path.name, "hotspots_json": hotspot_path.name},
+        }
+        if exposed_total_sasa is not None:
+            meta_entry["sasa"] = {"exposed_total": round(exposed_total_sasa, 3)}
+        if ep.get("note"):
+            meta_entry["notes"] = ep.get("note")
+        meta_entries.append(meta_entry)
 
     cfg.setdefault("prep_target", {})
     cfg["prep_target"].update(
@@ -566,6 +622,18 @@ def prep_target(
     except Exception as exc:
         print(f"[warn] Could not write target.yaml ({exc}). Continuing.")
 
+    meta_doc = {
+        "metadata_version": 3,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "pdb_id": pdb_id_u,
+        "config": {
+            "chains": cfg.get("target_chains") or cfg.get("chains") or [],
+            "mode": bundle["mode"],
+            "sasa_cutoff": bundle.get("sasa_cutoff"),
+        },
+        "epitopes": meta_entries,
+    }
+
     paths = _bundle_paths(tdir)
     _ENSURE_DIR(paths["reports_dir"])
     _ENSURE_DIR(paths["bundle_dir"])
@@ -579,6 +647,13 @@ def prep_target(
         print(f"[ok] Wrote hotspot bundle to {paths['reports_json']}")
     except Exception as exc:
         print(f"[warn] Failed to write hotspot bundle files ({exc}).")
+
+    try:
+        meta_path = prep_dir / "epitopes_metadata.json"
+        _write_json(meta_path, meta_doc)
+        print(f"[ok] Wrote epitope metadata -> {meta_path}")
+    except Exception as exc:
+        print(f"[warn] Failed to write epitope metadata ({exc}).")
 
     return bundle
 

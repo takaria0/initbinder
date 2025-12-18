@@ -8,6 +8,7 @@ import re
 import base64
 import datetime
 from pathlib import Path
+import yaml
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
@@ -248,8 +249,8 @@ def _resolve_snapshot_file(name: str) -> Path:
 def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
     prep_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper() / "prep"
     meta_path = prep_dir / "epitopes_metadata.json"
-    if not meta_path.exists():
-        return []
+    target_dir = prep_dir.parent
+
     def _as_int(value: object) -> int | None:
         try:
             return int(value)
@@ -262,64 +263,114 @@ def _load_epitope_meta(pdb_id: str) -> list[dict[str, object]]:
         except (TypeError, ValueError):
             return None
 
-    try:
-        data = json.loads(meta_path.read_text())
-    except Exception:
+    def _parse_entries(ep_list: list[object]) -> list[dict[str, object]]:
+        output: list[dict[str, object]] = []
+        for ep in ep_list or []:
+            if not isinstance(ep, dict):
+                continue
+            name = (ep.get("name") or ep.get("epitope_name") or "").strip()
+            if not name:
+                continue
+            hotspots = [str(h).strip() for h in ep.get("hotspots") or [] if str(h).strip()]
+            mask_residues: list[str] = []
+            for raw_mask in (ep.get("mask_residues"), ep.get("residues")):
+                if isinstance(raw_mask, list):
+                    mask_residues = [str(x).strip() for x in raw_mask if str(x).strip()]
+                    if mask_residues:
+                        break
+            if not mask_residues:
+                mask = ep.get("files", {}).get("mask_json") if isinstance(ep.get("files"), dict) else None
+                if mask:
+                    mask_path = prep_dir / mask
+                    if mask_path.exists():
+                        try:
+                            mask_data = json.loads(mask_path.read_text())
+                            if isinstance(mask_data, list):
+                                mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
+                        except Exception:
+                            mask_residues = []
+            chemistry = ep.get("chemistry") if isinstance(ep, dict) else {}
+            exposed_counts = chemistry.get("exposed_counts") if isinstance(chemistry, dict) else {}
+            fractions = chemistry.get("exposed_sasa_weighted_fractions") if isinstance(chemistry, dict) else {}
+            hydrophobic_count = _as_int(exposed_counts.get("hydrophobic") if isinstance(exposed_counts, dict) else None)
+            polar_count = _as_int(exposed_counts.get("polar") if isinstance(exposed_counts, dict) else None)
+            charged_count = _as_int(exposed_counts.get("charged") if isinstance(exposed_counts, dict) else None)
+            hydrophilic_count = None
+            if polar_count is not None or charged_count is not None:
+                hydrophilic_count = (polar_count or 0) + (charged_count or 0)
+            hydrophobicity = _as_float(fractions.get("hydrophobic") if isinstance(fractions, dict) else None)
+            if hydrophobicity is None and hydrophobic_count is not None and hydrophilic_count is not None:
+                total = hydrophobic_count + hydrophilic_count
+                if total > 0:
+                    hydrophobicity = round(hydrophobic_count / total, 3)
+            sasa_block = ep.get("sasa") if isinstance(ep, dict) else {}
+            rsa_block = ep.get("rsa") if isinstance(ep, dict) else {}
+            metrics = {
+                "residue_count": _as_int(ep.get("declared_count") if isinstance(ep, dict) else None),
+                "exposed_count": _as_int(ep.get("exposed_count") if isinstance(ep, dict) else None),
+                "exposed_fraction": _as_float(ep.get("exposed_fraction") if isinstance(ep, dict) else None),
+                "hydrophobic_count": hydrophobic_count,
+                "hydrophilic_count": hydrophilic_count,
+                "hydrophobicity": hydrophobicity,
+                "exposed_surface": _as_float(sasa_block.get("exposed_total") if isinstance(sasa_block, dict) else None),
+                "extrusion": _as_float(rsa_block.get("mean") if isinstance(rsa_block, dict) else None),
+                "rsa_high_fraction": _as_float(rsa_block.get("frac_ge_0.2") if isinstance(rsa_block, dict) else None),
+            }
+            if metrics.get("residue_count") is None and mask_residues:
+                metrics["residue_count"] = len(mask_residues)
+            output.append(
+                {
+                    "name": name,
+                    "display_name": ep.get("display_name"),
+                    "hotspots": hotspots,
+                    "mask_residues": mask_residues,
+                    "metrics": metrics,
+                }
+            )
+        return output
+
+    def _load_from_meta() -> list[dict[str, object]]:
+        if not meta_path.exists():
+            return []
+        try:
+            data = json.loads(meta_path.read_text())
+        except Exception:
+            return []
+        return _parse_entries(data.get("epitopes") or [])
+
+    def _load_from_bundle() -> list[dict[str, object]]:
+        candidates = [
+            target_dir / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle" / "bundle.json",
+        ]
+        for cand in candidates:
+            if not cand.exists():
+                continue
+            try:
+                data = json.loads(cand.read_text())
+            except Exception:
+                continue
+            parsed = _parse_entries(data.get("epitopes") or [])
+            if parsed:
+                return parsed
         return []
-    epitopes = data.get("epitopes") or []
-    output: list[dict[str, object]] = []
-    for ep in epitopes:
-        if not isinstance(ep, dict):
-            continue
-        name = (ep.get("name") or "").strip()
-        if not name:
-            continue
-        hotspots = [str(h).strip() for h in ep.get("hotspots") or [] if str(h).strip()]
-        mask_residues: list[str] = []
-        mask = ep.get("files", {}).get("mask_json") if isinstance(ep.get("files"), dict) else None
-        if mask:
-            mask_path = prep_dir / mask
-            if mask_path.exists():
-                try:
-                    mask_data = json.loads(mask_path.read_text())
-                    if isinstance(mask_data, list):
-                        mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
-                except Exception:
-                    mask_residues = []
-        chemistry = ep.get("chemistry") if isinstance(ep, dict) else {}
-        exposed_counts = chemistry.get("exposed_counts") if isinstance(chemistry, dict) else {}
-        fractions = chemistry.get("exposed_sasa_weighted_fractions") if isinstance(chemistry, dict) else {}
-        hydrophobic_count = _as_int(exposed_counts.get("hydrophobic") if isinstance(exposed_counts, dict) else None)
-        polar_count = _as_int(exposed_counts.get("polar") if isinstance(exposed_counts, dict) else None)
-        charged_count = _as_int(exposed_counts.get("charged") if isinstance(exposed_counts, dict) else None)
-        hydrophilic_count = None
-        if polar_count is not None or charged_count is not None:
-            hydrophilic_count = (polar_count or 0) + (charged_count or 0)
-        hydrophobicity = _as_float(fractions.get("hydrophobic") if isinstance(fractions, dict) else None)
-        if hydrophobicity is None and hydrophobic_count is not None and hydrophilic_count is not None:
-            total = hydrophobic_count + hydrophilic_count
-            if total > 0:
-                hydrophobicity = round(hydrophobic_count / total, 3)
-        sasa_block = ep.get("sasa") if isinstance(ep, dict) else {}
-        rsa_block = ep.get("rsa") if isinstance(ep, dict) else {}
-        metrics = {
-            "residue_count": _as_int(ep.get("declared_count") if isinstance(ep, dict) else None),
-            "exposed_count": _as_int(ep.get("exposed_count") if isinstance(ep, dict) else None),
-            "exposed_fraction": _as_float(ep.get("exposed_fraction") if isinstance(ep, dict) else None),
-            "hydrophobic_count": hydrophobic_count,
-            "hydrophilic_count": hydrophilic_count,
-            "hydrophobicity": hydrophobicity,
-            "exposed_surface": _as_float(sasa_block.get("exposed_total") if isinstance(sasa_block, dict) else None),
-            "extrusion": _as_float(rsa_block.get("mean") if isinstance(rsa_block, dict) else None),
-            "rsa_high_fraction": _as_float(rsa_block.get("frac_ge_0.2") if isinstance(rsa_block, dict) else None),
-        }
-        output.append({
-            "name": name,
-            "hotspots": hotspots,
-            "mask_residues": mask_residues,
-            "metrics": metrics,
-        })
-    return output
+
+    def _load_from_target_yaml() -> list[dict[str, object]]:
+        yml_path = target_dir / "target.yaml"
+        if not yml_path.exists():
+            return []
+        try:
+            data = yaml.safe_load(yml_path.read_text()) or {}
+        except Exception:
+            return []
+        return _parse_entries(data.get("epitopes") or [])
+
+    for loader in (_load_from_meta, _load_from_bundle, _load_from_target_yaml):
+        result = loader()
+        if result:
+            return result
+    return []
 
 
 def _snapshot_metadata(items: list[str]) -> list[dict]:
