@@ -246,7 +246,7 @@ def _cache_dir(subfolder: str) -> Path:
     return target
 
 
-def launch_hotspots(pdb_id: str, *, launch: bool = True) -> tuple[Optional[Path], bool]:
+def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | None = None) -> tuple[Optional[Path], bool]:
     _require_pymol_utils()
     _ensure_env()
     cfg = load_config()
@@ -269,7 +269,8 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True) -> tuple[Optional[Path]
     if structure_path is None:
         raise PyMolLaunchError("Structure file not found; run prep-target to create a raw/prepared structure")
 
-    bundle = export_hotspot_bundle(pdb_id)
+    ep_filter = [epitope_name] if epitope_name else None
+    bundle = export_hotspot_bundle(pdb_id, ep_filter)
     if bundle is None:
         if os.getenv("RFA_PYMOL_MODE", "bundle").lower() == "remote":
             return None, launch

@@ -161,6 +161,26 @@ def init_decide_prep(
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
 
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = (targets_dir / pdb_id.upper()).resolve()
+    target_yaml = target_dir / "target.yaml"
+
+    if not force and target_yaml.exists():
+        try:
+            existing = yaml.safe_load(target_yaml.read_text()) or {}
+        except Exception:
+            existing = {}
+        eps = existing.get("epitopes") or []
+        if any(isinstance(ep, dict) and ep.get("name") for ep in eps):
+            msg = (
+                f"[pipeline] target {pdb_id.upper()} already has epitopes; "
+                "skipping init/decide/prep (use --force to regenerate)."
+            )
+            job_store.append_log(job_id, msg)
+            job_store.update(job_id, status=JobStatus.SUCCESS, message="Target ready (existing epitopes found)")
+            return
+
     job_store.append_log(job_id, f"[pipeline] init-target start for {pdb_id.upper()}")
     job_store.update(job_id, status=JobStatus.RUNNING, message="Initializing target")
     snapshot_dir = _snapshot_target_state(pdb_id)

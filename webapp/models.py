@@ -650,6 +650,7 @@ class GoldenGateResponse(BaseModel):
 class PyMolHotspotRequest(BaseModel):
     launch: bool = Field(True, description="Invoke PyMOL after bundle generation")
     bundle_only: bool = Field(False, description="Skip launching PyMOL; just return bundle path")
+    epitope_name: Optional[str] = Field(None, description="Optional epitope label to highlight")
 
 
 class PyMolHotspotResponse(BaseModel):

@@ -1040,6 +1040,38 @@ async function launchBinderPymol(index) {
   }
 }
 
+async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
+  if (!pdbId) {
+    showAlert('Missing PDB ID for PyMOL.');
+    return;
+  }
+  if (triggerBtn) triggerBtn.disabled = true;
+  try {
+    const payload = {
+      launch: true,
+      bundle_only: false,
+      epitope_name: epitopeName || null,
+    };
+    const res = await fetch(`/api/targets/${encodeURIComponent(pdbId)}/pymol/hotspots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `PyMOL launch failed (${res.status})`);
+    }
+    const body = await res.json();
+    const scopeText = epitopeName ? `epitope ${epitopeName}` : 'all epitopes';
+    showAlert(`PyMOL hotspot bundle ready (${pdbId} · ${scopeText})`, false);
+    appendLog(body.message || `PyMOL bundle ready for ${pdbId}`);
+  } catch (err) {
+    showAlert(err.message || 'Failed to launch PyMOL.');
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
 async function loadSnapshotMetadata(names) {
   if (!names || !names.length) {
     renderSnapshots([]);
@@ -1140,6 +1172,14 @@ function renderBoltzConfigs() {
     manualBtn.dataset.scope = 'target';
     cmdCell.appendChild(manualBtn);
 
+    const pymolBtn = document.createElement('button');
+    pymolBtn.type = 'button';
+    pymolBtn.textContent = 'PyMOL';
+    pymolBtn.className = 'ghost';
+    pymolBtn.dataset.action = 'pymol-target';
+    pymolBtn.dataset.pdbId = target.pdb_id || '';
+    cmdCell.appendChild(pymolBtn);
+
     tr.appendChild(cmdCell);
     tbody.appendChild(tr);
 
@@ -1207,6 +1247,15 @@ function renderBoltzConfigs() {
       epManual.dataset.configPath = cfg.config_path || '';
       epManual.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
       epCmd.appendChild(epManual);
+
+      const epPymol = document.createElement('button');
+      epPymol.type = 'button';
+      epPymol.textContent = 'PyMOL';
+      epPymol.className = 'ghost';
+      epPymol.dataset.action = 'pymol-epitope';
+      epPymol.dataset.pdbId = target.pdb_id || '';
+      epPymol.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
+      epCmd.appendChild(epPymol);
 
       epRow.appendChild(epCmd);
       tbody.appendChild(epRow);
@@ -1712,6 +1761,10 @@ function handleBoltzTableClick(event) {
     showBoltzLog(btn.dataset.jobId, btn.dataset.logTitle || 'Job log');
   } else if (action === 'show-run') {
     showRunCommand(pdbId, configPath, btn.dataset.epitopeName || null);
+  } else if (action === 'pymol-target') {
+    launchBoltzPymol(pdbId, null, btn);
+  } else if (action === 'pymol-epitope') {
+    launchBoltzPymol(pdbId, btn.dataset.epitopeName || null, btn);
   }
 }
 

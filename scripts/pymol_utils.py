@@ -788,7 +788,7 @@ def _send_hotspots_to_remote(
         traceback.print_exc()
         return False
 
-def export_hotspot_bundle(pdb_id: str) -> Path | None:
+def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = None) -> Path | None:
     """
     Create a visualisation bundle for the hotspot selections of ``pdb_id``.
     The function reads the prepared PDB and the epitope/hotspot JSON files in
@@ -866,6 +866,19 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
     if not epitopes:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
+
+    whitelist: Optional[set[str]] = None
+    if epitope_names:
+        whitelist = {str(name).strip().lower() for name in epitope_names if str(name).strip()}
+    if whitelist:
+        filtered: Dict[str, Dict[str, List[str]]] = {
+            name: data for name, data in epitopes.items() if name.strip().lower() in whitelist
+        }
+        if filtered:
+            epitopes = filtered
+            print(f"[pymol_utils] Filtering hotspot bundle to epitopes: {', '.join(sorted(filtered))}")
+        else:
+            print(f"[pymol_utils] Warning: epitope filter {sorted(whitelist)} yielded no matches; exporting all.")
 
     vendor_range_label, expression_regions, chain_meta = _collect_expression_regions(pdb_id_u)
     target_chain_ids = chain_meta.get("target", []) if chain_meta else []

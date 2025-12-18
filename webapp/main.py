@@ -1593,7 +1593,11 @@ async def api_dms_library_pymol(result_id: str, payload: PyMolDMSRequest) -> PyM
 @app.post("/api/targets/{pdb_id}/pymol/hotspots", response_model=PyMolHotspotResponse)
 async def api_pymol_hotspots(pdb_id: str, payload: PyMolHotspotRequest) -> PyMolHotspotResponse:
     try:
-        bundle_path, launched = launch_hotspots(pdb_id, launch=payload.launch and not payload.bundle_only)
+        bundle_path, launched = launch_hotspots(
+            pdb_id,
+            launch=payload.launch and not payload.bundle_only,
+            epitope_name=payload.epitope_name,
+        )
     except PyMolLaunchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return PyMolHotspotResponse(
