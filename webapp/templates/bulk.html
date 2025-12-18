@@ -167,6 +167,23 @@
                   <div id="boltz-binders-csv" class="help-text" hidden></div>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:140px;">
+                    <span style="color:#0f172a;">Filter PDB</span>
+                    <input type="text" id="binder-filter-pdb" placeholder="e.g. 4BQD" style="min-width:120px;">
+                  </label>
+                  <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:160px;">
+                    <span style="color:#0f172a;">Filter epitope</span>
+                    <input type="text" id="binder-filter-epitope" placeholder="e.g. epitope_1" style="min-width:140px;">
+                  </label>
+                  <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:120px;">
+                    <span style="color:#0f172a;">Order by</span>
+                    <select id="binder-order-by" style="min-width:120px;">
+                      <option value="">Original</option>
+                      <option value="iptm">ipTM</option>
+                      <option value="rmsd">RMSD</option>
+                      <option value="rank">Rank</option>
+                    </select>
+                  </label>
                   <button type="button" id="boltz-binders-download" class="ghost">Download CSV</button>
                   <button type="button" id="boltz-binders-refresh" class="ghost">Refresh</button>
                 </div>

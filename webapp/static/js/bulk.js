@@ -74,6 +74,9 @@ const el = {
   binderDownload: document.querySelector('#boltz-binders-download'),
   binderPagination: document.querySelector('#boltz-binders-pagination'),
   binderPageLabel: document.querySelector('#boltz-binders-page-label'),
+  binderFilterPdb: document.querySelector('#binder-filter-pdb'),
+  binderFilterEpitope: document.querySelector('#binder-filter-epitope'),
+  binderOrderBy: document.querySelector('#binder-order-by'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
@@ -830,6 +833,44 @@ function renderBinderRows(rows = []) {
   if (!el.binderTable || !el.binderPanel) return;
   const tbody = el.binderTable;
   tbody.innerHTML = '';
+  const pdbFilter = (el.binderFilterPdb?.value || '').trim().toUpperCase();
+  const epFilter = (el.binderFilterEpitope?.value || '').trim().toLowerCase();
+  const orderBy = (el.binderOrderBy?.value || '').trim().toLowerCase();
+
+  const filtered = rows.filter((row) => {
+    const pdb = (row.pdb_id || '').toUpperCase();
+    const ep = (row.epitope || '').toLowerCase();
+    if (pdbFilter && !pdb.includes(pdbFilter)) return false;
+    if (epFilter && !ep.includes(epFilter)) return false;
+    return true;
+  });
+
+  const sorted = [...filtered];
+  const numeric = (val) => {
+    const num = Number(val);
+    return Number.isFinite(num) ? num : null;
+  };
+  if (orderBy === 'iptm') {
+    sorted.sort((a, b) => (numeric(b.iptm) ?? -Infinity) - (numeric(a.iptm) ?? -Infinity));
+  } else if (orderBy === 'rmsd') {
+    sorted.sort((a, b) => {
+      const av = numeric(a.rmsd);
+      const bv = numeric(b.rmsd);
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return av - bv;
+    });
+  } else if (orderBy === 'rank') {
+    sorted.sort((a, b) => {
+      const av = numeric(a.rank);
+      const bv = numeric(b.rank);
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return av - bv;
+    });
+  }
 
   const noteRow = () => {
     const tr = document.createElement('tr');
@@ -841,10 +882,10 @@ function renderBinderRows(rows = []) {
     return tr;
   };
 
-  if (!rows.length) {
+  if (!sorted.length) {
     tbody.appendChild(noteRow());
   } else {
-    rows.forEach((row, idx) => {
+    sorted.forEach((row, idx) => {
       const tr = document.createElement('tr');
       const values = [
         row.pdb_id || '—',
@@ -889,7 +930,7 @@ function renderBinderRows(rows = []) {
 
   if (el.binderSummary) {
     const msg = state.binderMessage || '';
-    const summaryText = msg || `Showing ${rows.length} of ${state.binderTotal || rows.length} binders`;
+    const summaryText = msg || `Showing ${sorted.length} of ${state.binderTotal || rows.length} binders`;
     el.binderSummary.textContent = summaryText;
     el.binderSummary.hidden = false;
   }
@@ -2234,6 +2275,12 @@ function init() {
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
+  [el.binderFilterPdb, el.binderFilterEpitope, el.binderOrderBy].forEach((input) => {
+    if (input) {
+      input.addEventListener('input', () => renderBinderRows(state.binderRows || []));
+      input.addEventListener('change', () => renderBinderRows(state.binderRows || []));
+    }
+  });
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));

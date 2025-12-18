@@ -788,6 +788,10 @@ def _send_hotspots_to_remote(
         traceback.print_exc()
         return False
 
+def _norm_label(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
 def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = None) -> Path | None:
     """
     Create a visualisation bundle for the hotspot selections of ``pdb_id``.
@@ -869,11 +873,14 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
 
     whitelist: Optional[set[str]] = None
     if epitope_names:
-        whitelist = {str(name).strip().lower() for name in epitope_names if str(name).strip()}
+        whitelist = {_norm_label(str(name)) for name in epitope_names if str(name).strip()}
     if whitelist:
-        filtered: Dict[str, Dict[str, List[str]]] = {
-            name: data for name, data in epitopes.items() if name.strip().lower() in whitelist
-        }
+        filtered: Dict[str, Dict[str, List[str]]] = {}
+        for name, data in epitopes.items():
+            norm = _norm_label(name)
+            alt = _norm_label(name.replace("_", " ").replace("-", ""))
+            if norm in whitelist or alt in whitelist:
+                filtered[name] = data
         if filtered:
             epitopes = filtered
             print(f"[pymol_utils] Filtering hotspot bundle to epitopes: {', '.join(sorted(filtered))}")
