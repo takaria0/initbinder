@@ -503,6 +503,41 @@ function renderSnapshots(meta = []) {
   el.snapshotSection.hidden = false;
 }
 
+async function hydrateSnapshotsFromCache(options = {}) {
+  const {
+    pdbIds = [],
+    limit = 12,
+    force = false,
+    silent = false,
+  } = options;
+  if (!el.snapshotGrid || !el.snapshotSection) return;
+  if (!force) {
+    if (state.jobPoller) return;
+    if (el.snapshotGrid.childElementCount > 0) return;
+  }
+  const params = new URLSearchParams();
+  const ids = Array.isArray(pdbIds)
+    ? Array.from(new Set(pdbIds.map((id) => (id || '').trim().toUpperCase()).filter(Boolean)))
+    : [];
+  if (ids.length) params.append('pdb_ids', ids.join(','));
+  const capped = Number(limit);
+  params.append('limit', String(Number.isFinite(capped) && capped > 0 ? Math.min(200, Math.round(capped)) : 12));
+  try {
+    const res = await fetch(`/api/pymol/snapshots/latest?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) {
+      if (!silent) appendLog(`Cached snapshot fetch failed (${res.status})`);
+      return;
+    }
+    const data = await res.json();
+    renderSnapshots(Array.isArray(data) ? data : []);
+    if (!silent && Array.isArray(data) && data.length) {
+      appendLog(`Loaded ${data.length} cached hotspot snapshot${data.length === 1 ? '' : 's'}.`);
+    }
+  } catch (err) {
+    if (!silent) appendLog(`Cached snapshot fetch error: ${err.message || err}`);
+  }
+}
+
 function renderEpitopePlots(items = []) {
   if (!el.epitopePlotGrid || !el.epitopePlotSection) return;
   el.epitopePlotGrid.innerHTML = '';
@@ -1771,6 +1806,19 @@ async function previewBulkCsv(options = {}) {
     renderBulkPreview(state.bulkPreviewRows, body.message || '');
     loadBoltzConfigs({ silent: true });
     loadBinderTable({ page: 1, silent: true });
+    const previewPdbIds = Array.from(
+      new Set(
+        state.bulkPreviewRows
+          .map((row) => (row.resolved_pdb_id || row.pdb_id || '').trim().toUpperCase())
+          .filter(Boolean),
+      ),
+    );
+    hydrateSnapshotsFromCache({
+      pdbIds: previewPdbIds,
+      limit: Math.max(12, Math.max(previewPdbIds.length, 1) * 3),
+      force: true,
+      silent: true,
+    });
     setBadge(el.bulkStatus, body.message || 'Preview ready', 'rgba(134, 239, 172, 0.25)');
     if (!silent) showAlert(body.message || 'Preview ready.', false);
   } catch (err) {
@@ -2145,6 +2193,7 @@ function init() {
   });
 
   refreshDiversity({ silent: true });
+  hydrateSnapshotsFromCache({ silent: true });
 }
 
 document.addEventListener('DOMContentLoaded', init);

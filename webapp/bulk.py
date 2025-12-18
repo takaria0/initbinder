@@ -1733,7 +1733,7 @@ def build_boltzgen_diversity_report(
                     continue
                 xs = [float(y) for _, y in pairs]  # RMSD on x-axis
                 ys = [float(x) for x, _ in pairs]  # ipTM on y-axis
-                print(f'epitope_residues.get(pdb_id, ): {epitope_residues.get(pdb_id, {})}')
+                # print(f'epitope_residues.get(pdb_id, ): {epitope_residues.get(pdb_id, {})}')
                 res_note = (epitope_residues.get(pdb_id, {}) or {}).get(name)
                 res_part = f"; {res_note}" if res_note else ""
                 label = f"{name} (n={design_counts.get(name, 0)}{res_part})"

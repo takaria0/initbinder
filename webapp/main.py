@@ -213,6 +213,27 @@ def _snapshot_dir() -> Path:
     return path
 
 
+def _recent_snapshot_names(pdb_filters: list[str] | None = None, limit: int = 20) -> list[str]:
+    """Return the most recent hotspot_snapshot.png files under the cache directory."""
+    base = _snapshot_dir()
+    filters = {p.strip().upper() for p in (pdb_filters or []) if str(p).strip()}
+    cap = max(1, min(200, int(limit)))
+    candidates = sorted(base.glob("*/hotspot_snapshot.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    names: list[str] = []
+    for path in candidates:
+        try:
+            rel = path.relative_to(base)
+        except Exception:
+            continue
+        prefix = rel.parts[0].split("_")[0].upper() if rel.parts else ""
+        if filters and prefix not in filters:
+            continue
+        names.append(rel.as_posix())
+        if len(names) >= cap:
+            break
+    return names
+
+
 def _resolve_snapshot_file(name: str) -> Path:
     base = _snapshot_dir().resolve()
     rel = Path(name)
@@ -895,6 +916,18 @@ async def api_boltzgen_binder_pymol(
 async def api_pymol_snapshot(name: str) -> FileResponse:
     path = _resolve_snapshot_file(name)
     return FileResponse(path, filename=path.name, media_type="image/png")
+
+
+@app.get("/api/pymol/snapshots/latest")
+async def api_pymol_snapshot_latest(
+    limit: int = Query(12, ge=1, le=200),
+    pdb_ids: str | None = Query(None, description="Optional comma-separated PDB IDs to filter snapshots"),
+) -> list[dict]:
+    filters = [p.strip().upper() for p in pdb_ids.split(",")] if pdb_ids else []
+    names = _recent_snapshot_names(filters, limit=limit)
+    if not names:
+        return []
+    return _snapshot_metadata(names)
 
 
 @app.get("/api/pymol/snapshots/metadata")
