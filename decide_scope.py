@@ -1,10 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, json, time, textwrap, shutil, subprocess, requests, yaml
+"""
+LLM-assisted target scoping (refactored).
+This version preserves the original behavior:
+  - Retries on LLM API failures (incl. 429) with backoff
+  - Retries when the model returns no YAML / invalid YAML-schema / wrong epitope count,
+    by injecting stronger retry guidance into the next prompt attempt
+  - Maintains stronger PDB numbering instructions
+  - Keeps numbering_debug keys backward compatible (uses 'insertion_examples')
+"""
+
+import os
+import re
+import json
+import time
+import textwrap
+import requests
+import yaml
 from pathlib import Path
 from jsonschema import validate
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Callable
 
 # ====== project utils/env ======
 from utils import (
@@ -36,8 +52,7 @@ print(f"[info] Using HF cache dir: {HF_ROOT}")
 # =============================================================================
 # Helpers for entry.json (RCSB) and chain mapping
 # =============================================================================
-# --- 追加: エピトープ名のサニタイズ適用ヘルパ ---
-import re
+
 def sanitize_label(s: str, maxlen: int = 120) -> str:
     if s is None:
         return "NA"
@@ -217,19 +232,23 @@ def _subtract_ranges(a: List[Tuple[int, int]], b: List[Tuple[int, int]]) -> List
     if not a: return []
     if not b: return a[:]
     b = _merge_ranges(b)
-    out, i = [], 0
-    for s,e in a:
+    out = []
+    for s, e in a:
         cur_s = s
-        for bs,be in b:
-            if be < cur_s or bs > e: continue
-            if bs > cur_s: out.append((cur_s, min(e, bs-1)))
-            cur_s = max(cur_s, be+1)
-            if cur_s > e: break
-        if cur_s <= e: out.append((cur_s, e))
+        for bs, be in b:
+            if be < cur_s or bs > e:
+                continue
+            if bs > cur_s:
+                out.append((cur_s, min(e, bs - 1)))
+            cur_s = max(cur_s, be + 1)
+            if cur_s > e:
+                break
+        if cur_s <= e:
+            out.append((cur_s, e))
     return out
 
-def _ranges_to_str(ranges: List[Tuple[int,int]]) -> str:
-    return ", ".join(f"{s}-{e}" for s,e in ranges) or "∅"
+def _ranges_to_str(ranges: List[Tuple[int, int]]) -> str:
+    return ", ".join(f"{s}-{e}" for s, e in ranges) or "∅"
 
 def fetch_uniprot_entry(accession: str) -> Optional[dict]:
     try:
@@ -251,19 +270,29 @@ def parse_uniprot(entry: dict) -> dict:
         "function": next((c["texts"][0]["value"] for c in entry.get("comments", []) if c.get("commentType") == "FUNCTION"), "N/A"),
         "features_raw": [],
         "segments": {"extracellular": [], "transmembrane": [], "signal_peptide": []},
-        "epitope_allowed": []
+        "epitope_allowed": [],
     }
     topo_ext, tm, sp = [], [], []
     for f in entry.get("features", []):
-        ftype, desc, rng = (f.get("type", "")).upper().replace(" ", "_"), f.get("description", ""), _loc_to_range(f.get("location", {}))
-        if rng: out["features_raw"].append(f"{ftype.title().replace('_',' ')} ({desc}): {rng[0]}-{rng[1]}")
-        else: out["features_raw"].append(f"{ftype.title().replace('_',' ')}" + (f" ({desc})" if desc else ""))
-        if not rng: continue
-        if ftype in {"TOPOLOGICAL_DOMAIN", "REGION"} and any(k in desc.lower() for k in ["extracellular", "outside", "luminal"]): topo_ext.append(rng)
-        elif ftype == "TRANSMEMBRANE": tm.append(rng)
-        elif ftype == "SIGNAL_PEPTIDE": sp.append(rng)
-    
-    out["segments"]["extracellular"], out["segments"]["transmembrane"], out["segments"]["signal_peptide"] = _merge_ranges(topo_ext), _merge_ranges(tm), _merge_ranges(sp)
+        ftype = (f.get("type", "")).upper().replace(" ", "_")
+        desc = f.get("description", "")
+        rng = _loc_to_range(f.get("location", {}))
+        if rng:
+            out["features_raw"].append(f"{ftype.title().replace('_',' ')} ({desc}): {rng[0]}-{rng[1]}")
+        else:
+            out["features_raw"].append(f"{ftype.title().replace('_',' ')}" + (f" ({desc})" if desc else ""))
+        if not rng:
+            continue
+        if ftype in {"TOPOLOGICAL_DOMAIN", "REGION"} and any(k in desc.lower() for k in ["extracellular", "outside", "luminal"]):
+            topo_ext.append(rng)
+        elif ftype == "TRANSMEMBRANE":
+            tm.append(rng)
+        elif ftype == "SIGNAL_PEPTIDE":
+            sp.append(rng)
+
+    out["segments"]["extracellular"] = _merge_ranges(topo_ext)
+    out["segments"]["transmembrane"] = _merge_ranges(tm)
+    out["segments"]["signal_peptide"] = _merge_ranges(sp)
     out["epitope_allowed"] = _subtract_ranges(out["segments"]["extracellular"], _merge_ranges(tm + sp))
     return out
 
@@ -271,30 +300,52 @@ def fetch_uniprot_bundle_for_pdb(pdb_id: str, entry_json: dict, max_accessions: 
     accs = list_accessions_from_entry(entry_json)
     if not accs:
         try:
-            map_req = requests.post(UNIPROT_IDMAPPING_RUN_API, data={"from": "PDB", "to": "UniProtKB", "ids": [pdb_id]}, timeout=30)
+            map_req = requests.post(
+                UNIPROT_IDMAPPING_RUN_API,
+                data={"from": "PDB", "to": "UniProtKB", "ids": [pdb_id]},
+                timeout=30,
+            )
             map_req.raise_for_status()
             job_id = map_req.json()["jobId"]
             while True:
                 status_req = requests.get(UNIPROT_IDMAPPING_STATUS_API.format(job_id=job_id), timeout=30)
                 status_req.raise_for_status()
                 status_data = status_req.json()
-                if status_data.get("results") or status_data.get("jobStatus") != "RUNNING": break
+                if status_data.get("results") or status_data.get("jobStatus") != "RUNNING":
+                    break
                 time.sleep(2)
-            accs.extend(r["to"]["primaryAccession"] for r in status_data.get("results", []) if r.get("to", {}).get("primaryAccession"))
-        except requests.exceptions.RequestException as e: print(f"[warn] UniProt mapping failed: {e}")
+            accs.extend(
+                r["to"]["primaryAccession"]
+                for r in status_data.get("results", [])
+                if r.get("to", {}).get("primaryAccession")
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"[warn] UniProt mapping failed: {e}")
+
     accs = _unique_order(accs)[:max_accessions]
     return [parse_uniprot(up) for acc in accs if (up := fetch_uniprot_entry(acc))]
 
 def choose_target_accession(bundle: List[dict], prefer_human: bool = True, prefer_reviewed: bool = True) -> Optional[str]:
-    if not bundle: return None
+    if not bundle:
+        return None
+
     def score(x):
         sc = 0
-        if x.get("epitope_allowed"): sc += 2
-        if prefer_reviewed and x.get("reviewed"): sc += 2
-        if prefer_human and "homo sapiens" in x.get("organism","").lower(): sc += 1
-        if not x.get("epitope_allowed") and x["segments"]["transmembrane"]: sc -= 3
+        if x.get("epitope_allowed"):
+            sc += 2
+        if prefer_reviewed and x.get("reviewed"):
+            sc += 2
+        if prefer_human and "homo sapiens" in x.get("organism", "").lower():
+            sc += 1
+        if not x.get("epitope_allowed") and x["segments"]["transmembrane"]:
+            sc -= 3
         return sc
-    ranked = sorted(bundle, key=lambda d: (score(d), len(d.get("epitope_allowed", [])), -len(d.get("segments",{}).get("transmembrane", []))), reverse=True)
+
+    ranked = sorted(
+        bundle,
+        key=lambda d: (score(d), len(d.get("epitope_allowed", [])), -len(d.get("segments", {}).get("transmembrane", []))),
+        reverse=True,
+    )
     best = ranked[0]
     print(f"[info] Auto-chosen target accession: {best['accession']} (score={score(best)})")
     return best["accession"]
@@ -302,16 +353,18 @@ def choose_target_accession(bundle: List[dict], prefer_human: bool = True, prefe
 def build_uniprot_context(bundle: List[dict], constrain_epitope: bool = True) -> str:
     ctx = ["\n\n--- UNIPROT FUNCTIONAL ANNOTATIONS (ALL MAPPED ACCESSIONS) ---"]
     for u in bundle:
-        ctx.extend([
-            f"\n[Accession] {u.get('accession','?')}",
-            f"Name: {u.get('name', 'N/A')}",
-            f"Function: {textwrap.fill(u.get('function', 'N/A'), 80)}",
-            "Annotated Features:",
-            *(f"  - {line}" for line in u.get("features_raw", [])[:50]),
-            "Topology summary:",
-            f"  extracellular:   { _ranges_to_str(u['segments']['extracellular']) }",
-            f"  ALLOWED_EPITOPES = extracellular - (TM ∪ SP): { _ranges_to_str(u['epitope_allowed']) }"
-        ])
+        ctx.extend(
+            [
+                f"\n[Accession] {u.get('accession','?')}",
+                f"Name: {u.get('name', 'N/A')}",
+                f"Function: {textwrap.fill(u.get('function', 'N/A'), 80)}",
+                "Annotated Features:",
+                *(f"  - {line}" for line in u.get("features_raw", [])[:50]),
+                "Topology summary:",
+                f"  extracellular:   { _ranges_to_str(u['segments']['extracellular']) }",
+                f"  ALLOWED_EPITOPES = extracellular - (TM ∪ SP): { _ranges_to_str(u['epitope_allowed']) }",
+            ]
+        )
     if constrain_epitope:
         ctx.append("\nEPITOPE FILTERS (hard constraints for design):")
         ctx.append("  - Only choose residues in extracellular regions.")
@@ -322,13 +375,17 @@ def _remove_parentheses_from_yaml(yaml_data):
         for key, value in yaml_data.items():
             if key == "name" and isinstance(value, str) and value.endswith(")"):
                 yaml_data[key] = value.split("(", 1)[0].strip()
-            else: _remove_parentheses_from_yaml(value)
+            else:
+                _remove_parentheses_from_yaml(value)
     elif isinstance(yaml_data, list):
-        for item in yaml_data: _remove_parentheses_from_yaml(item)
+        for item in yaml_data:
+            _remove_parentheses_from_yaml(item)
 
+# =============================================================================
+# Chain / residue parsing & validation
+# =============================================================================
 
 _RESIDUE_CHAIN_RE = re.compile(r"([A-Za-z0-9])\s*:")
-
 
 def _extract_residue_chains(residue_entries: List[str]) -> Set[str]:
     chains: Set[str] = set()
@@ -337,13 +394,10 @@ def _extract_residue_chains(residue_entries: List[str]) -> Set[str]:
             raise ValueError(f"Residue entry must be a string like 'A:123-130'; got {entry!r}")
         matches = list(_RESIDUE_CHAIN_RE.finditer(entry))
         if not matches:
-            raise ValueError(
-                f"Residue specification '{entry}' is missing a chain prefix like 'A:123-130'."
-            )
+            raise ValueError(f"Residue specification '{entry}' is missing a chain prefix like 'A:123-130'.")
         for match in matches:
             chains.add(match.group(1).upper())
     return chains
-
 
 def _segments_from_available(nums: List[int]) -> List[Tuple[int, int]]:
     """Collapse a sorted list of ints into contiguous (start, end) segments."""
@@ -360,6 +414,119 @@ def _segments_from_available(nums: List[int]) -> List[Tuple[int, int]]:
     segments.append((start, prev))
     return segments
 
+def _ensure_epitopes_within_target_chains(
+    cfg: dict,
+    allowed_chains: Set[str],
+    *,
+    valid_residue_numbers: Optional[Dict[str, Set[int]]] = None,
+) -> None:
+    """Trim chain + residue selections so they remain on validated chains."""
+    if not allowed_chains:
+        return
+
+    allowed_display = ", ".join(sorted(allowed_chains)) or "(none)"
+
+    for field in ("chains", "target_chains"):
+        field_chains = _normalize_chain_ids(cfg.get(field))
+        if not field_chains:
+            continue
+
+        valid_chains = [cid for cid in field_chains if cid in allowed_chains]
+        invalid = [cid for cid in field_chains if cid not in allowed_chains]
+
+        if invalid:
+            invalid_display = ", ".join(_unique_order(invalid))
+            print(
+                f"[warn] Removing chain(s) [{invalid_display}] from '{field}' because they are outside the validated "
+                f"antigen-supported set [{allowed_display}]."
+            )
+            if valid_chains:
+                cfg[field] = _unique_order(valid_chains)
+            else:
+                cfg.pop(field, None)
+
+    violations = []
+    residue_lookup = valid_residue_numbers or {}
+    trim_logs: List[str] = []
+    dropped_logs: List[str] = []
+
+    for epitope in cfg.get("epitopes") or []:
+        residues = epitope.get("residues") or []
+        if not residues:
+            continue
+        epitope_chains = _extract_residue_chains(residues)
+        disallowed = epitope_chains - allowed_chains
+        if disallowed:
+            violations.append((epitope.get("name") or "<unnamed>", residues, epitope_chains, disallowed))
+
+        adjusted_residues: List[str] = []
+        changed = False
+        for span in residues:
+            if not isinstance(span, str) or ":" not in span or "-" not in span:
+                adjusted_residues.append(span)
+                continue
+            ch_raw, rng = span.split(":", 1)
+            ch = (ch_raw or "").strip().upper()
+            if ch not in residue_lookup:
+                adjusted_residues.append(span)
+                continue
+            try:
+                start_str, end_str = rng.split("-", 1)
+                start_i, end_i = int(start_str), int(end_str)
+            except ValueError:
+                adjusted_residues.append(span)
+                continue
+            if start_i > end_i:
+                start_i, end_i = end_i, start_i
+            valid_nums = residue_lookup.get(ch, set())
+            if not valid_nums:
+                adjusted_residues.append(span)
+                continue
+            in_range = sorted(pos for pos in valid_nums if start_i <= pos <= end_i)
+            missing_positions = [pos for pos in range(start_i, end_i + 1) if pos not in valid_nums]
+            if not in_range:
+                dropped_logs.append(
+                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} was dropped because none of the residues "
+                    f"exist in chain {ch}'s prepared PDB numbering."
+                )
+                changed = True
+                continue
+            if missing_positions:
+                gap_preview = ",".join(str(pos) for pos in missing_positions[:8])
+                segments = _segments_from_available(in_range)
+                replacement = [f"{ch}:{lo}" if lo == hi else f"{ch}:{lo}-{hi}" for lo, hi in segments]
+                adjusted_residues.extend(replacement)
+                changed = True
+                trim_logs.append(
+                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} trimmed to {', '.join(replacement)}; "
+                    f"missing residues: {gap_preview}."
+                )
+            else:
+                adjusted_residues.append(span)
+        if changed:
+            epitope["residues"] = adjusted_residues
+
+    if violations:
+        lines = []
+        for name, residues, chains, disallowed in violations:
+            lines.append(
+                f"Epitope '{name}' uses residues {residues} spanning chains {', '.join(sorted(chains))}; "
+                f"disallowed subset: {', '.join(sorted(disallowed))}."
+            )
+        detail = " ".join(lines)
+        raise ValueError(
+            "Proposed epitopes target chains outside the vendor-validated antigen sequence. "
+            f"Allowed chains: [{allowed_display}]. {detail}"
+        )
+
+    for msg in trim_logs:
+        print(f"[warn] {msg}")
+    for msg in dropped_logs:
+        print(f"[warn] {msg}")
+
+# =============================================================================
+# Prompt-building helpers
+# =============================================================================
 
 def _build_scope_prompt_blocks(
     target_chains: List[str],
@@ -367,9 +534,14 @@ def _build_scope_prompt_blocks(
     allowed_range_str: Optional[str],
     pdb_number_map: Dict[str, List[str]],
 ) -> tuple[str, str, str, str, List[dict]]:
-    """Assemble reusable prompt sections for LLM scope generation."""
+    """Assemble reusable prompt sections for LLM scope generation.
+
+    Returns:
+      (target_focus_prompt, chain_constraints_block, range_constraint_prompt, numbering_prompt, numbering_debug)
+    """
     target_focus_prompt = ""
     chain_constraints_block = ""
+
     if target_chains:
         chain_list_str = ", ".join(f"'{c}'" for c in target_chains)
         antigen_context_sentence = (
@@ -420,16 +592,20 @@ def _build_scope_prompt_blocks(
 
     range_constraint_prompt = ""
     if allowed_range_str:
-        range_constraint_prompt = textwrap.dedent(f"""
+        range_constraint_prompt = textwrap.dedent(
+            f"""
             --- CRITICAL INSTRUCTION: ALLOWED RESIDUE RANGE ---
-            Based on verification against a commercial antigen, all epitope `residues` you propose for the target chain(s) MUST be ENTIRELY within the inclusive residue range of {allowed_range_str}.
-            For example, if the range is 100-200, a residue selection of "A:150-160" is valid, but "A:195-205" is NOT.
+            Based on verification against a commercial antigen, all epitope `residues` you propose for the target chain(s)
+            MUST be ENTIRELY within the inclusive residue range of {allowed_range_str}.
+            For example, if the range is 100-200, "A:150-160" is valid, but "A:195-205" is NOT.
             Any residue or range outside these boundaries is invalid and will be rejected. This is a hard constraint.
             --- END CRITICAL INSTRUCTION ---
-        """)
+            """
+        )
 
     numbering_prompt = ""
     numbering_debug: List[dict] = []
+
     if pdb_number_map:
         numbering_lines = []
         for chain_id in sorted(pdb_number_map.keys()):
@@ -439,6 +615,7 @@ def _build_scope_prompt_blocks(
             first_label = str(entries[0])
             last_label = str(entries[-1])
             has_insertions = any(not str(x).isdigit() for x in entries)
+
             try:
                 numeric_vals = []
                 for tok in entries:
@@ -449,6 +626,7 @@ def _build_scope_prompt_blocks(
                 max_val = max(numeric_vals) if numeric_vals else last_label
             except ValueError:
                 min_val, max_val = first_label, last_label
+
             insertion_note = ""
             ins_examples: List[str] = []
             if has_insertions:
@@ -456,7 +634,7 @@ def _build_scope_prompt_blocks(
                 insertion_note = f" (includes insertion codes such as {', '.join(ins_examples)})"
 
             numbering_lines.append(
-                f"Chain {chain_id}: residues {first_label}-{last_label} (numeric span {min_val}-{max_val}){insertion_note}"
+                f"  - Chain {chain_id}: PDB residues {first_label} → {last_label} (numeric span {min_val}-{max_val}){insertion_note}."
             )
             numbering_debug.append(
                 {
@@ -466,27 +644,96 @@ def _build_scope_prompt_blocks(
                     "min_numeric": min_val,
                     "max_numeric": max_val,
                     "has_insertions": has_insertions,
-                    "examples": ins_examples,
+                    "insertion_examples": ins_examples if has_insertions else [],
                 }
             )
 
         if numbering_lines:
-            numbering_prompt = textwrap.dedent(
-                "\n".join(
-                    [
-                        "--- PDB CHAIN NUMBERING SUMMARY ---",
-                        *numbering_lines,
-                        "Use the above numbering when specifying residue ranges in the YAML output.",
-                        "--- END PDB CHAIN NUMBERING SUMMARY ---",
-                    ]
-                )
-            )
+            numbering_prompt = "\n" + "\n".join(
+                [
+                    "--- CRITICAL INSTRUCTION: PDB NUMBERING ---",
+                    "Use the exact PDB residue numbering shown below. Do NOT renumber to UniProt or vendor coordinates.",
+                    *numbering_lines,
+                    "When specifying residue ranges, you must use these PDB indices (e.g., chain B begins at 501, not 1).",
+                    "--- END CRITICAL INSTRUCTION ---",
+                ]
+            ) + "\n"
 
     return target_focus_prompt, chain_constraints_block, range_constraint_prompt, numbering_prompt, numbering_debug
 
+# =============================================================================
+# LLM execution helpers (with validation retries)
+# =============================================================================
+
+_YAML_BLOCK_RE = re.compile(r"```yaml\s*\n(.*?)```", re.S | re.I)
+
+def _extract_yaml_block(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = _YAML_BLOCK_RE.search(text)
+    if not m:
+        return None
+    return m.group(1)
+
+def _call_llm_provider_once(
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    max_new_tokens: int,
+    groq_key: Optional[str],
+) -> str:
+    """One-shot provider call (no retries/validation)."""
+    provider = (provider or "").lower().strip()
+
+    if provider == "groq":
+        groq_api_key = groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
+        if not groq_api_key:
+            raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
+
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {groq_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "temperature": 0.1,
+                "max_tokens": max_new_tokens,
+                "messages": [
+                    {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=120,
+        )
+        if resp.status_code == 429:
+            raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
+        resp.raise_for_status()
+        data = resp.json()
+        draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+        return draft.strip()
+
+    if provider == "gemini":
+        import google.generativeai as genai
+
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model_client = genai.GenerativeModel(
+            model_name=model,
+            system_instruction="You are a protein design assistant. Output exactly one YAML block.",
+        )
+        response = model_client.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.2),
+        )
+        return (response.text or "").strip()
+
+    # Preserve original behavior: unsupported providers are explicit errors.
+    raise RuntimeError(f"Unsupported LLM_PROVIDER '{provider}'. Use 'groq' or 'gemini'.")
 
 def _run_scope_llm_with_retries(
-    compose_prompt: callable,
+    compose_prompt: Callable[[str], str],
     *,
     tdir: Path,
     model: str,
@@ -494,13 +741,21 @@ def _run_scope_llm_with_retries(
     max_new_tokens: int,
     max_llm_retries: int,
     groq_key: Optional[str],
-) -> tuple[str, int, str]:
-    """Execute the LLM call with retry/backoff and prompt logging."""
+    schema: dict,
+    expected_epitopes: Optional[int],
+) -> tuple[dict, str, int, str, str]:
+    """Execute LLM call with:
+      - API failure retries/backoff
+      - Validation retries (YAML block, schema, epitope count) with retry guidance
+
+    Returns:
+      (cfg, draft, attempts_used, final_prompt, last_prompt)
+    """
     retry_extra = ""
     last_error: Optional[Exception] = None
+    last_prompt = ""
     draft = ""
     attempts_used = 0
-    last_prompt = ""
 
     print(f"[info] LLM provider: {provider} · model: {model}")
 
@@ -508,6 +763,7 @@ def _run_scope_llm_with_retries(
         attempts_used = attempt + 1
         final_prompt = compose_prompt(retry_extra)
         last_prompt = final_prompt
+
         prompt_path = tdir / "reports" / f"scope_prompt_attempt_{attempt + 1}.md"
         prompt_path.write_text(final_prompt)
         stats_path = prompt_path.with_name(f"{prompt_path.stem}_stats.json")
@@ -519,213 +775,100 @@ def _run_scope_llm_with_retries(
         }
         stats_path.write_text(json.dumps(stats_payload, indent=2))
 
-        if provider == "groq":
-            groq_api_key = groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-            if not groq_api_key:
-                raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
-            resp = None
-            try:
-                resp = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {groq_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "temperature": 0.1,
-                        "max_tokens": max_new_tokens,
-                        "messages": [
-                            {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
-                            {"role": "user", "content": final_prompt},
-                        ],
-                    },
-                    timeout=120,
-                )
-                if resp.status_code == 429:
-                    raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
-                resp.raise_for_status()
-                data = resp.json()
-                draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
-                draft = draft.strip()
-                break
-            except Exception as exc:
-                last_error = exc
-                if attempt == max(0, max_llm_retries):
-                    raise
-                delay = 0
-                status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
-                if status == 429:
-                    retry_after = None
-                    if resp is not None:
-                        retry_after = resp.headers.get("Retry-After")
-                    try:
-                        delay = int(retry_after) if retry_after else 0
-                    except (TypeError, ValueError):
-                        delay = 0
-                    delay = delay if delay and delay > 0 else min(90, 10 * (attempt + 1))
-                    print(f"[warn] Groq rate limit hit (429). Retrying in {delay} seconds...")
-                else:
-                    delay = min(60, 5 * (attempt + 1))
-                    print(f"[warn] LLM call failed on attempt {attempt + 1}; retrying in {delay} seconds...")
-                if delay > 0:
-                    time.sleep(delay)
-                retry_extra = "\\nLLM call failed; please retry.\\n"
-                continue
-        elif provider == "gemini":
-            import google.generativeai as genai
-
-            genai.configure(api_key=GOOGLE_API_KEY)
-            model_client = genai.GenerativeModel(
-                model_name=model,
-                system_instruction="You are a protein design assistant. Output exactly one YAML block.",
-            )
-            response = model_client.generate_content(
-                final_prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.2),
-            )
-            draft = response.text or ""
-            draft = draft.strip()
-            break
-        else:
-            draft = call_gpt(
-                final_prompt,
+        # ---- API call with backoff on failure ----
+        try:
+            draft = _call_llm_provider_once(
+                provider=provider,
                 model=model,
-                temperature=0.1,
+                prompt=final_prompt,
                 max_new_tokens=max_new_tokens,
+                groq_key=groq_key,
             )
-            break
+        except Exception as exc:
+            last_error = exc
+            if attempt == max(0, max_llm_retries):
+                raise
 
-    if not draft and last_error:
-        raise last_error
+            delay = min(60, 5 * (attempt + 1))
+            status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
+            if status == 429:
+                retry_after = None
+                resp = getattr(exc, "response", None)
+                if resp is not None:
+                    retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = int(retry_after) if retry_after else 0
+                except (TypeError, ValueError):
+                    delay = 0
+                delay = delay if delay and delay > 0 else min(90, 10 * (attempt + 1))
+                print(f"[warn] Rate limit hit (429). Retrying in {delay} seconds...")
+            else:
+                print(f"[warn] LLM call failed on attempt {attempt + 1}; retrying in {delay} seconds...")
 
-    return draft, attempts_used, last_prompt
-
-
-def _ensure_epitopes_within_target_chains(
-    cfg: dict,
-    allowed_chains: Set[str],
-    *,
-    valid_residue_numbers: Optional[Dict[str, Set[int]]] = None,
-) -> None:
-    """Trim chain + residue selections so they remain on validated chains.
-
-    Steps:
-      1. Remove any configured ``chains`` or ``target_chains`` values that are
-         not present in ``allowed_chains``.
-      2. Inspect each epitope's residue ranges, dropping spans that fall
-         entirely outside the ``valid_residue_numbers`` lookup.
-      3. When a span partially overlaps the prepared numbering, shrink it to the
-         contiguous residues that remain.
-    """
-    if not allowed_chains:
-        return
-
-    allowed_display = ", ".join(sorted(allowed_chains)) or "(none)"
-
-    for field in ("chains", "target_chains"):
-        field_chains = _normalize_chain_ids(cfg.get(field))
-        if not field_chains:
+            if delay > 0:
+                time.sleep(delay)
+            retry_extra = "\nLLM call failed; please retry.\n"
             continue
 
-        valid_chains = [cid for cid in field_chains if cid in allowed_chains]
-        invalid = [cid for cid in field_chains if cid not in allowed_chains]
+        # Save draft for this attempt (useful for debugging even on failure)
+        (tdir / "reports" / f"scope_draft_attempt_{attempt + 1}.md").write_text(draft or "")
 
-        if invalid:
-            invalid_display = ", ".join(_unique_order(invalid))
-            print(
-                f"[warn] Removing chain(s) [{invalid_display}] from '{field}' because they are outside the validated "
-                f"antigen-supported set [{allowed_display}]."
+        # ---- Validation loop (YAML block, schema, epitope count) ----
+        yaml_text = _extract_yaml_block(draft)
+        if not yaml_text:
+            last_error = RuntimeError("No YAML block returned.")
+            if attempt == max(0, max_llm_retries):
+                raise RuntimeError("No YAML block returned; see reports/scope_draft_attempt_*.md")
+
+            retry_extra = textwrap.dedent(
+                """
+                --- CRITICAL REMINDER: YAML OUTPUT REQUIRED ---
+                You must respond with exactly one YAML code block that conforms to the target schema.
+                Do not include free-form commentary outside the YAML block.
+                --- END CRITICAL REMINDER ---
+                """
             )
-            if valid_chains:
-                cfg[field] = _unique_order(valid_chains)
-            else:
-                cfg.pop(field, None)
-
-
-    violations = []
-    residue_lookup = valid_residue_numbers or {}
-    trim_logs: List[str] = []
-    dropped_logs: List[str] = []
-
-    for epitope in cfg.get("epitopes") or []:
-        residues = epitope.get("residues") or []
-        if not residues:
             continue
-        epitope_chains = _extract_residue_chains(residues)
-        disallowed = epitope_chains - allowed_chains
-        if disallowed:
-            violations.append((epitope.get("name") or "<unnamed>", residues, epitope_chains, disallowed))
 
-        adjusted_residues: List[str] = []
-        changed = False
-        for span in residues:
-            if not isinstance(span, str) or ':' not in span or '-' not in span:
-                adjusted_residues.append(span)
-                continue
-            ch_raw, rng = span.split(":", 1)
-            ch = (ch_raw or "").strip().upper()
-            if ch not in residue_lookup:
-                adjusted_residues.append(span)
-                continue
-            try:
-                start_str, end_str = rng.split("-", 1)
-                start_i, end_i = int(start_str), int(end_str)
-            except ValueError:
-                adjusted_residues.append(span)
-                continue
-            if start_i > end_i:
-                start_i, end_i = end_i, start_i
-            valid_nums = residue_lookup.get(ch, set())
-            if not valid_nums:
-                adjusted_residues.append(span)
-                continue
-            in_range = sorted(pos for pos in valid_nums if start_i <= pos <= end_i)
-            missing_positions = [pos for pos in range(start_i, end_i + 1) if pos not in valid_nums]
-            if not in_range:
-                dropped_logs.append(
-                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} was dropped because none of the residues "
-                    f"exist in chain {ch}'s prepared PDB numbering."
-                )
-                changed = True
-                continue
-            if missing_positions:
-                gap_preview = ",".join(str(pos) for pos in missing_positions[:8])
-                segments = _segments_from_available(in_range)
-                replacement = [
-                    f"{ch}:{lo}" if lo == hi else f"{ch}:{lo}-{hi}"
-                    for lo, hi in segments
-                ]
-                adjusted_residues.extend(replacement)
-                changed = True
-                trim_logs.append(
-                    f"Epitope '{epitope.get('name') or '<unnamed>'}' span {span} trimmed to {', '.join(replacement)}; "
-                    f"missing residues: {gap_preview}."
-                )
-            else:
-                adjusted_residues.append(span)
-        if changed:
-            epitope["residues"] = adjusted_residues
+        try:
+            cfg = yaml.safe_load(yaml_text)
+            validate(cfg, schema)
+        except Exception as exc:
+            last_error = exc
+            if attempt == max(0, max_llm_retries):
+                raise
 
-    if violations:
-        lines = []
-        for name, residues, chains, disallowed in violations:
-            lines.append(
-                f"Epitope '{name}' uses residues {residues} spanning chains {', '.join(sorted(chains))}; "
-                f"disallowed subset: {', '.join(sorted(disallowed))}."
+            retry_extra = textwrap.dedent(
+                """
+                --- CRITICAL REMINDER: YAML SCHEMA ---
+                The YAML must match the provided schema exactly. Ensure all required fields are present
+                and properly formatted before responding.
+                --- END CRITICAL REMINDER ---
+                """
             )
-        detail = " ".join(lines)
-        raise ValueError(
-            "Proposed epitopes target chains outside the vendor-validated antigen sequence. "
-            f"Allowed chains: [{allowed_display}]. {detail}"
-        )
+            continue
 
-    if trim_logs:
-        for msg in trim_logs:
-            print(f"[warn] {msg}")
-    if dropped_logs:
-        for msg in dropped_logs:
-            print(f"[warn] {msg}")
+        if expected_epitopes is not None and expected_epitopes > 0:
+            epi_list = cfg.get("epitopes") or []
+            if len(epi_list) != expected_epitopes:
+                last_error = ValueError(f"Expected {expected_epitopes} epitopes, but LLM returned {len(epi_list)}.")
+                if attempt == max(0, max_llm_retries):
+                    raise last_error
+
+                retry_extra = textwrap.dedent(
+                    f"""
+                    --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
+                    You must propose exactly {expected_epitopes} epitopes.
+                    Update your selection so that the `epitopes` list contains exactly {expected_epitopes} entries.
+                    --- END CRITICAL REMINDER ---
+                    """
+                )
+                continue
+
+        # Success
+        return cfg, draft, attempts_used, final_prompt, last_prompt
+
+    raise last_error or RuntimeError("LLM scope failed after retries.")
 
 # =============================================================================
 # Core: LLM scope (multi-UniProt + extracellular filter)
@@ -757,8 +900,8 @@ def llm_scope(
         _llm_provider, _max_new, _groq_key = "gpt-oss-local", 1024, None
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
-    tdir = TARGETS_ROOT_LOCAL/pdb_id.upper()
-    _ensure_dir(tdir/"reports")
+    tdir = TARGETS_ROOT_LOCAL / pdb_id.upper()
+    _ensure_dir(tdir / "reports")
 
     # Load target.yaml to check for pre-defined chains, target name, and allowed range
     yml_path = tdir / "target.yaml"
@@ -789,14 +932,14 @@ def llm_scope(
         pdb_number_map,
     )
 
-# === Build Final Prompt ===
-    meta_raw = json.loads((tdir/"raw"/"entry.json").read_text())
+    # === Build Final Prompt ===
+    meta_raw = json.loads((tdir / "raw" / "entry.json").read_text())
     meta = _prune_pdb_metadata(meta_raw)
     bundle = fetch_uniprot_bundle_for_pdb(pdb_id, meta_raw, max_accessions=max_accessions)
     uniprot_context_str = build_uniprot_context(bundle, constrain_epitope=enforce_epitope_constraints)
     target_acc = target or choose_target_accession(bundle, prefer_human=prefer_human, prefer_reviewed=prefer_reviewed)
 
-    prompt_template = (ROOT/"templates"/"scope_prompt.md").read_text()
+    prompt_template = (ROOT / "templates" / "scope_prompt.md").read_text()
 
     guidance_block = ""
     if user_guidance:
@@ -816,7 +959,6 @@ def llm_scope(
             text = str(block).strip()
             if text:
                 prompt_sections.append(text)
-
     base_prompt_prefix = "\n\n".join(prompt_sections)
 
     def _compose_prompt(extra_block: str) -> str:
@@ -828,11 +970,11 @@ def llm_scope(
         return prefix + prompt_template.format(
             meta=json.dumps(meta, indent=2),
             uniprot_context=uniprot_context_str + (f"\n\n[PRIMARY TARGET ACCESSION SUGGESTED]: {target_acc}" if target_acc else ""),
-            chain_constraints=chain_constraints_block
+            chain_constraints=chain_constraints_block,
         )
 
-    # Delegate the LLM call to a helper for clarity
-    draft, attempts_used, final_prompt = _run_scope_llm_with_retries(
+    # Execute LLM with retries (API + validation)
+    cfg, draft, attempts_used, final_prompt, _ = _run_scope_llm_with_retries(
         _compose_prompt,
         tdir=tdir,
         model=MODEL,
@@ -840,35 +982,19 @@ def llm_scope(
         max_new_tokens=_max_new,
         max_llm_retries=max_llm_retries,
         groq_key=_groq_key,
+        schema=SCHEMA,
+        expected_epitopes=expected_epitopes,
     )
 
-    m = re.search(r"```yaml\s*\n(.*?)```", draft, re.S | re.I)
-    if not m:
-        (tdir/"reports"/"scope_draft.md").write_text(draft)
-        raise RuntimeError("No YAML block returned; see reports/scope_draft.md")
-
-    cfg = yaml.safe_load(m.group(1))
-    validate(cfg, SCHEMA)
-
-    if expected_epitopes is not None and expected_epitopes > 0:
-        epi_list = cfg.get("epitopes") or []
-        if len(epi_list) != expected_epitopes:
-            raise ValueError(
-                f"Expected {expected_epitopes} epitopes, but LLM returned {len(epi_list)}."
-            )
-
-    (tdir/"reports"/"scope_prompt.md").write_text(final_prompt)
-    if draft:
-        (tdir/"reports"/"scope_draft.md").write_text(draft)
-
-    assert cfg is not None
+    # Save canonical artifacts
+    (tdir / "reports" / "scope_prompt.md").write_text(final_prompt)
+    (tdir / "reports" / "scope_draft.md").write_text(draft or "")
 
     validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("target_chains")))
     if not validated_target_chains:
         validated_target_chains = set(_normalize_chain_ids(cfg_from_yaml.get("chains")))
 
     seq_block = (cfg_from_yaml.get("sequences") or {})
-    # Prefer canonical mmCIF label_seq_id indices. Fall back to legacy keys if present.
     cif_residue_numbers_cfg = (seq_block.get("cif_residue_numbers") or seq_block.get("pdb_residue_numbers") or {})
     valid_residue_numbers: Dict[str, Set[int]] = {}
     for chain_id, entries in cif_residue_numbers_cfg.items():
@@ -882,11 +1008,7 @@ def llm_scope(
         if numbers:
             valid_residue_numbers[norm_chain] = numbers
 
-    _ensure_epitopes_within_target_chains(
-        cfg,
-        validated_target_chains,
-        valid_residue_numbers=valid_residue_numbers,
-    )
+    _ensure_epitopes_within_target_chains(cfg, validated_target_chains, valid_residue_numbers=valid_residue_numbers)
 
     if validated_target_chains:
         expected_chains = sorted(validated_target_chains)
@@ -915,7 +1037,6 @@ def llm_scope(
         cfg["chains"] = _normalize_chain_ids(cfg.get("chains"))
 
     base = cfg_from_yaml or {}
-
     if not force and (base.get("epitopes") or []):
         print("[warn] Existing epitopes detected and --force not set; skipping scope update.")
         return
@@ -942,15 +1063,12 @@ def llm_scope(
     _apply_epitope_name_sanitization(base)
     yml_path.write_text(yaml.safe_dump(base, sort_keys=False))
 
-    (tdir/"reports"/"scope_rationale.md").write_text(draft)
+    (tdir / "reports" / "scope_rationale.md").write_text(draft or "")
+
     epitope_count = len(base.get("epitopes") or [])
     expected_display = expected_epitopes if expected_epitopes is not None else "unspecified"
-    print(
-        f"[info] LLM attempts: {attempts_used}; epitopes selected: {epitope_count} (expected {expected_display})."
-    )
+    print(f"[info] LLM attempts: {attempts_used}; epitopes selected: {epitope_count} (expected {expected_display}).")
     print(f"[ok] Scope updated in {yml_path} based on LLM rationale.")
-
-
 
 def main():
     import argparse

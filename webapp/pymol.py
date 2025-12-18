@@ -251,9 +251,23 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True) -> tuple[Optional[Path]
     _ensure_env()
     cfg = load_config()
     workspace = cfg.paths.workspace_root or cfg.paths.project_root
-    prep_dir = workspace / "targets" / pdb_id.upper() / "prep"
-    if not (prep_dir / "prepared.pdb").exists():
-        raise PyMolLaunchError("prepared.pdb not found; run prep-target first")
+    target_dir = workspace / "targets" / pdb_id.upper()
+    prep_dir = target_dir / "prep"
+
+    # Choose structure with preference for raw mmCIF, then prepared.* as fallback.
+    raw_dir = target_dir / "raw"
+    structure_candidates = [
+        raw_dir / f"{pdb_id.upper()}.cif",
+        raw_dir / f"{pdb_id.upper()}.mmcif",
+        raw_dir / "raw.cif",
+        raw_dir / "raw.mmcif",
+        prep_dir / "prepared.cif",
+        prep_dir / "prepared.mmcif",
+        prep_dir / "prepared.pdb",
+    ]
+    structure_path = next((p for p in structure_candidates if p.exists()), None)
+    if structure_path is None:
+        raise PyMolLaunchError("Structure file not found; run prep-target to create a raw/prepared structure")
 
     bundle = export_hotspot_bundle(pdb_id)
     if bundle is None:
@@ -277,9 +291,22 @@ def render_hotspot_snapshot(pdb_id: str) -> Path:
     _ensure_env()
     cfg = load_config()
     workspace = cfg.paths.workspace_root or cfg.paths.project_root
-    prep_dir = workspace / "targets" / pdb_id.upper() / "prep"
-    if not (prep_dir / "prepared.pdb").exists():
-        raise PyMolLaunchError("prepared.pdb not found; run prep-target first")
+    target_dir = workspace / "targets" / pdb_id.upper()
+    prep_dir = target_dir / "prep"
+
+    raw_dir = target_dir / "raw"
+    structure_candidates = [
+        raw_dir / f"{pdb_id.upper()}.cif",
+        raw_dir / f"{pdb_id.upper()}.mmcif",
+        raw_dir / "raw.cif",
+        raw_dir / "raw.mmcif",
+        prep_dir / "prepared.cif",
+        prep_dir / "prepared.mmcif",
+        prep_dir / "prepared.pdb",
+    ]
+    structure_path = next((p for p in structure_candidates if p.exists()), None)
+    if structure_path is None:
+        raise PyMolLaunchError("Structure file not found; run prep-target to create a raw/prepared structure")
 
     bundle = export_hotspot_bundle(pdb_id)
     if bundle is None:

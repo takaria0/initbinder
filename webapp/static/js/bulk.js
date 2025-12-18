@@ -1422,6 +1422,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     `ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`,
     '',
     '# 5) Pull results back',
+    `mkdir -p ${localTarget}/designs/boltzgen/`,
     `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`,
   ].filter(Boolean).join('\n');
 }
@@ -1507,6 +1508,7 @@ function buildAllRunCommandsText(targets = []) {
 
     monitorLines.push(`ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`);
     monitorLines.push(`ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`);
+    pullLines.push(`mkdir -p ${localTarget}/designs/boltzgen/`);
     pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`);
   });
 

@@ -337,21 +337,52 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
 
 def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
     cfg = load_config()
-    prep_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper() / "prep"
+    target_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper()
+    prep_dir = target_dir / "prep"
     meta_path = prep_dir / "epitopes_metadata.json"
+
+    def _fallback_from_target_yaml() -> List[dict]:
+        target_yaml = target_dir / "target.yaml"
+        if not target_yaml.exists():
+            return []
+        try:
+            data = yaml.safe_load(target_yaml.read_text()) or {}
+        except Exception:
+            return []
+        entries = []
+        for ep in data.get("epitopes") or []:
+            if not isinstance(ep, dict):
+                continue
+            name = (ep.get("name") or ep.get("display_name") or "").strip()
+            if not name:
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "display_name": ep.get("display_name"),
+                    "hotspots": ep.get("hotspots") or [],
+                    "mask_residues": ep.get("residues") or [],
+                    "metrics": ep.get("metrics") or {},
+                }
+            )
+        return entries
+
     if not meta_path.exists():
-        return []
+        return _fallback_from_target_yaml()
     try:
         data = json.loads(meta_path.read_text())
     except Exception:
-        return []
+        return _fallback_from_target_yaml()
+
     epitopes = data.get("epitopes") or []
     output = []
     for ep in epitopes:
         parsed = _parse_epitope_metadata(ep, prep_dir)
         if parsed:
             output.append(parsed)
-    return output
+    if output:
+        return output
+    return _fallback_from_target_yaml()
 
 
 def _format_ranges(numbers: Iterable[int]) -> str:
@@ -2125,7 +2156,11 @@ def run_bulk_workflow(
                         try:
                             rel_snap = snap.relative_to(_snapshot_root())
                         except Exception:
-                            rel_snap = snap
+                            # Ensure we store a safe, relative name so the API can resolve it.
+                            try:
+                                rel_snap = Path(snap).name
+                            except Exception:
+                                rel_snap = snap
                         snapshots.append(str(rel_snap))
                         log(f"  Snapshot saved → {snap} (dir: {snap.parent})")
                         job_store.update(job_id, details={"snapshots": list(snapshots)})

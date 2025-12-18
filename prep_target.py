@@ -1,630 +1,615 @@
-from collections import defaultdict, deque
-import json, re, yaml, math, statistics as stats, datetime
-from Bio.PDB import PDBParser, PDBIO, Select
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+prep_target.py
 
-from utils import _ensure_dir, ROOT, RCSB_ENTRY, RCSB_ASSEM, RCSB_PDB
-import freesasa
-from utils import make_key, THREE2ONE, build_epitope_metadata, build_metadata_doc, make_hotspot_variants
+Generate minimal (default) or "checked" hotspot selections for each epitope
+in targets/<PDB>/target.yaml.
 
+Compatibility & robustness
+- Exposes a callable function `prep_target()` (old downstream calls).
+- Backward-compatible positional args: prep_target(pdb_id, sasa_cutoff)
+  (manage_rfa.py currently calls prep_target(args.pdb, args.sasa_cutoff)).
+- Default behavior is intentionally minimal (no structure parsing, no SASA),
+  so it should not error out due to missing/changed structural prep artifacts.
+- Optional `--check` (or check=True) enables SASA-based surface filtering.
 
-# ==== 追加インポート ====
-# ==== 追加インポート ====
-import os, re, shlex, yaml
+Inputs
+- Uses mmCIF from: targets/<PDB>/raw/<PDB>.cif
+  (falls back to targets/<PDB>/raw/raw.cif if present; does NOT require prepared.cif)
+
+Outputs
+- Updates targets/<PDB>/target.yaml by adding/refreshing `hotspots` under each epitope.
+- Writes a "hotspot bundle" to multiple locations for downstream convenience:
+    targets/<PDB>/reports/hotspot_bundle.json
+    targets/<PDB>/reports/hotspot_bundle.yaml
+    targets/<PDB>/reports/hotspot_bundle/bundle.json
+    targets/<PDB>/hotspot_bundle.json
+  plus targets/<PDB>/reports/hotspots.tsv
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import yaml
 
 
-def _normalize_chain_ids(chains):
-    out = []
-    if not chains:
-        return out
-    for cid in chains:
-        if not isinstance(cid, str):
+# =============================================================================
+# Project defaults / helpers (with safe fallbacks)
+# =============================================================================
+
+def _try_import_utils():
+    try:
+        from utils import _ensure_dir as ensure_dir  # type: ignore
+        from utils import TARGETS_ROOT_LOCAL as targets_root_local  # type: ignore
+        return ensure_dir, Path(targets_root_local)
+    except Exception:
+        def ensure_dir(p: Path) -> None:
+            p.mkdir(parents=True, exist_ok=True)
+        return ensure_dir, Path("targets")
+
+
+_ENSURE_DIR, _TARGETS_ROOT_DEFAULT = _try_import_utils()
+
+DEFAULTS: Dict[str, Any] = {
+    "TARGETS_ROOT_LOCAL": _TARGETS_ROOT_DEFAULT,
+    "N_HOTSPOTS": 3,
+    "MIN_HOTSPOTS": 1,
+    "MAX_HOTSPOTS": 5,
+    "SASA_CUTOFF": 20.0,  # Å^2, used only when check=True
+    "MAX_EXPAND_POSITIONS": 20000,
+}
+
+
+# =============================================================================
+# Parsing residue specs like "C:26-202" / "C:26" (optionally comma-separated)
+# =============================================================================
+
+_RES_SPEC_RE = re.compile(r"^\s*([A-Za-z0-9])\s*:\s*(-?\d+)(?:\s*-\s*(-?\d+))?\s*$")
+
+
+@dataclass(frozen=True)
+class ResidueSpan:
+    chain: str
+    start: int
+    end: int
+
+    @property
+    def length(self) -> int:
+        return max(0, self.end - self.start + 1)
+
+
+def _split_multi_specs(entry: str) -> List[str]:
+    parts: List[str] = []
+    for chunk in re.split(r"[;,]", entry):
+        chunk = (chunk or "").strip()
+        if chunk:
+            parts.append(chunk)
+    return parts
+
+
+def parse_residue_spans(residue_entries: Sequence[Any]) -> List[ResidueSpan]:
+    spans: List[ResidueSpan] = []
+    for raw in residue_entries or []:
+        if raw is None:
             continue
-        s = cid.strip()
-        if not s:
+        if isinstance(raw, (list, tuple)):
+            spans.extend(parse_residue_spans(list(raw)))
             continue
-        out.append(s.upper())
-    return out
+        if not isinstance(raw, str):
+            continue
+
+        for token in _split_multi_specs(raw):
+            m = _RES_SPEC_RE.match(token)
+            if not m:
+                continue
+            chain = (m.group(1) or "").strip().upper()
+            a = int(m.group(2))
+            b = int(m.group(3) or m.group(2))
+            if a > b:
+                a, b = b, a
+            spans.append(ResidueSpan(chain=chain, start=a, end=b))
+
+    spans.sort(key=lambda s: (s.chain, s.start, s.end))
+    return spans
+
+
+# =============================================================================
+# Choosing hotspot positions deterministically (even spacing, no randomness)
+# =============================================================================
+
+def _total_length(spans: Sequence[ResidueSpan]) -> int:
+    return sum(s.length for s in spans)
+
+
+def _rank_to_position(spans: Sequence[ResidueSpan], rank_1based: int) -> Optional[Tuple[str, int]]:
+    if rank_1based <= 0:
+        return None
+    r = rank_1based
+    for s in spans:
+        if s.length <= 0:
+            continue
+        if r > s.length:
+            r -= s.length
+            continue
+        return (s.chain, s.start + (r - 1))
+    return None
+
+
+def choose_hotspots_from_spans(
+    spans: Sequence[ResidueSpan],
+    n_hotspots: int,
+    *,
+    allowed_positions: Optional[set[Tuple[str, int]]] = None,
+) -> List[Tuple[str, int]]:
+    if n_hotspots <= 0:
+        return []
+    spans = [s for s in spans if s.length > 0]
+    if not spans:
+        return []
+
+    # If filtering is provided, we may need an explicit candidate list (bounded).
+    if allowed_positions is not None:
+        total = _total_length(spans)
+        candidates: List[Tuple[str, int]] = []
+        if total <= DEFAULTS["MAX_EXPAND_POSITIONS"]:
+            for s in spans:
+                for pos in range(s.start, s.end + 1):
+                    key = (s.chain, pos)
+                    if key in allowed_positions:
+                        candidates.append(key)
+        else:
+            # Large: probe ranks then filter
+            n_probe = min(200, max(20, n_hotspots * 20))
+            for i in range(1, n_probe + 1):
+                rk = round(i * (total + 1) / (n_probe + 1))
+                p = _rank_to_position(spans, rk)
+                if p and p in allowed_positions:
+                    candidates.append(p)
+            seen = set()
+            candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+        if not candidates:
+            return []
+
+        n_eff = min(n_hotspots, len(candidates))
+        picks: List[Tuple[str, int]] = []
+        for i in range(1, n_eff + 1):
+            idx = round(i * (len(candidates) + 1) / (n_eff + 1)) - 1
+            idx = max(0, min(len(candidates) - 1, idx))
+            picks.append(candidates[idx])
+
+        uniq: List[Tuple[str, int]] = []
+        seen2 = set()
+        for p in picks:
+            if p not in seen2:
+                uniq.append(p)
+                seen2.add(p)
+        for c in candidates:
+            if len(uniq) >= n_eff:
+                break
+            if c not in seen2:
+                uniq.append(c)
+                seen2.add(c)
+        return uniq
+
+    total = _total_length(spans)
+    if total <= 0:
+        return []
+    n_eff = min(n_hotspots, total)
+    ranks: List[int] = []
+    for i in range(1, n_eff + 1):
+        rk = round(i * (total + 1) / (n_eff + 1))
+        rk = max(1, min(total, rk))
+        ranks.append(rk)
+    ranks = sorted(set(ranks))
+
+    picks: List[Tuple[str, int]] = []
+    for rk in ranks:
+        p = _rank_to_position(spans, rk)
+        if p:
+            picks.append(p)
+
+    if len(picks) < n_eff:
+        mid = (total + 1) // 2
+        for delta in range(0, total):
+            for rk in (mid + delta, mid - delta):
+                if rk < 1 or rk > total:
+                    continue
+                p = _rank_to_position(spans, rk)
+                if p and p not in picks:
+                    picks.append(p)
+                if len(picks) >= n_eff:
+                    break
+            if len(picks) >= n_eff:
+                break
+    return picks[:n_eff]
+
+
+def _format_residue(chain: str, pos: int) -> str:
+    return f"{chain}:{pos}"
+
 
 def _sanitize_epitope_name(name: str) -> str:
-    """
-    ファイル命名と一致させるサニタイズ。
-    例: "Receptor Binding Motif (RBM) Core" -> "Receptor_Binding_Motif_(RBM)_Core"
-    ※ スラッシュなど問題文字は "_" に。
-    """
-    s = name.strip()
-    s = s.replace(" ", "_").replace("/", "_").replace("\\", "_")
-    return s
-
-def _load_epitopes_from_yaml(pdb_id: str):
-    """target.yaml から epitope 名一覧を取得"""
-    tdir = ROOT / "targets" / pdb_id.upper()
-    yfile = tdir / "target.yaml"
-    if not yfile.exists():
-        print("[warn] No target.yaml found, cannot suggest arms.")
-        return []
-    cfg = yaml.safe_load(yfile.read_text()) or {}
-    epitopes = cfg.get("epitopes", []) or []
-    # name のみ取り出し（無名はスキップ）
-    names = [e.get("name") for e in epitopes if e.get("name")]
-    return names
-
-def _detect_variants_from_hotspot_jsons(pdb_id: str, epitope_name: str):
-    """
-    prep ディレクトリ内の epitope_*_hotspots{Variant}.json を探索して Variant を列挙。
-    見つからなければ ["A"] を返す（フォールバック）。
-    """
-    tdir = ROOT / "targets" / pdb_id.upper()
-    prep_dir = tdir / "prep"
-    san = _sanitize_epitope_name(epitope_name)
-    variants = set()
-
-    # 例: epitope_Receptor_Binding_Motif_(RBM)_Core_hotspotsC.json
-    pattern = f"epitope_{san}_hotspots*.json"
-    for p in prep_dir.glob(pattern):
-        m = re.search(r"_hotspots([A-Za-z0-9]+)\.json$", p.name)
-        if m:
-            variants.add(m.group(1))
-
-    if not variants:
-        # フォールバック：variant 記載なしでも一旦 A を提案
-        variants = {"A"}
-    return sorted(variants, key=lambda x: (len(x), x))
-
-def _enumerate_all_arm_combos(pdb_id: str):
-    """すべての Epitope@Variant コンボを列挙"""
-    arms = []
-    for epi in _load_epitopes_from_yaml(pdb_id):
-        for v in _detect_variants_from_hotspot_jsons(pdb_id, epi):
-            arms.append(f"{epi}@{v}")
-    return arms
-
-def print_arm_suggestions(pdb_id: str):
-    """--arm 候補一覧を表示（console 提案用）"""
-    arms = _enumerate_all_arm_combos(pdb_id)
-    if not arms:
-        print("[info] No arms detected; check target.yaml epitopes or prep/*.json.")
-        return
-    print("\n=== Suggested --arm flags (detected from prep/*.json) ===")
-    for a in arms:
-        print(f'--arm "{a}"')
-    print("=========================================================\n")
-
-def suggest_pipeline_command(pdb_id: str):
-    """
-    prep/*.json から検出した Variant に基づき、すべての Epitope@Variant を --arm に展開。
-    そのままコピペ実行できる pipeline コマンドを提示。
-    """
-    arms = _enumerate_all_arm_combos(pdb_id)
-    if not arms:
-        print("[info] No arms detected; skipping pipeline command suggestion.")
-        return
-
-    # ==== デフォルト値（環境変数で上書き可）====
-    total            = int(os.getenv("RFA_PIPELINE_TOTAL", str(len(arms))))  # 既定=検出 arm 数
-    designs_per_task = int(os.getenv("RFA_PIPELINE_DPT",  "100"))
-    num_seq          = int(os.getenv("RFA_PIPELINE_NUM_SEQ", "10"))
-    temp             = float(os.getenv("RFA_PIPELINE_TEMP",  "0.1"))
-    binder_chain_id  = os.getenv("RFA_BINDER_CHAIN_ID", "H")
-    seeds_env        = os.getenv("RFA_PIPELINE_MODEL_SEEDS", "1 2 3 4 5 6 7 8 9 10")
-    model_seeds      = [tok for tok in re.split(r"[\s,]+", seeds_env.strip()) if tok]
-    if not model_seeds:
-        model_seeds = ["1","2","3","4","5","6","7","8","9","10"]
-
-    total = max(1, min(total, len(arms)))  # 安全側
-
-    print("\n=== Suggested pipeline command (copy-paste) ===")
-    print(f"python manage_rfa.py pipeline {pdb_id.upper()} \\")
-    for i, a in enumerate(arms[:total]):
-        suffix = " \\" if i < total - 1 else " \\"
-        print(f'  --arm "{a}"{suffix}')
-    print(f"  --total {total} \\")
-    print(f"  --designs_per_task {designs_per_task} \\")
-    print(f"  --num_seq {num_seq} --temp {temp} \\")
-    print(f"  --model_seeds {' '.join(model_seeds)} \\")
-    print(f"  --binder_chain_id {shlex.quote(binder_chain_id)} \\")
-    print(f"  --run_tag {datetime.datetime.now().strftime('%Y%m%d_%H%M')}")
-    print("===============================================\n")
-
-    one_liner_arms = " ".join(f'--arm "{a}"' for a in arms[:total])
-    one_liner = (
-        f'python manage_rfa.py pipeline {pdb_id.upper()} '
-        f'{one_liner_arms} '
-        f'--total {total} --designs_per_task {designs_per_task} '
-        f'--num_seq {num_seq} --temp {temp} '
-        f'--model_seeds {" ".join(model_seeds)} '
-        f'--binder_chain_id {shlex.quote(binder_chain_id)} --run_tag {datetime.datetime.now().strftime("%Y%m%d_%H%M")}'
-    )
-    print("[tip] One-liner:")
-    print(one_liner + "\n")
-
-# ==== 既存の prep_target() の最後に、既存 print の直後でこれを呼ぶだけ ====
-# print_arm_suggestions(pdb_id)
-# suggest_pipeline_command(pdb_id)
+    text = (name or "").strip()
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    return text.strip("_") or "epitope"
 
 
-class KeepChains(Select):
-    def __init__(self, chains): self.chains=set(chains)
-    def accept_chain(self, chain): return chain.id in self.chains
+def _expand_spans_to_keys(spans: Sequence[ResidueSpan]) -> List[str]:
+    keys: List[str] = []
+    seen: set[str] = set()
+    for span in spans:
+        for pos in range(span.start, span.end + 1):
+            key = _format_residue(span.chain, pos)
+            if key not in seen:
+                keys.append(key)
+                seen.add(key)
+    return keys
 
 
-def prep_target(pdb_id: str, sasa_cutoff: float = 10.0):
-    """
-    Debug-mode prep: keep raw numbering, compute SASA, write masks.
-    Metadata generation is delegated to utils.build_epitope_metadata.
+# =============================================================================
+# SASA computation (only in --check mode)
+# =============================================================================
 
-    追加:
-      - 各エピトープの露出判定を実施（1残基でも露出→ True）
-      - target.yaml の各エピトープ項目へ
-          surface_exposed: true/false
-          debug:
-            exposed_count / declared_count / exposed_fraction / sasa_cutoff_used
-        を追記
-      - 1つでも False があれば top-level に needs_epitope_redesign: true を付与
-    """
-    print(f"--- Preparing Target (No-Fixer Debug Mode): {pdb_id.upper()} ---")
-
-    # --- I/O & config ---
-    tdir = ROOT / "targets" / pdb_id.upper()
-    cfg_path = tdir / "target.yaml"
-    # Prefer mmCIF (.cif) as the canonical source-of-truth for chain + residue indexing
-    raw_cif_path = tdir / "raw" / f"{pdb_id}.cif"
-    if not raw_cif_path.exists():
-        alt = tdir / "raw" / f"{pdb_id}.mmcif"
-        raw_cif_path = alt if alt.exists() else raw_cif_path
-
-    if not cfg_path.exists(): raise FileNotFoundError(cfg_path)
-    if not raw_cif_path.exists(): raise FileNotFoundError(raw_cif_path)
-
-    cfg = yaml.safe_load(cfg_path.read_text()) or {}
-    target_chains = _normalize_chain_ids(cfg.get("chains"))
-    if not target_chains:
-        raise ValueError("[prep_target] target.yaml must include non-empty 'chains'.")
-    print(f"[info] Requested target chain(s) from target.yaml: {target_chains}")
-    epitope_count = len(cfg.get("epitopes") or [])
-    print(f"[info] target.yaml currently defines {epitope_count} epitope(s).")
-
-    # --- Detect auth→label chain id mapping for mmCIF ---
-    # Some YAMLs store auth_asym_id while we now prefer label_asym_id. When the
-    # chains are mismatched, the prepared PDB/CIF can end up empty. Build a
-    # mapping so we can transparently translate auth ids to label ids.
+def _compute_sasa_map_mmcif(cif_path: Path) -> Dict[Tuple[str, int], float]:
     try:
-        from Bio.PDB.MMCIF2Dict import MMCIF2Dict
-
-        cif_dict = MMCIF2Dict(str(raw_cif_path))
-        auth_ids_raw = cif_dict.get("_atom_site.auth_asym_id", [])
-        label_ids_raw = cif_dict.get("_atom_site.label_asym_id", [])
-        # Normalize + ensure equal length
-        auth_ids = [str(x).strip().upper() for x in auth_ids_raw]
-        label_ids = [str(x).strip().upper() for x in label_ids_raw]
-        auth_ids_set = set(auth_ids)
-        label_ids_set = set(label_ids)
-        if auth_ids_set:
-            print(f"[debug] mmCIF auth_asym_id unique: {sorted(auth_ids_set)}")
-        if label_ids_set:
-            label_sorted = sorted(label_ids_set)
-            preview = label_sorted[:12]
-            suffix = "..." if len(label_sorted) > len(preview) else ""
-            print(f"[debug] mmCIF label_asym_id unique (preview): {preview}{suffix} (total={len(label_sorted)})")
-        auth_to_label_counts = defaultdict(lambda: defaultdict(int))
-        for a, l in zip(auth_ids, label_ids):
-            auth_to_label_counts[a][l] += 1
-
-        auth_to_label = {}
-        for auth_id, label_count in auth_to_label_counts.items():
-            # choose the most frequent label for this auth id
-            label_sorted = sorted(label_count.items(), key=lambda kv: (-kv[1], kv[0]))
-            auth_to_label[auth_id] = label_sorted[0][0]
-
-        requested = set(target_chains)
-        requested_in_auth = sorted(requested & auth_ids_set)
-        requested_in_label = sorted(requested & label_ids_set)
-        if requested_in_auth:
-            # Treat YAML chain IDs as auth_asym_id whenever they appear in auth_asym_id.
-            # Important edge case: the same string can exist in both auth and label IDs;
-            # in that case we still prefer auth→label remapping to avoid selecting the
-            # wrong physical chain.
-            remapped = []
-            for cid in target_chains:
-                if cid in auth_to_label:
-                    new_cid = auth_to_label[cid]
-                    if new_cid != cid:
-                        print(
-                            f"[warn] Remapping chain '{cid}' (auth_asym_id) → '{new_cid}' (label_asym_id) for mmCIF selection."
-                        )
-                    remapped.append(new_cid)
-                else:
-                    print(
-                        f"[warn] Chain '{cid}' is present in mmCIF auth_asym_id but no auth→label mapping was inferred; "
-                        "keeping it unchanged."
-                    )
-                    remapped.append(cid)
-            target_chains = _normalize_chain_ids(remapped)
-            if requested_in_label:
-                print(
-                    f"[debug] Requested chain(s) also exist as label_asym_id: {requested_in_label} "
-                    f"(treated as auth_asym_id due to overlap with auth_asym_id={requested_in_auth})."
-                )
+        from Bio.PDB import MMCIFParser  # type: ignore
+        from Bio.PDB.SASA import ShrakeRupley  # type: ignore
     except Exception as exc:
-        # Mapping is best-effort; continue with original target_chains on failure.
-        print(f"[warn] Failed to infer auth→label chain mapping from CIF: {exc}")
+        raise ImportError(
+            "Biopython with SASA support is required for --check mode."
+        ) from exc
 
-    # allow YAML override
-    sasa_cutoff = float(cfg.get("sasa_cutoff", sasa_cutoff))
-    if sasa_cutoff <= 0.0:
-        raise ValueError(f"[prep_target] Invalid SASA cutoff: {sasa_cutoff}. Must be positive.")
-    print(f"[info] Using SASA cutoff: {sasa_cutoff}")
-    if not isinstance(target_chains, list) or not all(isinstance(c, str) for c in target_chains):
-        raise ValueError("[prep_target] 'chains' in target.yaml must be a list of strings.")
-
-    prep_dir = tdir / "prep"
-    prep_dir.mkdir(exist_ok=True)
-
-    # --- 1) Chain selection from raw mmCIF (.cif) ---
-    # We treat chain IDs and residue indices as canonical mmCIF labels:
-    #   - chain id: label_asym_id
-    #   - residue index: label_seq_id (1-based)
-
-    try:
-        from Bio.PDB import MMCIFParser, MMCIFIO
-    except Exception as exc:
-        raise ImportError("Biopython with MMCIF support is required (pip install biopython).") from exc
-
-    # Prefer label_* numbering/chain ids when supported by installed Biopython.
-    parser = None
     try:
         parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False)
-        structure = parser.get_structure("raw", str(raw_cif_path))
-        using_label = True
     except TypeError:
-        # Older Biopython versions don't accept auth_* flags; they typically default to auth numbering.
-        # This can break alignment with BoltzGen/Mol* label_seq_id expectations.
-        print("[warn] Biopython MMCIFParser does not support auth_chains/auth_residues flags. "
-              "Your Biopython may be old; consider upgrading to ensure label_seq_id indexing.")
         parser = MMCIFParser(QUIET=True)
-        structure = parser.get_structure("raw", str(raw_cif_path))
-        using_label = False
 
-    class _KeepChains(Select):
-        def __init__(self, chains):
-            self.chains = {c.strip().upper() for c in chains}
+    structure = parser.get_structure("MMCIF_STRUCTURE", str(cif_path))
 
-        def accept_chain(self, chain):
-            return str(chain.id).strip().upper() in self.chains
+    sr = ShrakeRupley()
+    sr.compute(structure, level="R")
 
-    selector = _KeepChains(target_chains)
-
-    # Write prepared.cif (canonical, label indexing) and prepared.pdb (for legacy tools like freesasa)
-    prepared_cif_path = prep_dir / "prepared.cif"
-    prepared_pdb_path = prep_dir / "prepared.pdb"
-
-    # Normalize chain IDs to uppercase in-memory first.
-    for chain in structure.get_chains():
-        new_id = str(chain.id).strip().upper()
-        if chain.id != new_id:
-            chain.id = new_id
-
-    # Save selected chains to mmCIF
-    cif_io = MMCIFIO()
-    cif_io.set_structure(structure)
-    cif_io.save(str(prepared_cif_path), select=selector)
-
-    # Re-parse the selected structure from prepared.cif to ensure we only keep selected chains.
-    # (MMCIFIO does not always prune non-selected entities perfectly across Biopython versions.)
-    try:
-        sel_parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False) if using_label else MMCIFParser(QUIET=True)
-    except TypeError:
-        sel_parser = MMCIFParser(QUIET=True)
-    sel_struct = sel_parser.get_structure("sel", str(prepared_cif_path))
-
-    # Write selected chains to PDB for freesasa.
-    # NOTE: PDB is legacy and may not support multi-character chain ids; if encountered, we warn.
-    io = PDBIO()
-    io.set_structure(sel_struct)
-    # Warn if any chain id is not 1 character (PDB limitation).
-    long_ids = sorted({str(c.id) for c in sel_struct.get_chains() if len(str(c.id)) != 1})
-    if long_ids:
-        print(f"[warn] Some chain IDs are not 1 character and may not round-trip in PDB cleanly: {long_ids}. "
-              "Freesasa operates on PDB; consider restricting to 1-char label_asym_id chains or rely on CIF-only tools.")
-    # `sel_struct` is already pruned by re-parsing prepared.cif; avoid re-applying the
-    # original selector here because chain IDs can differ between auth/label views.
-    io.save(str(prepared_pdb_path))
-    print(f"[ok] Selected chains {target_chains} from raw mmCIF -> prepared.cif + prepared.pdb")
-
-    # Sanity: ensure prepared.pdb has at least one ATOM/HETATM line
-    with open(prepared_pdb_path, "r") as f:
-        has_atom = any(line.startswith(("ATOM", "HETATM")) for line in f)
-    if not has_atom:
-        # If CIF has atoms but PDB is empty, this is usually a chain-id view mismatch.
-        sel_atoms = sum(1 for _ in sel_struct.get_atoms())
-        sel_chains = sorted({str(c.id) for c in sel_struct.get_chains()})
-        raise RuntimeError(
-            f"Prepared PDB has no atoms for chains={target_chains} "
-            f"(selected CIF chains={sel_chains}, selected CIF atoms={sel_atoms}). "
-            "Likely chain mismatch between target.yaml and mmCIF auth/label IDs."
-        )
-
-    # --- 1.5) Build residue maps from selected structure (label_seq_id space when supported) ---
-    # Ensure chain IDs are uppercase for downstream tools (e.g., AF3)
-    for chain in sel_struct.get_chains():
-        chain.id = str(chain.id).strip().upper()
-
-    resname_lookup = {}
-    ca_xyz = {}
-    res_bfac = {}
-    chain_seq = {}
-    chain_index_map = {}
-
-    for model in sel_struct:
+    sasa_map: Dict[Tuple[str, int], float] = {}
+    for model in structure:
         for chain in model:
-            ch = str(chain.id).strip().upper()
-            seq = []
-            idx_map = []
-            for res in chain:
-                if res.id[0] != " ":  # skip HETATM/waters
+            chain_id = (str(chain.id) or "").strip().upper()
+            if not chain_id:
+                continue
+            for residue in chain:
+                hetflag, resseq, icode = residue.get_id()
+                if hetflag != " ":
                     continue
-                resseq = res.id[1]  # in label mode this is label_seq_id (1-based)
-                key = make_key(ch, int(resseq))
-                resname = res.get_resname()
-                if key not in resname_lookup:
-                    resname_lookup[key] = resname
+                if resseq is None:
+                    continue
+                try:
+                    pos = int(resseq)
+                except Exception:
+                    continue
+                sasa = getattr(residue, "sasa", None)
+                if sasa is None:
+                    sasa = residue.xtra.get("EXP_SASA") or residue.xtra.get("sasa")
+                try:
+                    sasa_f = float(sasa)
+                except Exception:
+                    continue
+                sasa_map[(chain_id, pos)] = sasa_f
+        break
+    return sasa_map
 
-                # CA coordinate or centroid
-                if "CA" in res:
-                    ca = res["CA"]
-                    ca_xyz[key] = tuple(float(x) for x in ca.get_coord())
-                else:
-                    xs = []; ys = []; zs = []
-                    for atom in res.get_atoms():
-                        x, y, z = atom.get_coord()
-                        xs.append(float(x)); ys.append(float(y)); zs.append(float(z))
-                    ca_xyz[key] = (sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs)) if xs else None
 
-                # Mean B-factor
-                bvals = []
-                for atom in res.get_atoms():
-                    try:
-                        bvals.append(float(atom.get_bfactor()))
-                    except Exception:
-                        pass
-                res_bfac[key] = (sum(bvals)/len(bvals)) if bvals else 0.0
+# =============================================================================
+# IO: target.yaml and hotspot bundle outputs
+# =============================================================================
 
-                one = THREE2ONE.get(resname.upper(), "X")
-                seq.append(one)
-                idx_map.append((int(resseq), resname))
-
-            chain_seq[ch] = "".join(seq)
-            chain_index_map[ch] = idx_map
-
-    # Keep legacy variable name for downstream code
-    selected_pdb_path = prepared_pdb_path
-# --- 2) SASA (FreeSASA on selected PDB) ---
-    struct = freesasa.Structure(str(selected_pdb_path))
-    result = freesasa.calc(struct)
-
-    res_sasa = defaultdict(float)
-    chain_labels = set()
-    for i in range(struct.nAtoms()):
-        area = result.atomArea(i)
-        ch   = struct.chainLabel(i)
-        norm_ch = ch.strip().upper()
-        chain_labels.add(norm_ch)
-        # integer化（挿入コードは落とす）
-        res_num = struct.residueNumber(i).strip()
-        m = re.match(r"^-?\d+", res_num)
-        if not m: continue
-        resn_int = int(m.group(0))
-        res_sasa[make_key(norm_ch, resn_int)] += area
-
-    print(f"[debug] Chains seen by FreeSASA: {sorted(chain_labels)}")
-    # If requested chains are missing, trim to present ones (warn) rather than abort.
-    missing = [c for c in target_chains if c not in chain_labels]
-    if missing:
-        present = [c for c in target_chains if c in chain_labels]
-        print(f"[warn] Requested chains missing in prepared structure: {missing} → using present={present}")
-        if not present:
-            raise RuntimeError("No requested chains present; cannot proceed.")
-        target_chains = present
-
-    # --- 3) Build masks & collect metadata entries ---
-    any_empty = []
-    epi_entries = []
-    exposure_info = {}  # surface_exposed 判定集計
-
-    for epi in (cfg.get("epitopes", []) or []):
-        if not isinstance(epi, dict) or "name" not in epi:
-            continue
-        name = epi["name"]
-        name_sanitized = name.replace(" ","_").replace("/", "_")
-        declared_keys = []
-
-        # Collect declared residue keys
-        for span in epi.get("residues", []):
-            ch, rng = span.split(":")
-            ch = ch.strip().upper()
-            a, b = rng.split("-")
-            a_i, b_i = int(a), int(b)
-            if a_i > b_i: a_i, b_i = b_i, a_i
-            for r in range(a_i, b_i + 1):
-                declared_keys.append(make_key(ch, r))
-
-        # --- Per-epitope SASA auto-relax: try current cutoff → 8.0 → 6.0 ---
-        tried_cutoffs = [sasa_cutoff]
-        for c in (8.0, 6.0):
-            # relax only（より小さい閾値で露出扱いを広げる）
-            if c < sasa_cutoff - 1e-6:
-                print(f"[debug] Epitope '{name}': relaxing SASA {sasa_cutoff}→{c}")
-                tried_cutoffs.append(c)
-
-        final_cutoff = None
-        mask = set()
-        for cut in tried_cutoffs:
-            mask = {k for k in declared_keys if res_sasa.get(k, 0.0) > cut}
-            print(f"[debug] Epitope '{name}': SASA cutoff {cut} -> {len(mask)} exposed residues")
-            if mask:
-                final_cutoff = cut
-                break
-
-        # マスク JSON（レガシー互換名）
-        mask_filename = f"epitope_{name_sanitized}.json"
-        (prep_dir / mask_filename).write_text(json.dumps(sorted(mask), indent=2))
-        print(f"[ok] Epitope '{name}': declared={len(declared_keys)}, "
-              f"exposed(SASA>{final_cutoff if final_cutoff is not None else sasa_cutoff})={len(mask)} -> {mask_filename}")
-
-        if len(mask) == 0:
-            any_empty.append(name)
-
-        # --- Hotspot selection helpers (declared region context) ---
-        from utils import select_hotspots, find_nglyc_motifs_in_declared
-
-        # derive glyco keys in declared region (returns motif triplets; flatten to keys)
-        ng_hits = find_nglyc_motifs_in_declared(declared_keys, chain_seq, chain_index_map, resname_lookup)
-        ng_keys = {
-            (h.get("asn_key") or make_key(h["chain"], h["resnum"]))
-            for h in (ng_hits or [])
-            if h.get("chain") and h.get("resnum") is not None
-        }
-
-        # pick hotspots with policy defaults or YAML overrides
-        policy = (cfg.get("hotspot_policy") or {})
-        k = int(policy.get("max_hotspots", 5))
-        mind = float(policy.get("min_distance", 6.0))
-
-        hotspots = select_hotspots(
-            exposed_keys=sorted(mask),
-            res_sasa=res_sasa,
-            ca_xyz=ca_xyz,
-            res_bfac=res_bfac,
-            resname_lookup=resname_lookup,
-            nglyc_keys=ng_keys,
-            k=k, min_dist=mind
-        )
-
-        # write hotspot files (A/B/C variants + default)
-        hotspot_path = prep_dir / f"epitope_{name_sanitized}_hotspots.json"
-        json.dump(hotspots, open(hotspot_path, "w"), indent=2)
-
-        print(f'[debug] Generating hotspot variants for epitope "{name}" with policy: max_hotspots={k}, min_distance={mind}')
-        variants = make_hotspot_variants(
-            declared_keys=declared_keys,
-            exposed_keys=sorted(mask),
-            res_sasa=res_sasa,
-            resname_lookup=resname_lookup,
-            ca_xyz=ca_xyz,
-            res_bfac=res_bfac,
-            k=k, min_dist=mind
-        )
-        for vlabel, vkeys in variants.items():
-            (prep_dir / f"epitope_{name_sanitized}_hotspots{vlabel}.json").write_text(
-                json.dumps(vkeys, indent=2)
-            )
-        # default (no suffix) for backwards compatibility
-        (prep_dir / f"epitope_{name_sanitized}_hotspots.json").write_text(
-            json.dumps(variants.get("A", []), indent=2)
-        )
-
-        # --- Metadata entry (record per-epitope cutoff actually used) ---
-        epi_cutoff = final_cutoff if final_cutoff is not None else sasa_cutoff
-        epi_meta = build_epitope_metadata(
-            name=name,
-            declared_keys=declared_keys,
-            exposed_keys=sorted(mask),
-            res_sasa=res_sasa,
-            resname_lookup=resname_lookup,
-            ca_xyz=ca_xyz,
-            res_bfac=res_bfac,
-            chain_seq=chain_seq,
-            chain_index_map=chain_index_map,
-            sasa_cutoff=epi_cutoff,               # per-epitope cutoff used
-            mask_filename=mask_filename,
-            top_k=15,
-        )
-        epi_meta["hotspots"] = hotspots
-        if abs(epi_cutoff - sasa_cutoff) > 1e-6:
-            epi_meta["sasa_cutoff_relaxed_from"] = sasa_cutoff
-        epi_entries.append(epi_meta)
-
-        # --- surface_exposed 判定を集計（1残基でも露出していれば True） ---
-        declared_cnt = len(set(declared_keys))
-        exposed_cnt   = len(mask)
-        frac          = (exposed_cnt / declared_cnt) if declared_cnt > 0 else 0.0
-        exposure_info[name] = {
-            "surface_exposed": exposed_cnt > 0,
-            "exposed_count": exposed_cnt,
-            "declared_count": declared_cnt,
-            "exposed_fraction": round(frac, 3),
-            "sasa_cutoff_used": float(epi_cutoff),
-        }
-
-    # --- 4) メタドキュメント保存（空でも書いてから例外） ---
-    meta_doc = build_metadata_doc(pdb_id, target_chains, sasa_cutoff, epi_entries, version=2)
-    meta_path = prep_dir / "epitopes_metadata.json"
-    meta_path.write_text(json.dumps(meta_doc, indent=2))
-
-    # If some epitopes had empty exposed masks, skip them but keep others.
-    if any_empty and len(any_empty) < len(epi_entries):
-        print(f"[warn] Skipping epitopes with empty hotspot masks: {', '.join(any_empty)}")
-    elif any_empty and len(any_empty) == len(epi_entries):
-        raise RuntimeError("[prep_target] All epitopes empty (check numbering or lower SASA cutoff).")
-
-    print(f"[ok] Wrote rich metadata for {len(epi_entries)} epitopes -> {meta_path.name}")
-    print("[done] prep-target (no-fixer) complete.")
-
-    # --- target.yaml に surface_exposed / debug / needs_epitope_redesign を反映 ---
+def _read_yaml(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
     try:
-        cfg_latest = yaml.safe_load(cfg_path.read_text()) or {}
-        eps = (cfg_latest.get("epitopes", []) or [])
-        name_to_idx = {e.get("name"): i for i, e in enumerate(eps) if isinstance(e, dict) and e.get("name")}
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-        for name, rec in exposure_info.items():
-            if name in name_to_idx:
-                e = eps[name_to_idx[name]]
-            else:
-                e = {"name": name}
-                eps.append(e)
-            e["surface_exposed"] = bool(rec["surface_exposed"])
-            dbg = e.get("debug", {})
-            dbg.update({
-                "exposed_count": int(rec["exposed_count"]),
-                "declared_count": int(rec["declared_count"]),
-                "exposed_fraction": float(rec["exposed_fraction"]),
-                "sasa_cutoff_used": float(rec["sasa_cutoff_used"]),
-            })
-            e["debug"] = dbg
 
-        cfg_latest["epitopes"] = eps
-        cfg_latest["needs_epitope_redesign"] = any(not r["surface_exposed"] for r in exposure_info.values())
+def _write_yaml(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
-        cfg_path.write_text(yaml.safe_dump(cfg_latest, sort_keys=False))
-        print(f"[ok] target.yaml updated: surface_exposed for {len(exposure_info)} epitopes "
-              f"(needs_epitope_redesign={cfg_latest['needs_epitope_redesign']})")
-        if cfg_latest["needs_epitope_redesign"]:
-            print("[warn] Some epitopes are not surface-exposed. Consider reselecting epitopes.")
-    except Exception as e:
-        print(f"[warn] Failed to write surface_exposed to target.yaml: {e}")
 
-    # ==== 既存の提案出力はそのまま ====
-    print_arm_suggestions(pdb_id)
-    suggest_pipeline_command(pdb_id)
+def _write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-    # --- Hotspot PyMOL bundle export and scp suggestion (既存のまま) ---
+
+def _detect_raw_cif(tdir: Path, pdb_id: str) -> Optional[Path]:
+    pdb_id_u = pdb_id.upper()
+    candidates = [
+        tdir / "raw" / f"{pdb_id_u}.cif",
+        tdir / "raw" / "raw.cif",
+        tdir / "raw" / "raw" / "raw.cif",
+        tdir / f"{pdb_id_u}.cif",
+        tdir / "raw.cif",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _bundle_paths(tdir: Path) -> Dict[str, Path]:
+    reports = tdir / "reports"
+    bundle_dir = reports / "hotspot_bundle"
+    return {
+        "reports_json": reports / "hotspot_bundle.json",
+        "reports_yaml": reports / "hotspot_bundle.yaml",
+        "bundle_dir_json": bundle_dir / "bundle.json",
+        "root_json": tdir / "hotspot_bundle.json",
+        "bundle_dir": bundle_dir,
+        "reports_dir": reports,
+    }
+
+
+def _write_hotspots_tsv(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cols = ["epitope", "chain", "position", "sasa"]
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\t".join(cols) + "\n")
+        for r in rows:
+            f.write("\t".join(str(r.get(c, "")) if r.get(c, "") is not None else "" for c in cols) + "\n")
+
+
+# =============================================================================
+# Public API (backward compatible)
+# =============================================================================
+
+def prep_target(
+    pdb_id: str,
+    sasa_cutoff: float = DEFAULTS["SASA_CUTOFF"],
+    *args: Any,
+    **kwargs: Any,
+):
+    """Prepare/refresh hotspot selections for a target.
+
+    Backward compatible call forms:
+      - prep_target("8Z7N")
+      - prep_target("8Z7N", 20)              # old manage_rfa signature
+      - prep_target("8Z7N", 20, check=True)  # optional
+
+    Keyword args:
+      - targets_root: str|Path
+      - check: bool (default False)
+      - n_hotspots: int (default 3; clamped 1..5 by default)
+      - min_hotspots / max_hotspots: clamp bounds (defaults 1..5)
+    """
+    pdb_id_u = (pdb_id or "").strip().upper()
+    if not pdb_id_u:
+        print("[fail] prep_target(): empty pdb_id")
+        return None
+
+    # ---- Defensive kwargs parsing (fixes the original int->Path bug) ----
+    check = bool(kwargs.get("check", False))
+
+    n_hotspots = kwargs.get("n_hotspots", DEFAULTS["N_HOTSPOTS"])
+    min_hotspots = kwargs.get("min_hotspots", DEFAULTS["MIN_HOTSPOTS"])
+    max_hotspots = kwargs.get("max_hotspots", DEFAULTS["MAX_HOTSPOTS"])
+
     try:
-        from scripts.pymol_utils import export_hotspot_bundle  # type: ignore
-        bdir = export_hotspot_bundle(pdb_id)
-        if bdir:
-            print(f"[prep_target] Hotspot visualisation bundle created at: {bdir}")
+        n_hotspots = int(n_hotspots)
+    except Exception:
+        n_hotspots = int(DEFAULTS["N_HOTSPOTS"])
+    try:
+        min_hotspots = int(min_hotspots)
+    except Exception:
+        min_hotspots = int(DEFAULTS["MIN_HOTSPOTS"])
+    try:
+        max_hotspots = int(max_hotspots)
+    except Exception:
+        max_hotspots = int(DEFAULTS["MAX_HOTSPOTS"])
+
+    n_hotspots = max(min_hotspots, min(max_hotspots, n_hotspots))
+
+    tr_raw = kwargs.get("targets_root", DEFAULTS["TARGETS_ROOT_LOCAL"])
+    if isinstance(tr_raw, (str, os.PathLike, Path)):
+        targets_root = Path(tr_raw).expanduser().resolve()
+    else:
+        targets_root = Path(DEFAULTS["TARGETS_ROOT_LOCAL"]).expanduser().resolve()
+
+    try:
+        sasa_cutoff_f = float(sasa_cutoff)
+    except Exception:
+        sasa_cutoff_f = float(DEFAULTS["SASA_CUTOFF"])
+
+        # Optional backward-compat: some older callers may pass targets_root as 3rd positional.
+    if args:
+        maybe_tr = args[0]
+        if "targets_root" not in kwargs and isinstance(maybe_tr, (str, os.PathLike, Path)):
             try:
-                import socket
-                host = socket.gethostname() or os.uname()[1]
+                targets_root = Path(maybe_tr).expanduser().resolve()
+                args = args[1:]
+                print(f"[info] Detected positional targets_root override: {targets_root}")
             except Exception:
-                host = os.uname()[1] if hasattr(os, 'uname') else ''
-            user = os.getenv('USER', '')
-            port = os.getenv('RFA_SCP_PORT', '6000')
-            if user and host:
-                print(
-                    f"[prep_target] To copy this bundle to your local machine, run:\n"
-                    f"  scp -r -P {port} {user}@{host}:{bdir} ~/Downloads/\n"
-                    f"(modify the destination path as needed)"
-                )
-    except Exception as e:
-        print(f"[prep_target] Warning: could not export hotspot PyMOL bundle ({e})")
+                pass
+        if args:
+            print(f"[warn] prep_target(): ignoring unexpected extra positional args: {args!r}")
+
+    tdir = targets_root / pdb_id_u
+    _ENSURE_DIR(tdir)
+    prep_dir = tdir / "prep"
+    _ENSURE_DIR(prep_dir)
+    _ENSURE_DIR(tdir / "reports")
+
+    yml_path = tdir / "target.yaml"
+    cfg = _read_yaml(yml_path)
+
+    epitopes = cfg.get("epitopes") or []
+    if not isinstance(epitopes, list):
+        epitopes = []
+
+    if not epitopes:
+        allowed_range = cfg.get("allowed_epitope_range")
+        target_chains = cfg.get("target_chains") or cfg.get("chains") or []
+        if isinstance(target_chains, str):
+            target_chains = [target_chains]
+        target_chains = [str(c).strip().upper() for c in target_chains if str(c).strip()]
+
+        fallback_residues: List[str] = []
+        if isinstance(allowed_range, str) and allowed_range.strip():
+            tokens = _split_multi_specs(allowed_range)
+            for t in tokens:
+                if ":" in t:
+                    fallback_residues.append(t.strip())
+        if not fallback_residues and target_chains:
+            fallback_residues = [f"{target_chains[0]}:1-200"]
+
+        epitopes = [{"name": "Epitope_1", "residues": fallback_residues, "note": "auto-generated (no epitopes present)"}]
+        cfg["epitopes"] = epitopes
+        print("[warn] target.yaml had no epitopes; created a minimal Epitope_1 placeholder.")
+
+    raw_cif = _detect_raw_cif(tdir, pdb_id_u)
+    if raw_cif is None:
+        print(f"[warn] raw mmCIF not found under {tdir}/raw; proceeding without structure file.")
+    else:
+        print(f"[info] Using structure file: {raw_cif}")
+
+    sasa_map: Dict[Tuple[str, int], float] = {}
+    if check and raw_cif is not None:
+        try:
+            print(f"[info] --check enabled: computing residue SASA (cutoff={sasa_cutoff_f:g} Å^2)…")
+            sasa_map = _compute_sasa_map_mmcif(raw_cif)
+            print(f"[ok] SASA computed for {len(sasa_map)} residues.")
+        except Exception as exc:
+            print(f"[warn] SASA computation failed ({exc}); falling back to minimal mode.")
+            sasa_map = {}
+
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    bundle: Dict[str, Any] = {
+        "pdb_id": pdb_id_u,
+        "generated_at": timestamp,
+        "mode": "check" if (check and sasa_map) else "minimal",
+        "targets_root": str(targets_root),
+        "structure_file": str(raw_cif) if raw_cif else None,
+        "sasa_cutoff": sasa_cutoff_f if (check and sasa_map) else None,
+        "epitopes": [],
+    }
+
+    tsv_rows: List[Dict[str, Any]] = []
+
+    for ep in epitopes:
+        if not isinstance(ep, dict):
+            continue
+        name = ep.get("name") or ep.get("display_name") or "Epitope"
+        residues = ep.get("residues") or []
+        spans = parse_residue_spans(residues)
+
+        allowed: Optional[set[Tuple[str, int]]] = None
+        if check and sasa_map:
+            allowed = {k for k, v in sasa_map.items() if v >= sasa_cutoff_f}
+
+        picks = choose_hotspots_from_spans(spans, n_hotspots, allowed_positions=allowed)
+        if (check and sasa_map) and not picks:
+            picks = choose_hotspots_from_spans(spans, n_hotspots, allowed_positions=None)
+
+        hotspots = [_format_residue(ch, pos) for (ch, pos) in picks]
+        ep["hotspots"] = hotspots
+        ep["hotspot_count"] = len(hotspots)
+
+        bundle_ep = {"name": str(name), "display_name": ep.get("display_name"), "residues": residues, "hotspots": hotspots}
+        bundle["epitopes"].append(bundle_ep)
+
+        for (ch, pos) in picks:
+            tsv_rows.append(
+                {"epitope": str(name), "chain": ch, "position": pos,
+                 "sasa": round(sasa_map.get((ch, pos), float("nan")), 3) if sasa_map else ""}
+            )
+
+        # --- Legacy epitope exports (prep/epitope_*.json) for PyMOL and downstream tools ---
+        san = _sanitize_epitope_name(str(name))
+        mask_keys = _expand_spans_to_keys(spans)
+        mask_path = prep_dir / f"epitope_{san}.json"
+        hotspot_path = prep_dir / f"epitope_{san}_hotspotsA.json"
+        try:
+            _write_json(mask_path, mask_keys)
+            _write_json(hotspot_path, hotspots)
+            ep.setdefault("files", {})
+            ep["files"]["mask_json"] = mask_path.name
+            ep["files"]["hotspots_json"] = hotspot_path.name
+        except Exception as exc:
+            print(f"[warn] Failed to write legacy epitope exports for {name}: {exc}")
+
+    cfg.setdefault("prep_target", {})
+    cfg["prep_target"].update(
+        {
+            "generated_at": timestamp,
+            "mode": bundle["mode"],
+            "n_hotspots": n_hotspots,
+            "sasa_cutoff": sasa_cutoff_f if (check and sasa_map) else None,
+            "structure_file": str(raw_cif) if raw_cif else None,
+        }
+    )
+
+    try:
+        _write_yaml(yml_path, cfg)
+        print(f"[ok] Updated {yml_path} with hotspots.")
+    except Exception as exc:
+        print(f"[warn] Could not write target.yaml ({exc}). Continuing.")
+
+    paths = _bundle_paths(tdir)
+    _ENSURE_DIR(paths["reports_dir"])
+    _ENSURE_DIR(paths["bundle_dir"])
+
+    try:
+        _write_json(paths["reports_json"], bundle)
+        _write_json(paths["bundle_dir_json"], bundle)
+        _write_json(paths["root_json"], bundle)
+        _write_yaml(paths["reports_yaml"], bundle)
+        _write_hotspots_tsv(paths["reports_dir"] / "hotspots.tsv", tsv_rows)
+        print(f"[ok] Wrote hotspot bundle to {paths['reports_json']}")
+    except Exception as exc:
+        print(f"[warn] Failed to write hotspot bundle files ({exc}).")
+
+    return bundle
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def _build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Generate hotspot selections for epitopes in target.yaml (default minimal; --check for SASA filtering)."
+    )
+    p.add_argument("pdb_id", help="PDB ID (e.g., 8Z7N)")
+    p.add_argument("--targets-root", default=None, help="Targets root directory")
+    p.add_argument("--n-hotspots", type=int, default=DEFAULTS["N_HOTSPOTS"], help="Hotspots per epitope (default 3)")
+    p.add_argument("--check", action="store_true", help="Enable SASA-based filtering (surface exposed only)")
+    p.add_argument("--sasa-cutoff", type=float, default=DEFAULTS["SASA_CUTOFF"], help="SASA cutoff (Å^2) for --check")
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = _build_argparser()
+    args = ap.parse_args(argv)
+
+    kwargs: Dict[str, Any] = {"check": bool(args.check), "n_hotspots": int(args.n_hotspots)}
+    if args.targets_root:
+        kwargs["targets_root"] = args.targets_root
+
+    prep_target(args.pdb_id, args.sasa_cutoff, **kwargs)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -100,9 +100,24 @@ def get_target_status(pdb_id: str) -> dict[str, object]:
     target_yaml = target_dir / "target.yaml"
     prep_dir = target_dir / "prep"
     prepared_pdb = prep_dir / "prepared.pdb"
+    raw_dir = target_dir / "raw"
+    raw_structs = [
+        raw_dir / f"{pdb_id.upper()}.cif",
+        raw_dir / f"{pdb_id.upper()}.mmcif",
+        raw_dir / "raw.cif",
+        raw_dir / "raw.mmcif",
+    ]
+    has_structure = prepared_pdb.exists() or any(p.exists() for p in raw_structs)
     hotspot_files = []
     if prep_dir.exists():
         hotspot_files = list(prep_dir.glob("*hotspot*.json")) or list(prep_dir.glob("epitope_*hotspots*.json"))
+    if not hotspot_files:
+        bundle_candidates = [
+            target_dir / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle.json",
+            target_dir / "reports" / "hotspot_bundle" / "bundle.json",
+        ]
+        hotspot_files = [p for p in bundle_candidates if p.exists()]
 
     try:
         updated_candidates = [
@@ -119,7 +134,7 @@ def get_target_status(pdb_id: str) -> dict[str, object]:
         "pdb_id": pdb_id.upper(),
         "target_path": str(target_dir) if target_dir.exists() else None,
         "has_target_yaml": target_yaml.exists(),
-        "has_prep": prepared_pdb.exists(),
+        "has_prep": has_structure,
         "has_hotspots": bool(hotspot_files),
         "prep_path": str(prep_dir) if prep_dir.exists() else None,
         "updated_at": updated_at,

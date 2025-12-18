@@ -408,7 +408,7 @@ if USE_LLM:
     import google.generativeai as genai  # pip install google-generativeai
     genai.configure(api_key=GOOGLE_API_KEY)
 
-from prep_target import prep_target, _enumerate_all_arm_combos
+from prep_target import prep_target
 from init_target import init_target
 from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
 from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
@@ -988,7 +988,8 @@ def main():
                     pipelines = ydoc.get("pipelines") or []
                     if not isinstance(pipelines, list): pipelines = []
                     try:
-                        arms = _enumerate_all_arm_combos(pdb_id) or []
+                        # arms = _enumerate_all_arm_combos(pdb_id) or []
+                        pass
                     except Exception:
                         arms = []
                     pipeline_paths = []
@@ -1063,7 +1064,8 @@ def main():
                 except Exception:
                     pass
                 try:
-                    arms = _enumerate_all_arm_combos(pdb_id) or []
+                    # arms = _enumerate_all_arm_combos(pdb_id) or []
+                    pass
                     enr["arm_count"] = len(arms)
                 except Exception:
                     pass

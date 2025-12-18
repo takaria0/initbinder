@@ -1335,9 +1335,10 @@ class BoltzGenEngine(DesignEngine):
         include_entries: List[Dict[str, Dict[str, str]]] = []
         for chain, residues in sorted(include_map.items()):
             entry = {"chain": {"id": chain}}
-            formatted = self._format_ranges(residues)
-            if formatted:
-                entry["chain"]["res_index"] = formatted
+            # Don't specify residues
+            # formatted = self._format_ranges(residues)
+            # if formatted:
+            #     entry["chain"]["res_index"] = formatted
             include_entries.append(entry)
 
         binding_entries: List[Dict[str, Dict[str, str]]] = []

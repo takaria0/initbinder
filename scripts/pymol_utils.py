@@ -264,6 +264,164 @@ def _normalize_chain_list(chains: Optional[Sequence[object]]) -> list[str]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Fallback parsing for the new consolidated hotspot bundle (prep_target.py)
+# ---------------------------------------------------------------------------
+
+_BUNDLE_RANGE = re.compile(r"^\s*([A-Za-z0-9])\s*[:_\-]?\s*(-?\d+)\s*[-\u2013]\s*(-?\d+)\s*$")
+_BUNDLE_TOKEN = re.compile(r"^\s*([A-Za-z0-9])\s*[:_\-]?\s*(-?\d+)\s*$")
+
+
+def _expand_bundle_residues(entries: Sequence[object]) -> list[str]:
+    """Expand bundle residue strings like 'C:30-35' into individual positions."""
+    expanded: list[str] = []
+    for raw in entries or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        m_range = _BUNDLE_RANGE.match(text)
+        if m_range:
+            chain = m_range.group(1)
+            try:
+                a = int(m_range.group(2))
+                b = int(m_range.group(3))
+            except Exception:
+                continue
+            if b < a:
+                a, b = b, a
+            for pos in range(a, b + 1):
+                expanded.append(f"{chain}{pos}")
+            continue
+        m_tok = _BUNDLE_TOKEN.match(text)
+        if m_tok:
+            chain = m_tok.group(1)
+            resi = m_tok.group(2)
+            expanded.append(f"{chain}{resi}")
+            continue
+        expanded.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for tok in expanded:
+        if tok not in seen:
+            deduped.append(tok)
+            seen.add(tok)
+    return deduped
+
+
+def _epitopes_from_hotspot_bundle(bundle: Mapping[str, object]) -> dict[str, dict[str, list[str]]]:
+    """Convert prep_target hotspot_bundle.json into the legacy epitopes dict."""
+    epitopes: dict[str, dict[str, list[str]]] = {}
+    for ep in bundle.get("epitopes") or []:
+        if not isinstance(ep, Mapping):
+            continue
+        name = str(ep.get("display_name") or ep.get("name") or "").strip()
+        if not name:
+            continue
+        mask_residues = _expand_bundle_residues(ep.get("residues") or [])
+        hotspot_keys = _expand_bundle_residues(ep.get("hotspots") or [])
+        entry: dict[str, list[str]] = {}
+        if mask_residues:
+            entry["mask"] = mask_residues
+        if hotspot_keys:
+            entry["A"] = hotspot_keys
+        if entry:
+            epitopes[name] = entry
+    return epitopes
+
+
+def _detect_structure_chains(struct_path: Path) -> list[str]:
+    """Lightweight chain extractor for PDB or mmCIF (author chain ID)."""
+    suffix = struct_path.suffix.lower()
+    if suffix in {".cif", ".mmcif"}:
+        try:
+            from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+            mm = MMCIF2Dict(str(struct_path))
+            chains = mm.get("_atom_site.auth_asym_id") or mm.get("_atom_site.label_asym_id") or []
+            if isinstance(chains, str):
+                chains = [chains]
+            out: list[str] = []
+            for ch in chains:
+                text = str(ch).strip()
+                if text and text not in out:
+                    out.append(text)
+                if len(out) > 16:
+                    break
+            return out
+        except Exception:
+            return []
+
+    chains: list[str] = []
+    try:
+        with struct_path.open() as handle:
+            for line in handle:
+                if not line.startswith(("ATOM", "HETATM")):
+                    continue
+                ch = line[21:22].strip()
+                if ch and ch not in chains:
+                    chains.append(ch)
+                if len(chains) > 16:  # don't over-read
+                    break
+    except Exception:
+        return []
+    return chains
+
+
+def _remap_chain_label(chain: str, available: Sequence[str]) -> str:
+    avail = [c.strip().upper() for c in available if str(c).strip()]
+    if not avail:
+        return chain
+    chain_up = (chain or "").strip().upper()
+    if chain_up in avail:
+        return chain
+    if len(avail) == 1:
+        return avail[0]
+    return chain
+
+
+def _remap_keys_to_chains(keys: Sequence[object], available: Sequence[str]) -> list[str]:
+    """If requested chains are absent but only one chain exists, retarget keys to that chain."""
+    remapped: list[str] = []
+    avail = [c.strip().upper() for c in available if str(c).strip()]
+    fallback = avail[0] if len(avail) == 1 else None
+    avail_set = set(avail)
+    for k in keys or []:
+        text = str(k).strip()
+        if not text:
+            continue
+        try:
+            ch, resi = parse_key(text)
+            ch_up = str(ch or "").strip().upper()
+            resi_txt = str(resi)
+        except Exception:
+            remapped.append(text)
+            continue
+        if not avail_set or ch_up in avail_set:
+            remapped.append(text)
+            continue
+        if fallback:
+            remapped.append(f"{fallback}:{resi_txt}")
+        else:
+            remapped.append(text)
+    return remapped
+
+
+def _remap_expression_regions(
+    regions: Optional[Sequence[Mapping[str, str]]],
+    available: Sequence[str],
+) -> list[dict[str, str]]:
+    if not regions:
+        return []
+    mapped: list[dict[str, str]] = []
+    for reg in regions:
+        if not isinstance(reg, Mapping):
+            continue
+        entry = dict(reg)
+        entry["chain"] = _remap_chain_label(str(reg.get("chain") or ""), available)
+        mapped.append(entry)
+    return mapped
+
+
 def _collect_expression_regions(
     pdb_id: str,
 ) -> tuple[Optional[str], List[dict[str, str]], dict[str, list[str]]]:
@@ -644,13 +802,25 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
     if ROOT is None:
         raise RuntimeError("pymol_utils.export_hotspot_bundle() requires utils.ROOT; did you run this inside the correct environment?")
     pdb_id_u = pdb_id.upper()
-    prep_dir = ROOT / "targets" / pdb_id_u / "prep"
+    target_dir = ROOT / "targets" / pdb_id_u
+    prep_dir = target_dir / "prep"
     if not prep_dir.exists():
         print(f"[pymol_utils] prep directory does not exist for {pdb_id_u}; skipping hotspot export")
         return None
-    prepared_pdb = prep_dir / "prepared.pdb"
-    if not prepared_pdb.exists():
-        print(f"[pymol_utils] prepared.pdb missing for {pdb_id_u}; cannot generate hotspot visualisation")
+
+    raw_dir = target_dir / "raw"
+    struct_candidates = [
+        raw_dir / f"{pdb_id_u}.cif",
+        raw_dir / f"{pdb_id_u}.mmcif",
+        raw_dir / "raw.cif",
+        raw_dir / "raw.mmcif",
+        prep_dir / "prepared.cif",
+        prep_dir / "prepared.mmcif",
+        prep_dir / "prepared.pdb",
+    ]
+    structure_path = next((p for p in struct_candidates if p.exists()), None)
+    if structure_path is None:
+        print(f"[pymol_utils] No structure found for {pdb_id_u} (checked raw/*.cif|mmcif and prep/prepared.*); skipping hotspot export")
         return None
     # Collect epitope masks and hotspot variants
     epitopes: Dict[str, Dict[str, List[str]]] = {}
@@ -675,6 +845,25 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
             except json.JSONDecodeError: keys = []
             epitopes.setdefault(epi, {})["mask"] = keys
     if not epitopes:
+        # New minimal prep_target writes a consolidated hotspot_bundle.json; use it as a fallback.
+        bundle_candidates = [
+            prep_dir.parent / "hotspot_bundle.json",
+            prep_dir.parent / "reports" / "hotspot_bundle.json",
+            prep_dir.parent / "reports" / "hotspot_bundle" / "bundle.json",
+        ]
+        for cand in bundle_candidates:
+            if not cand.exists():
+                continue
+            try:
+                bundle = json.loads(cand.read_text())
+            except Exception as exc:
+                print(f"[pymol_utils] Could not parse hotspot bundle {cand}: {exc}")
+                continue
+            epitopes = _epitopes_from_hotspot_bundle(bundle)
+            if epitopes:
+                print(f"[pymol_utils] Loaded hotspot definitions from {cand}")
+                break
+    if not epitopes:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
 
@@ -698,7 +887,6 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
 
     # --- NEW: Mode Toggle ---
     raw_pdb_path: Optional[Path] = None
-    raw_dir = prep_dir.parent / "raw"
     if raw_dir.exists():
         candidates = [pdb_id, pdb_id_u, pdb_id.lower()]
         for candidate in candidates:
@@ -717,7 +905,7 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
 
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
-            prepared_pdb,
+            structure_path,
             epitopes,
             vendor_range=vendor_range_label,
             expression_regions=expression_regions,
@@ -732,10 +920,27 @@ def export_hotspot_bundle(pdb_id: str) -> Path | None:
             print("[info] Falling back to 'bundle' mode due to remote error.")
 
     # --- Bundle Mode (Default or Fallback) ---
+    available_chains = _detect_structure_chains(structure_path)
+    if available_chains:
+        remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
+        for epi, variants in epitopes.items():
+            if not isinstance(variants, Mapping):
+                continue
+            remapped_epitopes[epi] = {
+                var: _remap_keys_to_chains(keys, available_chains)
+                for var, keys in variants.items()
+            }
+        epitopes = remapped_epitopes or epitopes
+        expression_regions = _remap_expression_regions(expression_regions, available_chains)
+        target_chain_ids = [_remap_chain_label(c, available_chains) for c in target_chain_ids]
+        supporting_chain_ids = [_remap_chain_label(c, available_chains) for c in supporting_chain_ids]
+        if len(set(available_chains)) == 1 and target_chain_ids and target_chain_ids[0] != available_chains[0]:
+            print(f"[pymol_utils] Remapped hotspot chains to available chain '{available_chains[0]}' ({structure_path.name}).")
+
     bundle_dir = Path(tempfile.mkdtemp(prefix=f"{pdb_id_u}_prep_pymol_"))
-    # Copy prepared structure with just its basename
-    dest_pdb_name = prepared_pdb.name
-    shutil.copy(str(prepared_pdb), str(bundle_dir / dest_pdb_name))
+    # Copy chosen structure with just its basename
+    dest_pdb_name = structure_path.name
+    shutil.copy(str(structure_path), str(bundle_dir / dest_pdb_name))
     if raw_pdb_path is not None and raw_bundle_name:
         shutil.copy(str(raw_pdb_path), str(bundle_dir / raw_bundle_name))
     # Write PML script
@@ -1228,4 +1433,3 @@ def export_batch_hotspot_bundle(targets: List[Dict]) -> Path | None:
         )
     
     return bundle_dir
-
