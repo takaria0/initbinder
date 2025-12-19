@@ -1735,7 +1735,11 @@ def build_boltzgen_diversity_report(
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     if not targets_dir.exists():
-        return BoltzgenDiversityResponse(message=f"Targets directory missing: {targets_dir}", output_dir=str(_output_dir()))
+        return BoltzgenDiversityResponse(
+            message=f"Targets directory missing: {targets_dir}",
+            output_dir=str(_output_dir()),
+            binder_counts={},
+        )
 
     out_dir = _output_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1853,14 +1857,26 @@ def build_boltzgen_diversity_report(
                     traceback.print_exc()
                     continue
 
+    binder_counts: Dict[str, int] = {}
     if not aggregate_rows:
         if metrics_files:
             return BoltzgenDiversityResponse(
                 metrics_files=metrics_files,
                 message="Detected BoltzGen metrics files, but none could be parsed into rows (check CSV format/permissions).",
                 output_dir=str(out_dir),
+                binder_counts=binder_counts,
             )
-        return BoltzgenDiversityResponse(message="No BoltzGen metrics found under targets directory.", output_dir=str(out_dir))
+        return BoltzgenDiversityResponse(
+            message="No BoltzGen metrics found under targets directory.",
+            output_dir=str(out_dir),
+            binder_counts=binder_counts,
+        )
+
+    for row in aggregate_rows:
+        pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
+        if not pdb_val:
+            continue
+        binder_counts[pdb_val] = binder_counts.get(pdb_val, 0) + 1
 
     all_keys: List[str] = []
     seen_keys: set[str] = set()
@@ -1916,11 +1932,26 @@ def build_boltzgen_diversity_report(
             binder_page=page_val if include_binders else 1,
             binder_page_size=page_size_val if include_binders else 0,
             binder_message=binder_msg,
+            binder_counts=binder_counts,
         )
 
     html_sections: List[str] = []
     cmap = plt.get_cmap("tab20")
     global_target_means: List[tuple[str, float, float, int]] = []
+
+    def _style_scatter(ax) -> None:
+        ax.set_facecolor("#ffffff")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color("#334155")
+            ax.spines[spine].set_linewidth(0.8)
+        ax.tick_params(colors="#334155", labelsize=9)
+        ax.grid(True, alpha=0.2, linewidth=0.6)
+        try:
+            ax.set_box_aspect(1)
+        except Exception:
+            pass
 
     for pdb_id, ep_data in metrics.items():
         ep_names = sorted(ep_data.keys())
@@ -1936,7 +1967,7 @@ def build_boltzgen_diversity_report(
         }
         design_counts = {name: len(scatter_pairs.get(name) or []) for name in ep_names}
         if any(scatter_pairs.values()):
-            fig_scatter, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+            fig_scatter, ax = plt.subplots(1, 1, figsize=(6, 6))
             for name in ep_names:
                 pairs = scatter_pairs.get(name) or []
                 if not pairs:
@@ -1947,14 +1978,14 @@ def build_boltzgen_diversity_report(
                 res_note = (epitope_residues.get(pdb_id, {}) or {}).get(name)
                 res_part = f"; {res_note}" if res_note else ""
                 label = f"{name} (n={design_counts.get(name, 0)}{res_part})"
-                ax.scatter(xs, ys, s=18, alpha=0.75, color=color_map[name], label=label, edgecolors="none")
-            ax.set_title(f"{pdb_id} RMSD vs ipTM (by epitope)")
+                ax.scatter(xs, ys, s=14, alpha=0.7, color=color_map[name], label=label, edgecolors="none")
+            ax.set_title(f"{pdb_id} RMSD vs ipTM (by epitope)", fontsize=11, fontweight="semibold")
             ax.set_xlabel("RMSD (Å)")
             ax.set_ylabel("ipTM")
             ax.set_xlim(left=0.0)
             ax.set_ylim(0.0, 1.0)
-            ax.grid(True, alpha=0.25)
-            ax.legend(loc="best", fontsize=9)
+            _style_scatter(ax)
+            ax.legend(loc="best", fontsize=8, frameon=False)
             plt.tight_layout()
 
             scatter_png = out_dir / f"boltzgen_scatter_{pdb_id}_{timestamp}.png"
@@ -2001,7 +2032,7 @@ def build_boltzgen_diversity_report(
             if rmsd_vals and iptm_vals:
                 mean_points.append((name, sum(rmsd_vals) / len(rmsd_vals), sum(iptm_vals) / len(iptm_vals)))
         if mean_points:
-            fig_mean, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+            fig_mean, ax = plt.subplots(1, 1, figsize=(6, 6))
             for name, mean_rmsd, mean_iptm in mean_points:
                 res_note = (epitope_residues.get(pdb_id, {}) or {}).get(name)
                 res_part = f"; {res_note}" if res_note else ""
@@ -2009,20 +2040,20 @@ def build_boltzgen_diversity_report(
                 ax.scatter(
                     mean_rmsd,
                     mean_iptm,
-                    s=70,
-                    alpha=0.9,
+                    s=50,
+                    alpha=0.85,
                     color=color_map[name],
                     label=label,
                     edgecolors="none",
                 )
-            ax.set_title(f"{pdb_id} mean RMSD vs mean ipTM (per epitope)")
+            ax.set_title(f"{pdb_id} Mean RMSD vs Mean ipTM (per epitope)", fontsize=11, fontweight="semibold")
             ax.set_xlabel("Mean RMSD (Å)")
             ax.set_ylabel("Mean ipTM")
             ax.set_ylim(0.0, 1.0)
             # set xlim to to start at 0
             ax.set_xlim(left=0.0)
-            ax.grid(True, alpha=0.25)
-            ax.legend(loc="best", fontsize=9)
+            _style_scatter(ax)
+            ax.legend(loc="best", fontsize=8, frameon=False)
             plt.tight_layout()
 
             mean_png = out_dir / f"boltzgen_mean_scatter_{pdb_id}_{timestamp}.png"
@@ -2076,25 +2107,25 @@ def build_boltzgen_diversity_report(
 
     # Scatter across targets: mean RMSD vs mean ipTM per target (one dot per antigen).
     if global_target_means:
-        fig_global, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+        fig_global, ax = plt.subplots(1, 1, figsize=(6, 6))
         for idx, (pdb_id, mean_rmsd, mean_iptm, count) in enumerate(sorted(global_target_means, key=lambda t: t[0])):
             color = mcolors.to_hex(cmap(idx / max(1, len(global_target_means))))
             ax.scatter(
                 mean_rmsd,
                 mean_iptm,
-                s=80,
-                alpha=0.9,
+                s=60,
+                alpha=0.85,
                 color=color,
                 label=f"{pdb_id} (n={count})",
                 edgecolors="none",
             )
-        ax.set_title("Mean RMSD vs mean ipTM (one point per target)")
+        ax.set_title("Mean RMSD vs Mean ipTM (one point per target)", fontsize=11, fontweight="semibold")
         ax.set_xlabel("Mean RMSD (Å)")
         ax.set_ylabel("Mean ipTM")
         ax.set_ylim(0.0, 1.0)
         ax.set_xlim(left=0.0)
-        ax.grid(True, alpha=0.25)
-        ax.legend(loc="best", fontsize=9)
+        _style_scatter(ax)
+        ax.legend(loc="best", fontsize=8, frameon=False)
         plt.tight_layout()
 
         global_png = out_dir / f"boltzgen_global_scatter_{timestamp}.png"
@@ -2112,27 +2143,27 @@ def build_boltzgen_diversity_report(
             plt.close(fig_global)
 
         if saved_ok:
-            plot_entries.append(
-                BoltzgenDiversityPlot(
-                    pdb_id="All targets scatter",
+            global_plot = BoltzgenDiversityPlot(
+                    pdb_id="Mean RMSD vs Mean ipTM (one point per target)",
                     png_name=global_png.name,
                     png_path=str(global_png),
                     svg_name=global_svg.name,
                     svg_path=str(global_svg),
                     epitope_colors={},
                 )
+            plot_entries.insert(0, global_plot)
+        try:
+            encoded = base64.b64encode(global_png.read_bytes()).decode("ascii")
+            html_sections.insert(
+                0,
+                "<section><h2>Mean RMSD vs Mean ipTM (one point per target)</h2>"
+                "<p>One point per target, averaged across all designs.</p>"
+                f"<img alt='All targets scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
             )
-            try:
-                encoded = base64.b64encode(global_png.read_bytes()).decode("ascii")
-                html_sections.append(
-                    "<section><h2>All targets scatter</h2>"
-                    "<p>Mean ipTM vs mean RMSD; one point per target (averaged across designs).</p>"
-                    f"<img alt='All targets scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
-                )
-            except Exception as exc:
-                print(f"[boltzgen-diversity] failed to embed global scatter into HTML: {global_png}")
-                print(exc)
-                traceback.print_exc()
+        except Exception as exc:
+            print(f"[boltzgen-diversity] failed to embed global scatter into HTML: {global_png}")
+            print(exc)
+            traceback.print_exc()
 
     html_path = out_dir / f"boltzgen_diversity_{timestamp}.html"
     html_content = "\n".join(
@@ -2162,6 +2193,7 @@ def build_boltzgen_diversity_report(
         binder_page=page_val if include_binders else 1,
         binder_page_size=page_size_val if include_binders else 0,
         binder_message=binder_msg,
+        binder_counts=binder_counts,
     )
 
 

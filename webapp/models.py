@@ -264,6 +264,7 @@ class BoltzgenDiversityResponse(BaseModel):
     binder_page: int = 1
     binder_page_size: int = 0
     binder_message: Optional[str] = None
+    binder_counts: Dict[str, int] = Field(default_factory=dict)
 
 
 class BoltzgenBinderRow(BaseModel):

@@ -22,6 +22,7 @@ const state = {
   binderCsvName: null,
   binderMessage: null,
   binderPdbIds: [],
+  boltzDesignCounts: {},
   bulkPreviewTimer: null,
   bulkPreviewSig: null,
 };
@@ -431,6 +432,18 @@ function buildLocalResultBadge(count = null) {
     pill.style.color = '#475569';
   }
   return pill;
+}
+
+function normalizeBoltzCounts(counts = null) {
+  const output = {};
+  if (!counts || typeof counts !== 'object') return output;
+  Object.entries(counts).forEach(([key, value]) => {
+    const upper = (key || '').trim().toUpperCase();
+    if (!upper) return;
+    const num = Number(value);
+    output[upper] = Number.isFinite(num) ? num : 0;
+  });
+  return output;
 }
 
 function getBoltzDesignCount() {
@@ -929,6 +942,7 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
     state.diversityFiles = Array.isArray(data.metrics_files) ? data.metrics_files : [];
     state.diversityOutputDir = data.output_dir || null;
     state.diversityPlots = Array.isArray(data.plots) ? data.plots : [];
+    state.boltzDesignCounts = normalizeBoltzCounts(data.binder_counts);
     const pdbIds = new Set();
     const binderRows = Array.isArray(data.binder_rows) ? data.binder_rows : [];
     (state.diversityPlots || []).forEach((plot) => {
@@ -963,6 +977,12 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
       state.binderTotal = 0;
       state.binderMessage = data.message || null;
       await loadBinderTable({ page: nextPage, silent: true });
+    }
+    if (Object.keys(state.boltzDesignCounts || {}).length) {
+      state.boltzLocalRuns = { ...state.boltzDesignCounts };
+      if (Array.isArray(state.boltzConfigs) && state.boltzConfigs.length) {
+        renderBoltzConfigs();
+      }
     }
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
@@ -1487,6 +1507,8 @@ function renderBoltzConfigs() {
     runBtn.textContent = 'Run';
     runBtn.dataset.action = 'run-target';
     runBtn.dataset.pdbId = target.pdb_id || '';
+    runBtn.disabled = true;
+    runBtn.title = 'Not supported yet.';
     cmdCell.appendChild(runBtn);
 
     const cfgBtn = document.createElement('button');
@@ -1506,15 +1528,6 @@ function renderBoltzConfigs() {
     manualBtn.dataset.scope = 'target';
     cmdCell.appendChild(manualBtn);
 
-    const pymolBtn = document.createElement('button');
-    pymolBtn.type = 'button';
-    pymolBtn.textContent = 'PyMOL';
-    pymolBtn.className = 'ghost';
-    pymolBtn.dataset.action = 'pymol-target';
-    pymolBtn.dataset.pdbId = target.pdb_id || '';
-    stylePymolButton(pymolBtn, hasPrep);
-    cmdCell.appendChild(pymolBtn);
-
     const rerunBtn = document.createElement('button');
     rerunBtn.type = 'button';
     rerunBtn.textContent = 'Re-run pipeline';
@@ -1523,6 +1536,15 @@ function renderBoltzConfigs() {
     rerunBtn.dataset.pdbId = target.pdb_id || '';
     if (target.antigen_url) rerunBtn.dataset.antigenUrl = target.antigen_url;
     cmdCell.appendChild(rerunBtn);
+
+    const pymolBtn = document.createElement('button');
+    pymolBtn.type = 'button';
+    pymolBtn.textContent = 'PyMOL';
+    pymolBtn.className = 'ghost';
+    pymolBtn.dataset.action = 'pymol-target';
+    pymolBtn.dataset.pdbId = target.pdb_id || '';
+    stylePymolButton(pymolBtn, hasPrep);
+    cmdCell.appendChild(pymolBtn);
 
     tr.appendChild(cmdCell);
     tbody.appendChild(tr);
@@ -1558,6 +1580,8 @@ function renderBoltzConfigs() {
       epRun.dataset.action = 'run-epitope';
       epRun.dataset.pdbId = target.pdb_id || '';
       epRun.dataset.configPath = cfg.config_path || '';
+      epRun.disabled = true;
+      epRun.title = 'Not supported yet.';
       epCmd.appendChild(epRun);
 
       const epCfgBtn = document.createElement('button');
@@ -1617,6 +1641,15 @@ async function loadBoltzRunStatuses(pdbIds = []) {
   ));
   const results = {};
   if (!ids.length) {
+    state.boltzLocalRuns = results;
+    return results;
+  }
+  const counts = state.boltzDesignCounts || {};
+  if (Object.keys(counts).length) {
+    ids.forEach((id) => {
+      const num = Number(counts[id]);
+      results[id] = Number.isFinite(num) ? num : 0;
+    });
     state.boltzLocalRuns = results;
     return results;
   }

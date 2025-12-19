@@ -114,21 +114,21 @@
             <section id="epitope-metrics-section" hidden style="display: none;"></section>
 
             <section id="boltz-config-panel" class="table-scroll" hidden>
-              <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
-                <div>
+              <div class="table-toolbar" style="flex-direction: column; align-items: stretch; gap: 10px;">
+                <div style="display:flex; align-items:center; justify-content: space-between;">
                   <h3 style="margin: 0;">BoltzGen configs</h3>
-                  <div id="boltz-config-summary" class="badge" hidden></div>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
-                  <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
-                  <button type="button" id="boltz-rerun-pipeline" class="ghost">Re-run pipeline</button>
-                  <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
                   <label>Epitope design num
                     <input type="number" id="boltz-design-count" value="100" min="1">
                   </label>
                   <label>Max runtime (hours)
                     <input type="number" id="boltz-time-hours" value="12" min="1" max="240" step="1">
                   </label>
+                </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
+                  <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
                   <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
                 </div>
               </div>
@@ -162,12 +162,12 @@
             </section>
 
             <section id="boltz-binders-panel" class="table-scroll">
-              <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
-                <div style="display:flex; flex-direction:column; gap:4px;">
+              <div class="table-toolbar" style="flex-direction: column; align-items: stretch; gap: 10px;">
+                <div style="display:flex; align-items:center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
                   <h3 style="margin: 0;">Designed binders</h3>
                   <div id="boltz-binders-summary" class="badge"></div>
-                  <div id="boltz-binders-csv" class="help-text" hidden></div>
                 </div>
+                <div id="boltz-binders-csv" class="help-text" hidden></div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:140px;">
                     <span style="color:#0f172a;">Filter PDB</span>
@@ -187,6 +187,8 @@
                       <option value="hotspot">Hotspot dist</option>
                     </select>
                   </label>
+                </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-binders-download" class="ghost">Download CSV</button>
                   <button type="button" id="boltz-binders-refresh" class="ghost">Refresh</button>
                 </div>
