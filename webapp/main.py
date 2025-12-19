@@ -86,6 +86,7 @@ from .models import (
     TargetPresetListResponse,
     TargetPresetRequest,
     TargetPresetResponse,
+    TargetYamlContent,
     PipelineRefreshRequest,
     PipelineRefreshResponse,
 )
@@ -1306,6 +1307,23 @@ async def api_alignment(pdb_id: str) -> AlignmentResponse:
         vendor_range_label=payload.get("vendor_range_label"),
         vendor_sequence_length=payload.get("vendor_sequence_length", 0),
         chain_results=payload.get("results", []),
+    )
+
+
+@app.get("/api/targets/{pdb_id}/target-yaml", response_model=TargetYamlContent)
+async def api_target_yaml(pdb_id: str) -> TargetYamlContent:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = (targets_dir / pdb_id.upper()).resolve()
+    target_yaml = (target_dir / "target.yaml").resolve()
+    if not str(target_yaml).startswith(str(target_dir)):
+        raise HTTPException(status_code=400, detail="Invalid target path")
+    if not target_yaml.exists():
+        raise HTTPException(status_code=404, detail="target.yaml not found")
+    return TargetYamlContent(
+        pdb_id=pdb_id.upper(),
+        path=str(target_yaml),
+        yaml_text=target_yaml.read_text(encoding="utf-8"),
     )
 
 

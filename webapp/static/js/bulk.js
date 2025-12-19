@@ -1519,6 +1519,15 @@ function renderBoltzConfigs() {
     cfgBtn.dataset.pdbId = target.pdb_id || '';
     cmdCell.appendChild(cfgBtn);
 
+    const debugBtn = document.createElement('button');
+    debugBtn.type = 'button';
+    debugBtn.textContent = 'Debug';
+    debugBtn.className = 'ghost';
+    debugBtn.dataset.action = 'show-target-yaml';
+    debugBtn.dataset.pdbId = target.pdb_id || '';
+    debugBtn.title = 'Show target.yaml';
+    cmdCell.appendChild(debugBtn);
+
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
     manualBtn.textContent = 'Command';
@@ -1592,6 +1601,15 @@ function renderBoltzConfigs() {
       epCfgBtn.dataset.pdbId = target.pdb_id || '';
       epCfgBtn.dataset.configPath = cfg.config_path || '';
       epCmd.appendChild(epCfgBtn);
+
+      const epDebug = document.createElement('button');
+      epDebug.type = 'button';
+      epDebug.textContent = 'Debug';
+      epDebug.className = 'ghost';
+      epDebug.dataset.action = 'show-target-yaml';
+      epDebug.dataset.pdbId = target.pdb_id || '';
+      epDebug.title = 'Show target.yaml';
+      epCmd.appendChild(epDebug);
 
       const epManual = document.createElement('button');
       epManual.type = 'button';
@@ -1745,6 +1763,15 @@ async function fetchBoltzConfig(pdbId, configPath) {
   return res.json();
 }
 
+async function fetchTargetYaml(pdbId) {
+  const res = await fetch(`/api/targets/${encodeURIComponent(pdbId)}/target-yaml`);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Unable to load target.yaml (${res.status})`);
+  }
+  return res.json();
+}
+
 async function showBoltzConfig(pdbId, configPath = null) {
   if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
   try {
@@ -1768,6 +1795,18 @@ async function showBoltzConfig(pdbId, configPath = null) {
       el.boltzConfigTitle.textContent = `BoltzGen configs · ${pdbId}`;
       el.boltzConfigBody.textContent = texts.join('\n\n');
     }
+    toggleModal(el.boltzConfigModal, true);
+  } catch (err) {
+    showAlert(err.message || String(err));
+  }
+}
+
+async function showTargetYaml(pdbId) {
+  if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
+  try {
+    const payload = await fetchTargetYaml(pdbId);
+    el.boltzConfigTitle.textContent = `target.yaml · ${payload.pdb_id || pdbId}`;
+    el.boltzConfigBody.textContent = payload.yaml_text || 'No target.yaml content found.';
     toggleModal(el.boltzConfigModal, true);
   } catch (err) {
     showAlert(err.message || String(err));
@@ -2138,6 +2177,8 @@ function handleBoltzTableClick(event) {
     showBoltzConfig(pdbId, null);
   } else if (action === 'show-config-epitope') {
     showBoltzConfig(pdbId, configPath);
+  } else if (action === 'show-target-yaml') {
+    showTargetYaml(pdbId);
   } else if (action === 'show-log') {
     showBoltzLog(btn.dataset.jobId, btn.dataset.logTitle || 'Job log');
   } else if (action === 'show-run') {

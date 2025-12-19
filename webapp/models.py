@@ -340,6 +340,12 @@ class BoltzgenConfigContent(BaseModel):
     yaml_text: str
 
 
+class TargetYamlContent(BaseModel):
+    pdb_id: str
+    path: str
+    yaml_text: str
+
+
 class BoltzgenConfigRunRequest(BaseModel):
     pdb_id: str
     design_count: int = Field(90, ge=1, le=50000, description="Designs to generate per epitope")
