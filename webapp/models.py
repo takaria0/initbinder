@@ -272,6 +272,7 @@ class BoltzgenBinderRow(BaseModel):
     rank: int
     iptm: Optional[float] = None
     rmsd: Optional[float] = None
+    hotspot_dist: Optional[float] = None
     design_path: Optional[str] = None
     metrics_path: Optional[str] = None
     run_label: Optional[str] = None
@@ -288,6 +289,18 @@ class BoltzgenBinderResponse(BaseModel):
     page_size: int = 100
     csv_name: Optional[str] = None
     message: Optional[str] = None
+
+
+class PipelineRefreshRequest(BaseModel):
+    pdb_id: str
+    force: bool = True
+    expected_epitopes: Optional[int] = 3
+    decide_scope_attempts: int = Field(3, ge=1, le=5)
+
+
+class PipelineRefreshResponse(BaseModel):
+    job_id: str
+    message: str
 
 
 class BoltzgenEpitopeConfig(BaseModel):

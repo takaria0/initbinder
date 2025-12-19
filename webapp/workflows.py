@@ -20,6 +20,7 @@ from .models import (
     BulkDesignImportRequest,
     BulkRunRequest,
     BoltzgenConfigRunRequest,
+    PipelineRefreshRequest,
     DesignRunRequest,
     ExportRequest,
     GoldenGateRequest,
@@ -476,5 +477,33 @@ __all__ = [
     "submit_bulk_run",
     "submit_bulk_design_import",
     "submit_boltzgen_config_run",
+    "submit_pipeline_refresh",
     "wait_for_job",
 ]
+
+
+def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobStore | None = None) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    label = f"Pipeline refresh {request.pdb_id.upper()}"
+    job = store.create_job("pipeline_refresh", label, details=request.dict())
+
+    def _run() -> None:
+        try:
+            init_decide_prep(
+                request.pdb_id,
+                antigen_url=None,
+                job_store=store,
+                job_id=job.job_id,
+                run_decide=True,
+                run_prep=True,
+                force=bool(request.force),
+                num_epitopes=request.expected_epitopes,
+                decide_scope_attempts=request.decide_scope_attempts,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id

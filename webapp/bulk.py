@@ -178,6 +178,128 @@ def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     return chain, resnum, icode
 
 
+def _expand_binding_label(label: Optional[str]) -> Dict[str, List[int]]:
+    """Expand binding/include labels like 'A:10..12;B:5,7' into chain->positions."""
+    if not label:
+        return {}
+    mapping: Dict[str, List[int]] = defaultdict(list)
+    for chunk in re.split(r"[;,]", str(label)):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" not in chunk and "_" not in chunk and ".." not in chunk:
+            parsed = _parse_chain_res_token(chunk)
+            if parsed:
+                chain, resnum, _icode = parsed
+                mapping[chain].append(resnum)
+            continue
+        if ":" in chunk:
+            chain_part, rest = chunk.split(":", 1)
+        elif "_" in chunk:
+            chain_part, rest = chunk.split("_", 1)
+        else:
+            m = re.match(r"^([A-Za-z]+)(.+)$", chunk)
+            if not m:
+                continue
+            chain_part, rest = m.group(1), m.group(2)
+        chain = chain_part.strip()
+        rest = rest.replace("..", "-")
+        for token in rest.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if "-" in token:
+                try:
+                    a_s, b_s = token.split("-", 1)
+                    a = int(a_s)
+                    b = int(b_s)
+                except Exception:
+                    continue
+                lo, hi = sorted((a, b))
+                mapping[chain].extend(range(lo, hi + 1))
+            else:
+                try:
+                    mapping[chain].append(int(token))
+                except Exception:
+                    continue
+    return {cid: sorted(set(vals)) for cid, vals in mapping.items() if cid and vals}
+
+
+def _extract_ca_atoms(struct_path: Path):
+    """Load CA atoms with chain/resseq info using Bio.PDB."""
+    try:
+        if struct_path.suffix.lower() in {".cif", ".mmcif"}:
+            from Bio.PDB import MMCIFParser  # type: ignore
+            parser = MMCIFParser(QUIET=True)
+        else:
+            from Bio.PDB import PDBParser  # type: ignore
+            parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("STRUCT", str(struct_path))
+    except Exception:
+        return []
+    atoms = []
+    try:
+        model = next(structure.get_models())
+    except Exception:
+        return []
+    for chain in model:
+        chain_id = str(chain.id).strip()
+        for residue in chain:
+            hetflag, resseq, _icode = residue.get_id()
+            if hetflag != " ":
+                continue
+            try:
+                pos = int(resseq)
+            except Exception:
+                continue
+            if "CA" not in residue:
+                continue
+            atom = residue["CA"]
+            atoms.append((chain_id, pos, atom))
+    return atoms
+
+
+def _min_hotspot_distance(
+    *,
+    binding_label: Optional[str],
+    include_label: Optional[str],
+    design_path: Optional[str],
+    target_path: Optional[str],
+) -> Optional[float]:
+    """Compute minimum CA-CA distance between binder and target hotspot residues using Bio.PDB NeighborSearch."""
+    label = binding_label or include_label
+    if not label or not design_path or not target_path:
+        return None
+    binding_map = _expand_binding_label(label)
+    try:
+        from Bio.PDB.NeighborSearch import NeighborSearch  # type: ignore
+    except Exception:
+        return None
+
+    target_atoms = []
+    for cid, pos, atom in _extract_ca_atoms(Path(target_path)):
+        if cid in binding_map and pos in binding_map[cid]:
+            target_atoms.append(atom)
+    if not target_atoms:
+        return None
+    design_atoms = [atm for _cid, _pos, atm in _extract_ca_atoms(Path(design_path))]
+    if not design_atoms:
+        return None
+
+    ns = NeighborSearch(design_atoms)
+    min_dist = None
+    for atom in target_atoms:
+        neighbors = ns.search(atom.coord, 100.0, level="A")  # 100 Å radius to capture any neighbor
+        for nb in neighbors:
+            try:
+                d = atom - nb  # Bio.PDB Atom distance
+            except Exception:
+                continue
+            if min_dist is None or d < min_dist:
+                min_dist = d
+    return min_dist
+
+
 def _read_mmcif_chain_label_seq_range(mmcif_path: Path) -> Dict[str, Tuple[int, int]]:
     """Return {label_asym_id: (min_label_seq_id, max_label_seq_id)} from an mmCIF file."""
     try:
@@ -1738,6 +1860,7 @@ def build_boltzgen_diversity_report(
 
     html_sections: List[str] = []
     cmap = plt.get_cmap("tab20")
+    global_target_means: List[tuple[str, float, float, int]] = []
 
     for pdb_id, ep_data in metrics.items():
         ep_names = sorted(ep_data.keys())
@@ -1768,6 +1891,7 @@ def build_boltzgen_diversity_report(
             ax.set_title(f"{pdb_id} RMSD vs ipTM (by epitope)")
             ax.set_xlabel("RMSD (Å)")
             ax.set_ylabel("ipTM")
+            ax.set_xlim(left=0.0)
             ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=9)
@@ -1835,6 +1959,8 @@ def build_boltzgen_diversity_report(
             ax.set_xlabel("Mean RMSD (Å)")
             ax.set_ylabel("Mean ipTM")
             ax.set_ylim(0.0, 1.0)
+            # set xlim to to start at 0
+            ax.set_xlim(left=0.0)
             ax.grid(True, alpha=0.25)
             ax.legend(loc="best", fontsize=9)
             plt.tight_layout()
@@ -1874,6 +2000,79 @@ def build_boltzgen_diversity_report(
                     print(f"[boltzgen-diversity] failed to embed mean scatter into HTML: {mean_png}")
                     print(exc)
                     traceback.print_exc()
+
+        # Target-level mean point across all epitopes/designs
+        all_rmsd = [float(v) for ep_vals in ep_data.values() for v in (ep_vals.get("rmsd") or []) if v is not None]
+        all_iptm = [float(v) for ep_vals in ep_data.values() for v in (ep_vals.get("iptm") or []) if v is not None]
+        if all_rmsd and all_iptm:
+            global_target_means.append(
+                (
+                    pdb_id,
+                    sum(all_rmsd) / len(all_rmsd),
+                    sum(all_iptm) / len(all_iptm),
+                    len(all_rmsd),
+                )
+            )
+
+    # Scatter across targets: mean RMSD vs mean ipTM per target (one dot per antigen).
+    if global_target_means:
+        fig_global, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+        for idx, (pdb_id, mean_rmsd, mean_iptm, count) in enumerate(sorted(global_target_means, key=lambda t: t[0])):
+            color = mcolors.to_hex(cmap(idx / max(1, len(global_target_means))))
+            ax.scatter(
+                mean_rmsd,
+                mean_iptm,
+                s=80,
+                alpha=0.9,
+                color=color,
+                label=f"{pdb_id} (n={count})",
+                edgecolors="none",
+            )
+        ax.set_title("Mean RMSD vs mean ipTM (one point per target)")
+        ax.set_xlabel("Mean RMSD (Å)")
+        ax.set_ylabel("Mean ipTM")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(left=0.0)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=9)
+        plt.tight_layout()
+
+        global_png = out_dir / f"boltzgen_global_scatter_{timestamp}.png"
+        global_svg = out_dir / f"boltzgen_global_scatter_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_global.savefig(global_png, dpi=200)
+            fig_global.savefig(global_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[boltzgen-diversity] failed to save global scatter plot: {global_png} / {global_svg}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_global)
+
+        if saved_ok:
+            plot_entries.append(
+                BoltzgenDiversityPlot(
+                    pdb_id="All targets scatter",
+                    png_name=global_png.name,
+                    png_path=str(global_png),
+                    svg_name=global_svg.name,
+                    svg_path=str(global_svg),
+                    epitope_colors={},
+                )
+            )
+            try:
+                encoded = base64.b64encode(global_png.read_bytes()).decode("ascii")
+                html_sections.append(
+                    "<section><h2>All targets scatter</h2>"
+                    "<p>Mean ipTM vs mean RMSD; one point per target (averaged across designs).</p>"
+                    f"<img alt='All targets scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+                )
+            except Exception as exc:
+                print(f"[boltzgen-diversity] failed to embed global scatter into HTML: {global_png}")
+                print(exc)
+                traceback.print_exc()
 
     html_path = out_dir / f"boltzgen_diversity_{timestamp}.html"
     html_content = "\n".join(
@@ -1974,6 +2173,14 @@ def _load_binder_rows_from_csv(
                 cfg_entries = _discover_boltzgen_configs(pdb_id)
                 config_cache[pdb_id] = _binder_config_map(cfg_entries)
             cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+            binding_label = cfg_meta.get("binding_label")
+            include_label = cfg_meta.get("include_label")
+            hotspot_dist = _min_hotspot_distance(
+                binding_label=binding_label,
+                include_label=include_label,
+                design_path=design_path,
+                target_path=target_path,
+            )
 
             all_rows.append(
                 BoltzgenBinderRow(
@@ -1982,6 +2189,7 @@ def _load_binder_rows_from_csv(
                     rank=rank_val,
                     iptm=iptm_val,
                     rmsd=rmsd_val,
+                    hotspot_dist=hotspot_dist,
                     design_path=design_path,
                     metrics_path=str(metrics_path) if metrics_path else None,
                     run_label=run_label,

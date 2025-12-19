@@ -86,6 +86,8 @@ from .models import (
     TargetPresetListResponse,
     TargetPresetRequest,
     TargetPresetResponse,
+    PipelineRefreshRequest,
+    PipelineRefreshResponse,
 )
 from .designs import list_design_engines
 from .pipeline import get_target_status
@@ -119,6 +121,7 @@ from .workflows import (
     submit_bulk_design_import,
     submit_bulk_run,
     submit_boltzgen_config_run,
+    submit_pipeline_refresh,
     submit_design_run,
     submit_export,
     submit_golden_gate_plan,
@@ -938,6 +941,12 @@ async def api_boltzgen_config_run(payload: BoltzgenConfigRunRequest) -> Boltzgen
     job_id = submit_boltzgen_config_run(payload, job_store=store)
     message = "Queued BoltzGen config run"
     return BoltzgenConfigRunResponse(job_id=job_id, message=message)
+
+
+@app.post("/api/targets/pipeline/refresh", response_model=PipelineRefreshResponse)
+async def api_pipeline_refresh(payload: PipelineRefreshRequest) -> PipelineRefreshResponse:
+    job_id = submit_pipeline_refresh(payload, job_store=store)
+    return PipelineRefreshResponse(job_id=job_id, message="Queued pipeline refresh (init+decide+prep)")
 
 
 @app.post("/api/bulk/boltzgen/binder/pymol", response_model=BoltzgenBinderPymolResponse)

@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
+import json
 
 import yaml
 
@@ -68,6 +69,128 @@ def run_manage_rfa(subcommand: str, args: List[str], *, log: Optional[LogCallbac
     env.setdefault("INITBINDER_ROOT", str(cwd))
 
     _run_command(cmd, cwd=cwd, env=env, log=log)
+
+
+def _mmcif_seq_ranges(raw_cif: Path) -> dict[str, tuple[int, int]]:
+    try:
+        from Bio.PDB.MMCIF2Dict import MMCIF2Dict  # type: ignore
+    except Exception:
+        return {}
+    try:
+        mm = MMCIF2Dict(str(raw_cif))
+    except Exception:
+        return {}
+    asym = mm.get("_atom_site.label_asym_id")
+    seq = mm.get("_atom_site.label_seq_id")
+    if not asym or not seq:
+        return {}
+    if not isinstance(asym, list):
+        asym = [asym]
+    if not isinstance(seq, list):
+        seq = [seq]
+    ranges: dict[str, tuple[int, int]] = {}
+    for a, s in zip(asym, seq):
+        cid = str(a).strip().upper()
+        if not cid:
+            continue
+        try:
+            val = int(float(str(s).strip()))
+        except Exception:
+            continue
+        lo, hi = ranges.get(cid, (val, val))
+        ranges[cid] = (min(lo, val), max(hi, val))
+    return ranges
+
+
+def _parse_res_token(token: object) -> tuple[str, int] | None:
+    if token is None:
+        return None
+    text = str(token).strip()
+    if not text or ":" not in text:
+        return None
+    chain, rest = text.split(":", 1)
+    try:
+        pos = int(rest.split("-")[0].split("..")[0])
+    except Exception:
+        return None
+    return chain.strip().upper(), pos
+
+
+def _allowed_ranges_from_yaml(target_yaml: Path) -> dict[str, tuple[int, int]]:
+    if not target_yaml.exists():
+        return {}
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        return {}
+    raw = data.get("allowed_epitope_range") or data.get("allowed_range") or ""
+    entries: list[str] = []
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, list):
+        entries = [str(x) for x in raw if str(x).strip()]
+    ranges: dict[str, tuple[int, int]] = {}
+    for entry in entries:
+        for tok in entry.split(","):
+            tok = tok.strip()
+            if not tok or ":" not in tok or "-" not in tok:
+                continue
+            chain, rest = tok.split(":", 1)
+            try:
+                a_s, b_s = rest.replace("..", "-").split("-", 1)
+                a = int(a_s)
+                b = int(b_s)
+            except Exception:
+                continue
+            lo, hi = sorted((a, b))
+            ranges[chain.strip().upper()] = (lo, hi)
+    return ranges
+
+
+def _validate_epitopes_within_ranges(pdb_id: str, target_yaml: Path, log: Optional[LogCallback]) -> None:
+    data = _safe_yaml_load(target_yaml)
+    epitopes = data.get("epitopes") or []
+    if not epitopes:
+        return
+    raw_cif = target_yaml.parent / "raw" / f"{pdb_id.upper()}.cif"
+    mm_ranges = _mmcif_seq_ranges(raw_cif) if raw_cif.exists() else {}
+    allowed = _allowed_ranges_from_yaml(target_yaml)
+
+    def _is_valid(token: object) -> bool:
+        parsed = _parse_res_token(token)
+        if not parsed:
+            return False
+        chain, pos = parsed
+        if allowed:
+            lo, hi = allowed.get(chain, (None, None))
+            if lo is None or hi is None or pos < lo or pos > hi:
+                return False
+        if mm_ranges:
+            lo, hi = mm_ranges.get(chain, (None, None))
+            if lo is None or hi is None or pos < lo or pos > hi:
+                return False
+        return True
+
+    filtered_eps: list[dict] = []
+    removed: list[str] = []
+    for ep in epitopes:
+        if not isinstance(ep, dict):
+            continue
+        res_list = ep.get("residues") or []
+        keep_tokens = [tok for tok in res_list if _is_valid(tok)]
+        ep_filtered = dict(ep)
+        ep_filtered["residues"] = keep_tokens
+        if keep_tokens:
+            filtered_eps.append(ep_filtered)
+        else:
+            removed.append(str(ep.get("name") or "epitope"))
+
+    if removed and log:
+        log(f"[decide-scope] Removed epitopes outside allowed/mmCIF ranges: {', '.join(removed)}")
+    data["epitopes"] = filtered_eps
+    target_yaml.write_text(yaml.safe_dump(data, sort_keys=False))
+    if not filtered_eps:
+        raise PipelineError("No valid epitopes within allowed range or mmCIF chain coverage after decide-scope.")
 
 
 def _persist_num_epitopes(pdb_id: str, num_epitopes: int) -> None:
@@ -230,6 +353,20 @@ def init_decide_prep(
             job_store.append_log(job_id, f"[decide-scope] attempt {attempt} for {pdb_id.upper()}")
             try:
                 run_manage_rfa("decide-scope", decide_args, log=_log)
+                try:
+                    _validate_epitopes_within_ranges(pdb_id, target_dir / "target.yaml", _log)
+                except PipelineError as exc:
+                    if attempt >= attempts:
+                        raise
+                    _log(f"[decide-scope] validation failed ({exc}); retrying another attempt.")
+                    continue
+                # Ensure at least one epitope exists
+                latest_cfg = _safe_yaml_load(target_dir / "target.yaml")
+                if not (latest_cfg.get("epitopes") or []):
+                    if attempt >= attempts:
+                        raise PipelineError("decide-scope returned zero epitopes after validation.")
+                    _log("[decide-scope] zero epitopes after validation; retrying.")
+                    continue
                 break
             except Exception as exc:
                 if attempt >= attempts:

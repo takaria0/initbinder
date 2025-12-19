@@ -66,6 +66,7 @@ const el = {
   boltzTimeHours: document.querySelector('#boltz-time-hours'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
+  boltzRerunPipeline: document.querySelector('#boltz-rerun-pipeline'),
   binderPanel: document.querySelector('#boltz-binders-panel'),
   binderTable: document.querySelector('#boltz-binders-table tbody'),
   binderSummary: document.querySelector('#boltz-binders-summary'),
@@ -870,12 +871,21 @@ function renderBinderRows(rows = []) {
       if (bv === null) return -1;
       return av - bv;
     });
+  } else if (orderBy === 'hotspot') {
+    sorted.sort((a, b) => {
+      const av = numeric(a.hotspot_dist);
+      const bv = numeric(b.hotspot_dist);
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return av - bv;
+    });
   }
 
   const noteRow = () => {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 8;
     td.style.color = '#64748b';
     td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No BoltzGen binders found.');
     tr.appendChild(td);
@@ -893,6 +903,7 @@ function renderBinderRows(rows = []) {
         row.rank ?? '—',
         row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
         row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
+        row.hotspot_dist !== null && row.hotspot_dist !== undefined ? Number(row.hotspot_dist).toFixed(2) : '—',
       ];
       values.forEach((val) => {
         const td = document.createElement('td');
@@ -1113,6 +1124,41 @@ async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
   }
 }
 
+async function rerunPipeline(pdbId, triggerBtn = null) {
+  if (!pdbId) {
+    showAlert('Missing PDB ID.');
+    return;
+  }
+  const expected = prompt('Expected epitope count? Leave blank for default (3).', '3');
+  if (triggerBtn) triggerBtn.disabled = true;
+  try {
+    const payload = {
+      pdb_id: pdbId,
+      force: true,
+      expected_epitopes: expected ? Number(expected) || null : null,
+      decide_scope_attempts: 3,
+    };
+    const res = await fetch('/api/targets/pipeline/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
+    }
+    const body = await res.json();
+    showAlert(body.message || 'Pipeline refresh queued.', false);
+    if (body.job_id) {
+      startJobPolling(body.job_id);
+    }
+  } catch (err) {
+    showAlert(err.message || 'Failed to rerun pipeline.');
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
 async function loadSnapshotMetadata(names) {
   if (!names || !names.length) {
     renderSnapshots([]);
@@ -1212,6 +1258,14 @@ function renderBoltzConfigs() {
     manualBtn.dataset.pdbId = target.pdb_id || '';
     manualBtn.dataset.scope = 'target';
     cmdCell.appendChild(manualBtn);
+
+    const rerunBtn = document.createElement('button');
+    rerunBtn.type = 'button';
+    rerunBtn.textContent = 'Re-run pipeline';
+    rerunBtn.className = 'ghost';
+    rerunBtn.dataset.action = 'rerun-pipeline';
+    rerunBtn.dataset.pdbId = target.pdb_id || '';
+    cmdCell.appendChild(rerunBtn);
 
     const pymolBtn = document.createElement('button');
     pymolBtn.type = 'button';
@@ -1806,6 +1860,8 @@ function handleBoltzTableClick(event) {
     launchBoltzPymol(pdbId, null, btn);
   } else if (action === 'pymol-epitope') {
     launchBoltzPymol(pdbId, btn.dataset.epitopeName || null, btn);
+  } else if (action === 'rerun-pipeline') {
+    rerunPipeline(pdbId, btn);
   }
 }
 
