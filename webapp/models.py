@@ -325,6 +325,7 @@ class BoltzgenTargetConfig(BaseModel):
     target_job_id: Optional[str] = None
     target_job_status: Optional[str] = None
     antigen_url: Optional[str] = None
+    has_prep: Optional[bool] = None
 
 
 class BoltzgenConfigListResponse(BaseModel):

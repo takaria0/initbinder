@@ -245,6 +245,23 @@ function setBadge(badge, text, color = null) {
   badge.style.color = color ? '#0f172a' : 'var(--color-accent)';
 }
 
+function stylePymolButton(btn, hasPrep) {
+  if (!btn) return;
+  if (hasPrep) {
+    btn.disabled = false;
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+    btn.title = '';
+    return;
+  }
+  btn.disabled = true;
+  btn.style.background = 'rgba(248, 113, 113, 0.15)';
+  btn.style.borderColor = 'rgba(248, 113, 113, 0.35)';
+  btn.style.color = '#b91c1c';
+  btn.title = 'Hotspot bundle missing; re-run pipeline to enable PyMOL.';
+}
+
 function normalizeStatus(status) {
   const value = (status || '').toLowerCase();
   if (value === 'running' || value === 'pending') return { text: value === 'pending' ? 'Queued' : 'Running', tone: 'info' };
@@ -1241,6 +1258,7 @@ function renderBoltzConfigs() {
     configCount += configs.length;
     const key = (target.pdb_id || '').toUpperCase();
     const isExpanded = state.expandedTargets instanceof Set ? state.expandedTargets.has(key) : false;
+    const hasPrep = Boolean(target.has_prep);
     const tr = document.createElement('tr');
     tr.className = `target-row ${isExpanded ? 'expanded' : 'collapsed'}`;
     tr.dataset.pdbId = key;
@@ -1319,6 +1337,7 @@ function renderBoltzConfigs() {
     pymolBtn.className = 'ghost';
     pymolBtn.dataset.action = 'pymol-target';
     pymolBtn.dataset.pdbId = target.pdb_id || '';
+    stylePymolButton(pymolBtn, hasPrep);
     cmdCell.appendChild(pymolBtn);
 
     tr.appendChild(cmdCell);
@@ -1396,6 +1415,7 @@ function renderBoltzConfigs() {
       epPymol.dataset.action = 'pymol-epitope';
       epPymol.dataset.pdbId = target.pdb_id || '';
       epPymol.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
+      stylePymolButton(epPymol, hasPrep);
       epCmd.appendChild(epPymol);
 
       epRow.appendChild(epCmd);

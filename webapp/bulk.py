@@ -1055,6 +1055,35 @@ def _job_status_for(job_store: JobStore, job_id: Optional[str]) -> Optional[str]
         return None
 
 
+def _has_pymol_assets(pdb_id: str) -> bool:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+    raw_dir = target_dir / "raw"
+    prep_dir = target_dir / "prep"
+    candidates = [
+        raw_dir / f"{pdb_id.upper()}.cif",
+        raw_dir / f"{pdb_id.upper()}.mmcif",
+        raw_dir / "raw.cif",
+        raw_dir / "raw.mmcif",
+        prep_dir / "prepared.cif",
+        prep_dir / "prepared.mmcif",
+        prep_dir / "prepared.pdb",
+    ]
+    has_structure = any(path.exists() for path in candidates)
+    if not has_structure:
+        return False
+    hotspot_candidates = [
+        target_dir / "hotspot_bundle.json",
+        target_dir / "reports" / "hotspot_bundle.json",
+        target_dir / "reports" / "hotspot_bundle" / "bundle.json",
+    ]
+    has_hotspots = any(path.exists() for path in hotspot_candidates)
+    if not has_hotspots and prep_dir.exists():
+        has_hotspots = bool(list(prep_dir.glob("epitope_*_hotspots*.json")))
+    return has_hotspots
+
+
 def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse:
     if not pdb_ids:
         return BoltzgenConfigListResponse(targets=[])
@@ -1073,9 +1102,17 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 )
         except Exception:
             antigen_url = None
+        has_prep = _has_pymol_assets(pdb)
         configs = _discover_boltzgen_configs(pdb)
         if not configs:
-            targets.append(BoltzgenTargetConfig(pdb_id=pdb.upper(), configs=[], antigen_url=antigen_url))
+            targets.append(
+                BoltzgenTargetConfig(
+                    pdb_id=pdb.upper(),
+                    configs=[],
+                    antigen_url=antigen_url,
+                    has_prep=has_prep,
+                )
+            )
             continue
         enriched: List[BoltzgenEpitopeConfig] = []
         for cfg_entry in configs:
@@ -1106,6 +1143,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 target_job_id=target_run.get("job_id") if target_run else None,
                 target_job_status=_job_status_for(job_store, target_run.get("job_id")) if target_run else None,
                 antigen_url=antigen_url,
+                has_prep=has_prep,
             )
         )
     return BoltzgenConfigListResponse(targets=targets)
