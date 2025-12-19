@@ -819,6 +819,16 @@ def _write_boltzgen_configs(
         # Normalize tokens; for mmCIF, drop residues that are outside (label_asym_id,label_seq_id) range.
         hotspot_keys = _shift_residue_tokens(raw_hotspots, prepared_structure)
         epitope_residues = _shift_residue_tokens(raw_mask, prepared_structure)
+        if not hotspot_keys and raw_hotspots:
+            # Fallback: use raw hotspots (converted to chain+index tokens) if shifting/validation removed all.
+            hotspot_keys = [_parse_chain_res_token(h)[0] + str(_parse_chain_res_token(h)[1])  # type: ignore
+                            for h in raw_hotspots
+                            if _parse_chain_res_token(h)]
+            log(f"  [boltzgen-config] warning: using unshifted hotspots for {pdb_id.upper()} · {name}")
+        if not epitope_residues and raw_mask:
+            epitope_residues = [_parse_chain_res_token(m)[0] + str(_parse_chain_res_token(m)[1])  # type: ignore
+                                for m in raw_mask
+                                if _parse_chain_res_token(m)]
 
         try:
             info = engine._write_spec(
