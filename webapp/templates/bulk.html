@@ -113,18 +113,6 @@
 
             <section id="epitope-metrics-section" hidden style="display: none;"></section>
 
-            <section id="diversity-section">
-              <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <h2 style="margin: 0;">Designed binder diversity</h2>
-                <div class="flex-row" style="gap: 8px; flex-wrap: wrap; align-items: center;">
-                  <button type="button" id="diversity-download-html" class="ghost" hidden>Export HTML</button>
-                  <button type="button" id="diversity-download-csv" class="ghost" hidden>Download CSV</button>
-                  <button type="button" id="diversity-refresh" class="ghost">Refresh</button>
-                </div>
-              </div>
-              <div id="diversity-grid" class="catalog-viewer"></div>
-            </section>
-
             <section id="boltz-config-panel" class="table-scroll" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center;">
                 <div>
@@ -132,6 +120,7 @@
                   <div id="boltz-config-summary" class="badge" hidden></div>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
                   <button type="button" id="boltz-rerun-pipeline" class="ghost">Re-run pipeline</button>
                   <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
                   <label>Epitope design num
@@ -158,6 +147,18 @@
                 </thead>
                 <tbody></tbody>
               </table>
+            </section>
+
+            <section id="diversity-section">
+              <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <h2 style="margin: 0;">Designed binder diversity</h2>
+                <div class="flex-row" style="gap: 8px; flex-wrap: wrap; align-items: center;">
+                  <button type="button" id="diversity-download-html" class="ghost" hidden>Export HTML</button>
+                  <button type="button" id="diversity-download-csv" class="ghost" hidden>Download CSV</button>
+                  <button type="button" id="diversity-refresh" class="ghost">Refresh</button>
+                </div>
+              </div>
+              <div id="diversity-grid" class="catalog-viewer"></div>
             </section>
 
             <section id="boltz-binders-panel" class="table-scroll">
@@ -250,14 +251,14 @@
       </div>
     </div>
 
-    <div id="boltz-run-modal" class="modal" hidden>
+    <div id="boltz-run-modal" class="modal wide-modal" hidden>
       <div class="modal-backdrop" data-close="boltz-run"></div>
       <div class="modal-content">
         <div class="modal-header">
           <h3 id="boltz-run-title">Cluster run steps</h3>
           <button type="button" id="boltz-run-close" class="ghost">Close</button>
         </div>
-        <pre id="boltz-run-body" class="scrollable">Loading manual run steps…</pre>
+        <div id="boltz-run-body" class="scrollable">Loading manual run steps…</div>
       </div>
     </div>
 

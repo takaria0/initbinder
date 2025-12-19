@@ -67,6 +67,7 @@ const el = {
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunPipeline: document.querySelector('#boltz-rerun-pipeline'),
+  boltzRerunMissing: document.querySelector('#boltz-rerun-missing'),
   binderPanel: document.querySelector('#boltz-binders-panel'),
   binderTable: document.querySelector('#boltz-binders-table tbody'),
   binderSummary: document.querySelector('#boltz-binders-summary'),
@@ -147,6 +148,95 @@ function describeSeries(values = []) {
     mean: sum / count,
     median,
   };
+}
+
+async function copyTextToClipboard(text, btn = null) {
+  if (!text) return;
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    if (btn) {
+      const prev = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = prev; }, 1200);
+    }
+  } catch (err) {
+    showAlert('Copy failed. Try selecting the text manually.');
+  }
+}
+
+function renderRunCommandBlocks(text) {
+  if (!el.boltzRunBody) return;
+  el.boltzRunBody.innerHTML = '';
+  if (!text) {
+    el.boltzRunBody.textContent = 'No commands available.';
+    return;
+  }
+  const lines = String(text).split('\n');
+  const sections = [];
+  let current = { title: null, lines: [] };
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#')) {
+      if (current.title || current.lines.length) sections.push(current);
+      current = { title: trimmed.replace(/^#+\s*/, ''), lines: [] };
+    } else {
+      current.lines.push(line);
+    }
+  });
+  if (current.title || current.lines.length) sections.push(current);
+  if (!sections.length) {
+    sections.push({ title: 'Commands', lines });
+  }
+
+  sections.forEach((section, idx) => {
+    const title = section.title || `Step ${idx + 1}`;
+    const commandText = section.lines.join('\n').trim();
+    const wrapper = document.createElement('div');
+    wrapper.style.marginBottom = '12px';
+
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.justifyContent = 'space-between';
+    header.style.alignItems = 'center';
+    header.style.gap = '8px';
+    header.style.marginBottom = '6px';
+
+    const heading = document.createElement('div');
+    heading.style.fontWeight = '600';
+    heading.textContent = title;
+    header.appendChild(heading);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'ghost';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', () => copyTextToClipboard(commandText, copyBtn));
+    header.appendChild(copyBtn);
+
+    const block = document.createElement('pre');
+    block.textContent = commandText || '—';
+    block.style.background = '#f1f5f9';
+    block.style.border = '1px solid #e2e8f0';
+    block.style.borderRadius = '8px';
+    block.style.padding = '10px';
+    block.style.margin = '0';
+    block.style.whiteSpace = 'pre-wrap';
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(block);
+    el.boltzRunBody.appendChild(wrapper);
+  });
 }
 
 function renderHistogram(container, values = [], { bins = 8, label = 'values' } = {}) {
@@ -1178,12 +1268,28 @@ function openPipelineRerunModal(pdbId, antigenUrl = null) {
   toggleModal(el.pipelineRerunModal, true);
 }
 
-async function submitPipelineRerun(triggerBtn = null) {
-  const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
-  if (!pdbId) {
-    showAlert('Missing PDB ID.');
+function openPipelineRerunModalBulk(targets = []) {
+  if (!el.pipelineRerunModal) return;
+  const ids = targets.map((t) => (t?.pdb_id || '').trim().toUpperCase()).filter(Boolean);
+  if (!ids.length) {
+    showAlert('No targets selected for pipeline rerun.');
     return;
   }
+  el.pipelineRerunModal.dataset.bulkIds = ids.join(',');
+  el.pipelineRerunModal.dataset.pdbId = '';
+  el.pipelineRerunModal.dataset.antigenUrl = '';
+  if (el.pipelineRerunTitle) {
+    el.pipelineRerunTitle.textContent = `Re-run pipeline · ${ids.length} targets`;
+  }
+  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '3';
+  if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
+  if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
+  toggleModal(el.pipelineRerunModal, true);
+}
+
+async function submitPipelineRerun(triggerBtn = null) {
+  const bulkIds = el.pipelineRerunModal?.dataset?.bulkIds;
+  const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
   const antigenUrl = el.pipelineRerunModal?.dataset?.antigenUrl || null;
   const expectedRaw = el.pipelineRerunExpected?.value;
   const attemptsRaw = el.pipelineRerunAttempts?.value;
@@ -1192,26 +1298,55 @@ async function submitPipelineRerun(triggerBtn = null) {
   const force = Boolean(el.pipelineRerunForce?.checked);
   if (triggerBtn) triggerBtn.disabled = true;
   try {
-    const payload = {
-      pdb_id: pdbId,
-      force,
-      expected_epitopes: expected,
-      decide_scope_attempts: attempts,
-      antigen_url: antigenUrl,
-    };
-    const res = await fetch('/api/targets/pipeline/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
-    }
-    const body = await res.json();
-    showAlert(body.message || 'Pipeline refresh queued.', false);
-    if (body.job_id) {
-      startJobPolling(body.job_id);
+    if (bulkIds) {
+      const list = bulkIds.split(',').map((id) => id.trim()).filter(Boolean);
+      for (const id of list) {
+        const payload = {
+          pdb_id: id,
+          force,
+          expected_epitopes: expected,
+          decide_scope_attempts: attempts,
+          antigen_url: null,
+        };
+        const res = await fetch('/api/targets/pipeline/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
+        }
+        const body = await res.json();
+        if (body.job_id) {
+          startJobPolling(body.job_id);
+        }
+      }
+      showAlert(`Pipeline refresh queued for ${list.length} targets.`, false);
+    } else if (pdbId) {
+      const payload = {
+        pdb_id: pdbId,
+        force,
+        expected_epitopes: expected,
+        decide_scope_attempts: attempts,
+        antigen_url: antigenUrl,
+      };
+      const res = await fetch('/api/targets/pipeline/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
+      }
+      const body = await res.json();
+      showAlert(body.message || 'Pipeline refresh queued.', false);
+      if (body.job_id) {
+        startJobPolling(body.job_id);
+      }
+    } else {
+      showAlert('Missing PDB ID.');
     }
     toggleModal(el.pipelineRerunModal, false);
   } catch (err) {
@@ -1247,9 +1382,20 @@ function renderBoltzConfigs() {
   const tbody = el.boltzTable;
   tbody.innerHTML = '';
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (el.boltzRerunMissing) {
+    const missing = targets.filter((t) => t && t.pdb_id && t.has_prep === false);
+    el.boltzRerunMissing.hidden = missing.length === 0;
+  }
   if (!targets.length) {
-    el.boltzPanel.hidden = true;
+    const emptyRow = document.createElement('tr');
+    const emptyCell = document.createElement('td');
+    emptyCell.colSpan = 7;
+    emptyCell.className = 'empty-note';
+    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV and click Preview CSV or Refresh configs to load.';
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
     if (el.boltzSummary) el.boltzSummary.hidden = true;
+    el.boltzPanel.hidden = false;
     return;
   }
   let configCount = 0;
@@ -1477,7 +1623,8 @@ async function loadBoltzConfigs(options = {}) {
       .filter(Boolean),
   ));
   if (!ids.length) {
-    el.boltzPanel.hidden = true;
+    state.boltzConfigs = [];
+    renderBoltzConfigs();
     return;
   }
   try {
@@ -1508,7 +1655,7 @@ async function loadBoltzConfigs(options = {}) {
     await loadBinderTable({ page: state.binderPage || 1, silent: true });
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
-    if (el.boltzPanel) el.boltzPanel.hidden = true;
+    renderBoltzConfigs();
   }
 }
 
@@ -1739,7 +1886,6 @@ function buildAllRunCommandsText(targets = []) {
 
     lines.push(
       '',
-      `# Target ${pdb}`,
       `python ${pipelinePath} pipeline ${pdb} \\`,
       `  --run_label ${runLabel} \\`,
       `  --num_designs ${designCount} \\`,
@@ -1790,7 +1936,7 @@ async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
     specs = target.configs.map((cfg) => cfg.config_path).filter(Boolean);
   }
   const text = buildRunCommandText(pdbId, specs, epitopeName);
-  if (el.boltzRunBody) el.boltzRunBody.textContent = text;
+  renderRunCommandBlocks(text);
 }
 
 async function showRunCommandAll() {
@@ -1802,11 +1948,11 @@ async function showRunCommandAll() {
   }
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
-    if (el.boltzRunBody) el.boltzRunBody.textContent = '# No BoltzGen targets detected.';
+    renderRunCommandBlocks('# No BoltzGen targets detected.');
     return;
   }
   const text = buildAllRunCommandsText(targets);
-  if (el.boltzRunBody) el.boltzRunBody.textContent = text;
+  renderRunCommandBlocks(text);
 }
 
 async function runBoltzTarget(pdbId, triggerEl = null) {
@@ -2387,11 +2533,28 @@ function init() {
   if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);
-  if (el.boltzRefresh) el.boltzRefresh.addEventListener('click', () => loadBoltzConfigs({ silent: true }));
+  if (el.boltzRefresh) {
+    el.boltzRefresh.addEventListener('click', () => {
+      const hasPreview = Array.isArray(state.bulkPreviewRows) && state.bulkPreviewRows.length > 0;
+      const hasCsv = Boolean((el.bulkCsvInput?.value || '').trim());
+      if (!hasPreview && hasCsv) {
+        previewBulkCsv({ silent: true });
+      } else {
+        loadBoltzConfigs({ silent: true });
+      }
+    });
+  }
   if (el.diversityRefresh) el.diversityRefresh.addEventListener('click', () => refreshDiversity());
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
+  if (el.boltzRerunMissing) {
+    el.boltzRerunMissing.addEventListener('click', () => {
+      const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+      const missing = targets.filter((t) => t && t.pdb_id && t.has_prep === false);
+      openPipelineRerunModalBulk(missing);
+    });
+  }
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
@@ -2418,6 +2581,7 @@ function init() {
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
   });
 
+  renderBoltzConfigs();
   refreshDiversity({ silent: true });
   hydrateSnapshotsFromCache({ silent: true });
 }

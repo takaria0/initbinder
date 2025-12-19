@@ -1478,6 +1478,10 @@ button.ghost:hover:not(:disabled) {
   width: min(1400px, 98vw);
 }
 
+.wide-modal .modal-content {
+  width: min(1200px, 96vw);
+}
+
 .catalog-modal .catalog-viewer {
   min-height: 220px;
   max-height: 420px;
