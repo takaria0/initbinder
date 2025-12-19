@@ -261,6 +261,35 @@
       </div>
     </div>
 
+    <div id="pipeline-rerun-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="pipeline-rerun"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="pipeline-rerun-title">Re-run pipeline</h3>
+          <button type="button" id="pipeline-rerun-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" style="margin-top: 0;">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
+          <div class="flex-row" style="gap: 12px; align-items: center; flex-wrap: wrap;">
+            <label>Expected epitopes
+              <input type="number" id="pipeline-rerun-expected" value="3" min="1" max="32">
+            </label>
+            <label>Decide attempts
+              <input type="number" id="pipeline-rerun-attempts" value="3" min="1" max="5">
+            </label>
+            <label style="display:flex; gap:6px; align-items:center;">
+              <input type="checkbox" id="pipeline-rerun-force" checked>
+              Force re-init
+            </label>
+          </div>
+        </div>
+        <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
+          <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
+          <button type="button" id="pipeline-rerun-confirm">Run pipeline</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/static/js/bulk.js"></script>
   </body>
 </html>

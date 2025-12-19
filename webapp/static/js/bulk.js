@@ -90,6 +90,14 @@ const el = {
   boltzRunTitle: document.querySelector('#boltz-run-title'),
   boltzRunBody: document.querySelector('#boltz-run-body'),
   boltzRunClose: document.querySelector('#boltz-run-close'),
+  pipelineRerunModal: document.querySelector('#pipeline-rerun-modal'),
+  pipelineRerunTitle: document.querySelector('#pipeline-rerun-title'),
+  pipelineRerunExpected: document.querySelector('#pipeline-rerun-expected'),
+  pipelineRerunAttempts: document.querySelector('#pipeline-rerun-attempts'),
+  pipelineRerunForce: document.querySelector('#pipeline-rerun-force'),
+  pipelineRerunConfirm: document.querySelector('#pipeline-rerun-confirm'),
+  pipelineRerunCancel: document.querySelector('#pipeline-rerun-cancel'),
+  pipelineRerunClose: document.querySelector('#pipeline-rerun-close'),
 };
 
 function formatRangeLabel(value) {
@@ -1124,20 +1132,44 @@ async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
   }
 }
 
-async function rerunPipeline(pdbId, triggerBtn = null) {
+function openPipelineRerunModal(pdbId, antigenUrl = null) {
+  if (!el.pipelineRerunModal) return;
+  if (!pdbId) {
+    showAlert('Missing PDB ID for pipeline rerun.');
+    return;
+  }
+  el.pipelineRerunModal.dataset.pdbId = pdbId;
+  if (antigenUrl) {
+    el.pipelineRerunModal.dataset.antigenUrl = antigenUrl;
+  } else {
+    delete el.pipelineRerunModal.dataset.antigenUrl;
+  }
+  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Re-run pipeline · ${pdbId}`;
+  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '3';
+  if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
+  if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
+  toggleModal(el.pipelineRerunModal, true);
+}
+
+async function submitPipelineRerun(triggerBtn = null) {
+  const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
   if (!pdbId) {
     showAlert('Missing PDB ID.');
     return;
   }
-  const expected = prompt('Expected epitope count? Leave blank for default (3).', '3');
-  const antigenUrl = triggerBtn?.dataset?.antigenUrl || null;
+  const antigenUrl = el.pipelineRerunModal?.dataset?.antigenUrl || null;
+  const expectedRaw = el.pipelineRerunExpected?.value;
+  const attemptsRaw = el.pipelineRerunAttempts?.value;
+  const expected = expectedRaw ? Number(expectedRaw) || null : null;
+  const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+  const force = Boolean(el.pipelineRerunForce?.checked);
   if (triggerBtn) triggerBtn.disabled = true;
   try {
     const payload = {
       pdb_id: pdbId,
-      force: true,
-      expected_epitopes: expected ? Number(expected) || null : null,
-      decide_scope_attempts: 3,
+      force,
+      expected_epitopes: expected,
+      decide_scope_attempts: attempts,
       antigen_url: antigenUrl,
     };
     const res = await fetch('/api/targets/pipeline/refresh', {
@@ -1154,6 +1186,7 @@ async function rerunPipeline(pdbId, triggerBtn = null) {
     if (body.job_id) {
       startJobPolling(body.job_id);
     }
+    toggleModal(el.pipelineRerunModal, false);
   } catch (err) {
     showAlert(err.message || 'Failed to rerun pipeline.');
   } finally {
@@ -1864,7 +1897,7 @@ function handleBoltzTableClick(event) {
   } else if (action === 'pymol-epitope') {
     launchBoltzPymol(pdbId, btn.dataset.epitopeName || null, btn);
   } else if (action === 'rerun-pipeline') {
-    rerunPipeline(pdbId, btn);
+    openPipelineRerunModal(pdbId, btn.dataset.antigenUrl || null);
   }
 }
 
@@ -2343,12 +2376,16 @@ function init() {
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
+  if (el.pipelineRerunClose) el.pipelineRerunClose.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
+  if (el.pipelineRerunCancel) el.pipelineRerunCancel.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
+  if (el.pipelineRerunConfirm) el.pipelineRerunConfirm.addEventListener('click', () => submitPipelineRerun(el.pipelineRerunConfirm));
   if (el.epitopeReportDownload) el.epitopeReportDownload.addEventListener('click', downloadEpitopeReportHtml);
   document.addEventListener('click', (evt) => {
     const closeTarget = evt.target?.dataset?.close;
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);
     if (closeTarget === 'boltz-log') toggleModal(el.boltzLogModal, false);
     if (closeTarget === 'boltz-run') toggleModal(el.boltzRunModal, false);
+    if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
   });
 
   refreshDiversity({ silent: true });
