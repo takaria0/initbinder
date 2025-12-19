@@ -296,6 +296,7 @@ class PipelineRefreshRequest(BaseModel):
     force: bool = True
     expected_epitopes: Optional[int] = 3
     decide_scope_attempts: int = Field(3, ge=1, le=5)
+    antigen_url: Optional[str] = None
 
 
 class PipelineRefreshResponse(BaseModel):
@@ -323,6 +324,7 @@ class BoltzgenTargetConfig(BaseModel):
     configs: List[BoltzgenEpitopeConfig] = Field(default_factory=list)
     target_job_id: Optional[str] = None
     target_job_status: Optional[str] = None
+    antigen_url: Optional[str] = None
 
 
 class BoltzgenConfigListResponse(BaseModel):

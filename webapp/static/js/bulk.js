@@ -1130,6 +1130,7 @@ async function rerunPipeline(pdbId, triggerBtn = null) {
     return;
   }
   const expected = prompt('Expected epitope count? Leave blank for default (3).', '3');
+  const antigenUrl = triggerBtn?.dataset?.antigenUrl || null;
   if (triggerBtn) triggerBtn.disabled = true;
   try {
     const payload = {
@@ -1137,6 +1138,7 @@ async function rerunPipeline(pdbId, triggerBtn = null) {
       force: true,
       expected_epitopes: expected ? Number(expected) || null : null,
       decide_scope_attempts: 3,
+      antigen_url: antigenUrl,
     };
     const res = await fetch('/api/targets/pipeline/refresh', {
       method: 'POST',
@@ -1265,6 +1267,7 @@ function renderBoltzConfigs() {
     rerunBtn.className = 'ghost';
     rerunBtn.dataset.action = 'rerun-pipeline';
     rerunBtn.dataset.pdbId = target.pdb_id || '';
+    if (target.antigen_url) rerunBtn.dataset.antigenUrl = target.antigen_url;
     cmdCell.appendChild(rerunBtn);
 
     const pymolBtn = document.createElement('button');

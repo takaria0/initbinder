@@ -488,11 +488,29 @@ def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobSt
     label = f"Pipeline refresh {request.pdb_id.upper()}"
     job = store.create_job("pipeline_refresh", label, details=request.dict())
 
+    def _resolve_antigen_url() -> str | None:
+        if request.antigen_url:
+            return request.antigen_url
+        target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / request.pdb_id.upper() / "target.yaml"
+        if target_yaml.exists():
+            try:
+                data = yaml.safe_load(target_yaml.read_text()) or {}
+                url = data.get("antigen_catalog_url") or data.get("antigen_url")
+                if url and str(url).strip():
+                    return str(url).strip()
+            except Exception:
+                return None
+        return None
+
     def _run() -> None:
         try:
+            antigen_url = _resolve_antigen_url()
+            if not antigen_url:
+                store.update(job.job_id, status=JobStatus.FAILED, message="Missing antigen_url for pipeline refresh.")
+                return
             init_decide_prep(
                 request.pdb_id,
-                antigen_url=None,
+                antigen_url=antigen_url,
                 job_store=store,
                 job_id=job.job_id,
                 run_decide=True,

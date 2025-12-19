@@ -1052,9 +1052,20 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
     latest_runs = _latest_run_records()
     targets: List[BoltzgenTargetConfig] = []
     for pdb in pdb_ids:
+        antigen_url = None
+        try:
+            cfg = load_config()
+            target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb.upper() / "target.yaml"
+            if target_yaml.exists():
+                data = yaml.safe_load(target_yaml.read_text()) or {}
+                antigen_url = (
+                    str(data.get("antigen_catalog_url") or data.get("antigen_url") or "").strip() or None
+                )
+        except Exception:
+            antigen_url = None
         configs = _discover_boltzgen_configs(pdb)
         if not configs:
-            targets.append(BoltzgenTargetConfig(pdb_id=pdb.upper(), configs=[]))
+            targets.append(BoltzgenTargetConfig(pdb_id=pdb.upper(), configs=[], antigen_url=antigen_url))
             continue
         enriched: List[BoltzgenEpitopeConfig] = []
         for cfg_entry in configs:
@@ -1084,6 +1095,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 configs=enriched,
                 target_job_id=target_run.get("job_id") if target_run else None,
                 target_job_status=_job_status_for(job_store, target_run.get("job_id")) if target_run else None,
+                antigen_url=antigen_url,
             )
         )
     return BoltzgenConfigListResponse(targets=targets)
