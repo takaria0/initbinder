@@ -505,6 +505,7 @@ class BoltzGenSpecSummary(BaseModel):
     name: str
     has_metrics: bool = False
     metrics_path: Optional[str] = None
+    design_count: Optional[int] = None
 
 
 class BoltzGenRunSummary(BaseModel):

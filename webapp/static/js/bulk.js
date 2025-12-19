@@ -22,6 +22,8 @@ const state = {
   binderCsvName: null,
   binderMessage: null,
   binderPdbIds: [],
+  bulkPreviewTimer: null,
+  bulkPreviewSig: null,
 };
 
 const el = {
@@ -239,6 +241,34 @@ function renderRunCommandBlocks(text) {
   });
 }
 
+function bulkPreviewSignature(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+  const head = trimmed.slice(0, 96);
+  const tail = trimmed.slice(-96);
+  return `${trimmed.length}:${head}:${tail}`;
+}
+
+function scheduleBulkPreview() {
+  if (!el.bulkCsvInput) return;
+  if (state.bulkPreviewTimer) clearTimeout(state.bulkPreviewTimer);
+  state.bulkPreviewTimer = setTimeout(() => {
+    const csvText = el.bulkCsvInput?.value || '';
+    const sig = bulkPreviewSignature(csvText);
+    if (!sig) {
+      state.bulkPreviewSig = null;
+      state.bulkPreviewRows = [];
+      renderBulkPreview([]);
+      state.boltzConfigs = [];
+      renderBoltzConfigs();
+      return;
+    }
+    if (sig === state.bulkPreviewSig) return;
+    state.bulkPreviewSig = sig;
+    previewBulkCsv({ silent: true });
+  }, 650);
+}
+
 function renderHistogram(container, values = [], { bins = 8, label = 'values' } = {}) {
   if (!container) return;
   container.innerHTML = '';
@@ -381,12 +411,25 @@ function buildStatusBadge(status) {
   return pill;
 }
 
-function buildLocalResultBadge(done = false) {
+function buildLocalResultBadge(count = null) {
   const pill = document.createElement('span');
   pill.className = 'badge';
-  pill.textContent = done ? 'DONE' : 'No results';
-  pill.style.background = done ? 'rgba(134, 239, 172, 0.25)' : 'rgba(148, 163, 184, 0.25)';
-  pill.style.color = done ? '#14532d' : '#475569';
+  const num = Number(count);
+  const hasCount = Number.isFinite(num);
+  if (!hasCount) {
+    pill.textContent = '—';
+    pill.style.background = 'rgba(148, 163, 184, 0.25)';
+    pill.style.color = '#475569';
+    return pill;
+  }
+  pill.textContent = `${num} design${num === 1 ? '' : 's'}`;
+  if (num > 0) {
+    pill.style.background = 'rgba(134, 239, 172, 0.25)';
+    pill.style.color = '#14532d';
+  } else {
+    pill.style.background = 'rgba(148, 163, 184, 0.25)';
+    pill.style.color = '#475569';
+  }
   return pill;
 }
 
@@ -439,7 +482,15 @@ function summarizeTargetStatus(target) {
 
 function hasLocalBoltzResults(pdbId) {
   const key = (pdbId || '').toUpperCase();
-  return Boolean(state.boltzLocalRuns?.[key]);
+  const count = state.boltzLocalRuns?.[key];
+  const num = Number(count);
+  if (Number.isFinite(num)) return num > 0;
+  return Boolean(count);
+}
+
+function getBoltzDesignTotal(pdbId) {
+  const key = (pdbId || '').toUpperCase();
+  return state.boltzLocalRuns?.[key] ?? null;
 }
 
 function setActionButtonsDisabled(disabled) {
@@ -1426,56 +1477,34 @@ function renderBoltzConfigs() {
     });
     const statusCell = document.createElement('td');
     statusCell.className = 'boltz-status-cell';
-    statusCell.appendChild(buildLocalResultBadge(hasLocalBoltzResults(target.pdb_id)));
+    statusCell.appendChild(buildLocalResultBadge(getBoltzDesignTotal(target.pdb_id)));
     tr.appendChild(statusCell);
 
     const cmdCell = document.createElement('td');
     cmdCell.className = 'boltz-cmd-cell';
     const runBtn = document.createElement('button');
     runBtn.type = 'button';
-    runBtn.textContent = 'Run all epitopes';
+    runBtn.textContent = 'Run';
     runBtn.dataset.action = 'run-target';
     runBtn.dataset.pdbId = target.pdb_id || '';
     cmdCell.appendChild(runBtn);
 
     const cfgBtn = document.createElement('button');
     cfgBtn.type = 'button';
-    cfgBtn.textContent = 'Show config';
+    cfgBtn.textContent = 'Config';
     cfgBtn.className = 'ghost';
     cfgBtn.dataset.action = 'show-config-target';
     cfgBtn.dataset.pdbId = target.pdb_id || '';
     cmdCell.appendChild(cfgBtn);
 
-    const logBtn = document.createElement('button');
-    logBtn.type = 'button';
-    logBtn.textContent = 'Show log';
-    logBtn.className = 'ghost';
-    logBtn.dataset.action = 'show-log';
-    logBtn.dataset.pdbId = target.pdb_id || '';
-    if (target.target_job_id) {
-      logBtn.dataset.jobId = target.target_job_id;
-      logBtn.dataset.logTitle = `BoltzGen config run · ${target.pdb_id}`;
-    } else {
-      logBtn.disabled = true;
-    }
-    cmdCell.appendChild(logBtn);
     const manualBtn = document.createElement('button');
     manualBtn.type = 'button';
-    manualBtn.textContent = 'Show run command';
+    manualBtn.textContent = 'Command';
     manualBtn.className = 'ghost';
     manualBtn.dataset.action = 'show-run';
     manualBtn.dataset.pdbId = target.pdb_id || '';
     manualBtn.dataset.scope = 'target';
     cmdCell.appendChild(manualBtn);
-
-    const rerunBtn = document.createElement('button');
-    rerunBtn.type = 'button';
-    rerunBtn.textContent = 'Re-run pipeline';
-    rerunBtn.className = 'ghost';
-    rerunBtn.dataset.action = 'rerun-pipeline';
-    rerunBtn.dataset.pdbId = target.pdb_id || '';
-    if (target.antigen_url) rerunBtn.dataset.antigenUrl = target.antigen_url;
-    cmdCell.appendChild(rerunBtn);
 
     const pymolBtn = document.createElement('button');
     pymolBtn.type = 'button';
@@ -1485,6 +1514,15 @@ function renderBoltzConfigs() {
     pymolBtn.dataset.pdbId = target.pdb_id || '';
     stylePymolButton(pymolBtn, hasPrep);
     cmdCell.appendChild(pymolBtn);
+
+    const rerunBtn = document.createElement('button');
+    rerunBtn.type = 'button';
+    rerunBtn.textContent = 'Re-run pipeline';
+    rerunBtn.className = 'ghost';
+    rerunBtn.dataset.action = 'rerun-pipeline';
+    rerunBtn.dataset.pdbId = target.pdb_id || '';
+    if (target.antigen_url) rerunBtn.dataset.antigenUrl = target.antigen_url;
+    cmdCell.appendChild(rerunBtn);
 
     tr.appendChild(cmdCell);
     tbody.appendChild(tr);
@@ -1509,7 +1547,7 @@ function renderBoltzConfigs() {
       });
       const epStatus = document.createElement('td');
       epStatus.className = 'boltz-status-cell';
-      epStatus.appendChild(buildLocalResultBadge(hasLocalBoltzResults(target.pdb_id)));
+      epStatus.appendChild(buildLocalResultBadge(getBoltzDesignTotal(target.pdb_id)));
       epRow.appendChild(epStatus);
 
       const epCmd = document.createElement('td');
@@ -1524,29 +1562,16 @@ function renderBoltzConfigs() {
 
       const epCfgBtn = document.createElement('button');
       epCfgBtn.type = 'button';
-      epCfgBtn.textContent = 'Show config';
+      epCfgBtn.textContent = 'Config';
       epCfgBtn.className = 'ghost';
       epCfgBtn.dataset.action = 'show-config-epitope';
       epCfgBtn.dataset.pdbId = target.pdb_id || '';
       epCfgBtn.dataset.configPath = cfg.config_path || '';
       epCmd.appendChild(epCfgBtn);
 
-      const epLog = document.createElement('button');
-      epLog.type = 'button';
-      epLog.textContent = 'Show log';
-      epLog.className = 'ghost';
-      epLog.dataset.action = 'show-log';
-      epLog.dataset.pdbId = target.pdb_id || '';
-      if (cfg.job_id) {
-        epLog.dataset.jobId = cfg.job_id;
-        epLog.dataset.logTitle = `${epitopeLabel(cfg, cfgIdx + 1)} · ${target.pdb_id}`;
-      } else {
-        epLog.disabled = true;
-      }
-      epCmd.appendChild(epLog);
       const epManual = document.createElement('button');
       epManual.type = 'button';
-      epManual.textContent = 'Show run command';
+      epManual.textContent = 'Command';
       epManual.className = 'ghost';
       epManual.dataset.action = 'show-run';
       epManual.dataset.pdbId = target.pdb_id || '';
@@ -1601,13 +1626,29 @@ async function loadBoltzRunStatuses(pdbIds = []) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
       const runs = Array.isArray(body.runs) ? body.runs : [];
-      const hasLocal = runs.some((run) => {
-        if (Array.isArray(run.specs) && run.specs.some((spec) => spec && spec.has_metrics)) return true;
-        return Boolean(run.local_path);
+      let totalDesigns = 0;
+      let sawCount = false;
+      let sawRun = false;
+      runs.forEach((run) => {
+        sawRun = true;
+        const specs = Array.isArray(run.specs) ? run.specs : [];
+        specs.forEach((spec) => {
+          const count = Number(spec?.design_count);
+          if (Number.isFinite(count)) {
+            totalDesigns += count;
+            sawCount = true;
+          }
+        });
       });
-      results[id] = hasLocal;
+      if (!sawRun) {
+        results[id] = 0;
+      } else if (sawCount) {
+        results[id] = totalDesigns;
+      } else {
+        results[id] = null;
+      }
     } catch (err) {
-      results[id] = false;
+      results[id] = null;
     }
   }));
   state.boltzLocalRuns = results;
@@ -2530,6 +2571,7 @@ function init() {
   loadClusterStatus();
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
+  if (el.bulkCsvInput) el.bulkCsvInput.addEventListener('input', scheduleBulkPreview);
   if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);

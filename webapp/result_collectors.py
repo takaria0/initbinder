@@ -353,6 +353,16 @@ def _load_csv(path: Path) -> List[Dict[str, str]]:
         return [{(k or "").strip(): (v or "").strip() for k, v in row.items()} for row in reader]
 
 
+def _count_csv_rows(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            return sum(1 for _ in reader)
+    except Exception:
+        return 0
+
+
 def list_boltzgen_runs(pdb_id: str) -> List[Dict[str, object]]:
     try:
         root = _boltzgen_root(pdb_id)
@@ -384,11 +394,14 @@ def list_boltzgen_runs(pdb_id: str) -> List[Dict[str, object]]:
             else:
                 run_label, spec_name = first_name, second_name
 
+            design_count = _count_csv_rows(metrics)
+
             run_map.setdefault(run_label, {})
             run_map[run_label][spec_name] = {
                 "name": spec_name,
                 "has_metrics": True,
                 "metrics_path": str(metrics),
+                "design_count": design_count,
             }
 
             try:
