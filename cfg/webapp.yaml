@@ -35,3 +35,4 @@ cluster:
       - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/7xl0.yaml
       - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8coh.yaml
       - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8z8v.yaml
+      # - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/3eak.yaml
