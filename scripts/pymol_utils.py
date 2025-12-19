@@ -367,6 +367,72 @@ def _detect_structure_chains(struct_path: Path) -> list[str]:
     return chains
 
 
+def _label_to_auth_map(struct_path: Path) -> dict[tuple[str, int], tuple[str, int]]:
+    """Return mapping from (label_asym_id,label_seq_id) -> (auth_asym_id,auth_seq_id)."""
+    try:
+        from Bio.PDB.MMCIF2Dict import MMCIF2Dict  # type: ignore
+    except Exception:
+        return {}
+    if struct_path.suffix.lower() not in {".cif", ".mmcif"}:
+        return {}
+    try:
+        mm = MMCIF2Dict(str(struct_path))
+    except Exception:
+        return {}
+    label_asym = mm.get("_atom_site.label_asym_id") or []
+    label_seq = mm.get("_atom_site.label_seq_id") or []
+    auth_asym = mm.get("_atom_site.auth_asym_id") or []
+    auth_seq = mm.get("_atom_site.auth_seq_id") or []
+    if not (label_asym and label_seq and auth_asym and auth_seq):
+        return {}
+    if not isinstance(label_asym, list):
+        label_asym = [label_asym]
+    if not isinstance(label_seq, list):
+        label_seq = [label_seq]
+    if not isinstance(auth_asym, list):
+        auth_asym = [auth_asym]
+    if not isinstance(auth_seq, list):
+        auth_seq = [auth_seq]
+    mapping: dict[tuple[str, int], tuple[str, int]] = {}
+    for la, ls, aa, asq in zip(label_asym, label_seq, auth_asym, auth_seq):
+        try:
+            ls_val = int(float(str(ls).strip()))
+            as_val = int(float(str(asq).strip()))
+        except Exception:
+            continue
+        la_id = str(la).strip()
+        aa_id = str(aa).strip()
+        if not la_id or not aa_id:
+            continue
+        mapping[(la_id, ls_val)] = (aa_id, as_val)
+    return mapping
+
+
+def _append_auth_tokens(keys: Sequence[str], mapping: dict[tuple[str, int], tuple[str, int]]) -> list[str]:
+    """Append auth numbering tokens alongside label-based tokens for PyMOL selection."""
+    out: list[str] = list(keys)
+    for key in keys:
+        m = _BUNDLE_TOKEN.match(str(key).strip()) or _BUNDLE_RANGE.match(str(key).strip())
+        if not m:
+            continue
+        chain = m.group(1)
+        try:
+            a = int(m.group(2))
+            b = int(m.group(3)) if m.lastindex == 3 and m.group(3) else a
+        except Exception:
+            continue
+        lo, hi = (a, b) if a <= b else (b, a)
+        for pos in range(lo, hi + 1):
+            mapped = mapping.get((chain, pos))
+            if not mapped:
+                continue
+            aa, apos = mapped
+            token = f"{aa}{apos}"
+            if token not in out:
+                out.append(token)
+    return out
+
+
 def _remap_chain_label(chain: str, available: Sequence[str]) -> str:
     avail = [c.strip().upper() for c in available if str(c).strip()]
     if not avail:
@@ -941,13 +1007,17 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
 
     # --- Bundle Mode (Default or Fallback) ---
     available_chains = _detect_structure_chains(structure_path)
+    label_auth_map = _label_to_auth_map(structure_path)
     if available_chains:
         remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
         for epi, variants in epitopes.items():
             if not isinstance(variants, Mapping):
                 continue
             remapped_epitopes[epi] = {
-                var: _remap_keys_to_chains(keys, available_chains)
+                var: _remap_keys_to_chains(
+                    _append_auth_tokens(keys, label_auth_map) if label_auth_map else keys,
+                    available_chains,
+                )
                 for var, keys in variants.items()
             }
         epitopes = remapped_epitopes or epitopes
