@@ -380,7 +380,17 @@ function renderEpitopeMetrics(meta = []) {
 function renderSnapshots(meta = []) {
   if (!el.snapshotGrid || !el.snapshotSection) return;
   el.snapshotGrid.innerHTML = '';
-  const list = Array.isArray(meta) ? meta : [];
+  const rawList = Array.isArray(meta) ? meta : [];
+  const byPdb = new Map();
+  rawList.forEach((item) => {
+    const key = (item?.pdb_id || '').toUpperCase();
+    if (!key) return;
+    const prev = byPdb.get(key);
+    if (!prev || (item.created_at || 0) > (prev.created_at || 0)) {
+      byPdb.set(key, item);
+    }
+  });
+  const list = byPdb.size ? Array.from(byPdb.values()) : rawList;
   renderEpitopeMetrics(list);
   if (!list.length) {
     state.snapshotNames = [];
