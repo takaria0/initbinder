@@ -606,6 +606,53 @@ def _collect_expression_regions(
     }
 
 
+def _collect_allowed_epitope_ranges(pdb_id: str) -> List[dict[str, str]]:
+    if ROOT is None:
+        return []
+    target_yaml = ROOT / "targets" / pdb_id.upper() / "target.yaml"
+    if not target_yaml.exists():
+        return []
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception as exc:
+        print(f"[pymol_utils] Warning: could not parse {target_yaml}: {exc}")
+        return []
+
+    raw = data.get("allowed_epitope_range") or data.get("allowed_range") or ""
+    entries: list[str] = []
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, list):
+        entries = [str(x) for x in raw if str(x).strip()]
+
+    ranges: List[dict[str, str]] = []
+    for entry in entries:
+        for token in str(entry).split(","):
+            token = token.strip()
+            if not token or ":" not in token:
+                continue
+            chain, span = token.split(":", 1)
+            chain_clean = str(chain).strip().upper()
+            if not chain_clean:
+                continue
+            span = str(span).strip().replace("..", "-")
+            start_label, end_label = _parse_range_labels(span)
+            if not start_label or not end_label:
+                continue
+            selection = (
+                f"(target and chain {chain_clean} and resi {start_label}-{end_label})"
+                if start_label != end_label
+                else f"(target and chain {chain_clean} and resi {start_label})"
+            )
+            ranges.append({
+                "chain": chain_clean,
+                "start": start_label,
+                "end": end_label,
+                "selection": selection,
+            })
+    return ranges
+
+
 def _write_hotspot_pml(
     struct_name: str,
     epitopes: dict[str, dict[str, list[str]]],
@@ -613,6 +660,8 @@ def _write_hotspot_pml(
     *,
     expression_regions: Optional[List[dict[str, str]]] = None,
     vendor_range: Optional[str] = None,
+    allowed_ranges: Optional[List[dict[str, str]]] = None,
+    expressed_object_name: Optional[str] = None,
     full_struct_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
     supporting_chains: Optional[Sequence[str]] = None,
@@ -652,6 +701,9 @@ def _write_hotspot_pml(
         cond = " or ".join(f"chain {ch}" for ch in cleaned)
         safe_name = _sanitize(sel_name) or sel_name
         return f"select {safe_name}, {obj} and ({cond})", safe_name
+
+    def _swap_object(expr: str, src: str, dest: str) -> str:
+        return re.sub(rf"\\b{re.escape(src)}\\b", dest, str(expr))
 
     # 視認性の良い固定パレット（順番はエピトープ名のアルファベット順で安定）
     base_palette = [
@@ -719,8 +771,10 @@ def _write_hotspot_pml(
         if vendor_range:
             vendor_range_clean = str(vendor_range).replace("\n", " ").replace("\"", "")
             pml.append(f"# Vendor expressed range (vendor numbering): {vendor_range_clean}\n")
-        pml.append("set_color vendor_expression, [0.960, 0.720, 0.240]\n")
-        pml.append("set cartoon_transparency, 0.65, target\n")
+        # Use a neutral mesh overlay so expression regions don't clash with epitope colors.
+        pml.append("set_color vendor_expression, [0.35, 0.35, 0.35]\n")
+        pml.append("set mesh_width, 0.6\n")
+        pml.append("set cartoon_transparency, 0.6, target\n")
         pml.append("set label_font_id, 7\n")
         pml.append("set label_size, -0.6\n")
         for idx, region in enumerate(expression_regions, start=1):
@@ -732,7 +786,7 @@ def _write_hotspot_pml(
                 continue
             obj_name = f"vendor_expr_{idx:02d}_{chain}"
             pml.append(f"select {obj_name}, {sel_expr}\n")
-            pml.append(f"set cartoon_transparency, 0.05, {obj_name}\n")
+            pml.append(f"show mesh, {obj_name}\n")
             pml.append(f"color vendor_expression, {obj_name}\n")
             pml.append(f"group vendor_expression, {obj_name}\n")
             pml.append(f"label first ({sel_expr} and name CA), \"{chain}:{start_label}\"\n")
@@ -741,6 +795,44 @@ def _write_hotspot_pml(
             pml.append(f"set label_color, vendor_expression, last ({sel_expr} and name CA)\n")
         if vendor_range:
             pml.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_range_clean}\"\n")
+        pml.append("\n")
+
+    if full_struct_name and expression_regions and expressed_object_name:
+        expr_obj = _sanitize(expressed_object_name) or expressed_object_name
+        pml.append("# Vendor expressed range on full assembly\n")
+        pml.append(f"create {expr_obj}, assembly_full\n")
+        pml.append(f"show cartoon, {expr_obj}\n")
+        pml.append(f"color gray70, {expr_obj}\n")
+        pml.append(f"set cartoon_transparency, 0.55, {expr_obj}\n")
+        expr_parts = []
+        for region in expression_regions:
+            sel_expr = region.get("selection")
+            if sel_expr:
+                expr_parts.append(_swap_object(sel_expr, "target", expr_obj))
+        if expr_parts:
+            combined = " or ".join(f"({part})" for part in expr_parts)
+            expr_sel = f"{expr_obj}_vendor_expr"
+            pml.append("set_color vendor_expressed, [0.10, 0.55, 0.95]\n")
+            pml.append(f"select {expr_sel}, {combined}\n")
+            pml.append(f"show mesh, {expr_sel}\n")
+            pml.append(f"color vendor_expressed, {expr_sel}\n")
+            pml.append(f"group vendor_expressed, {expr_sel}\n")
+        pml.append(f"group vendor_expressed, {expr_obj}\n\n")
+
+    if allowed_ranges:
+        pml.append("# Highlight allowed epitope ranges\n")
+        pml.append("set_color allowed_epitope_range, [0.200, 0.600, 0.900]\n")
+        pml.append("set mesh_width, 0.5\n")
+        for idx, region in enumerate(allowed_ranges, start=1):
+            chain = _sanitize(region.get("chain", f"chain{idx}")) or f"chain{idx}"
+            sel_expr = region.get("selection")
+            if not sel_expr:
+                continue
+            obj_name = f"allowed_range_{idx:02d}_{chain}"
+            pml.append(f"select {obj_name}, {sel_expr}\n")
+            pml.append(f"show mesh, {obj_name}\n")
+            pml.append(f"color allowed_epitope_range, {obj_name}\n")
+            pml.append(f"group allowed_epitope_range, {obj_name}\n")
         pml.append("\n")
 
     for i, epi in enumerate(epi_names):
@@ -791,6 +883,8 @@ def _send_hotspots_to_remote(
     *,
     vendor_range: Optional[str] = None,
     expression_regions: Optional[List[dict[str, str]]] = None,
+    allowed_ranges: Optional[List[dict[str, str]]] = None,
+    expressed_object_name: Optional[str] = None,
     raw_pdb_path: Optional[Path] = None,
     raw_object_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
@@ -819,6 +913,8 @@ def _send_hotspots_to_remote(
             pml_path,
             expression_regions=expression_regions,
             vendor_range=vendor_range,
+            allowed_ranges=allowed_ranges,
+            expressed_object_name=expressed_object_name,
             full_struct_name=raw_object_name,
             target_chains=target_chains,
             supporting_chains=supporting_chains,
@@ -954,6 +1050,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             print(f"[pymol_utils] Warning: epitope filter {sorted(whitelist)} yielded no matches; exporting all.")
 
     vendor_range_label, expression_regions, chain_meta = _collect_expression_regions(pdb_id_u)
+    allowed_ranges = _collect_allowed_epitope_ranges(pdb_id_u)
+    expressed_object_name = f"{pdb_id_u}_expressed"
     target_chain_ids = chain_meta.get("target", []) if chain_meta else []
     supporting_chain_ids = chain_meta.get("supporting", []) if chain_meta else []
     if expression_regions:
@@ -970,6 +1068,16 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         print(
             f"[pymol_utils] Warning: vendor range {vendor_range_label} reported but could not be mapped to prepared structure for {pdb_id_u}."
         )
+    if allowed_ranges:
+        desc = ", ".join(
+            (
+                f"{region['chain']}:{region['start']}"
+                if region.get('start') == region.get('end')
+                else f"{region['chain']}:{region['start']}-{region['end']}"
+            )
+            for region in allowed_ranges
+        )
+        print(f"[pymol_utils] Allowed epitope ranges: {desc}")
 
     # --- NEW: Mode Toggle ---
     raw_pdb_path: Optional[Path] = None
@@ -995,6 +1103,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             epitopes,
             vendor_range=vendor_range_label,
             expression_regions=expression_regions,
+            allowed_ranges=allowed_ranges,
+            expressed_object_name=expressed_object_name,
             raw_pdb_path=raw_pdb_path,
             raw_object_name=raw_bundle_name,
             target_chains=target_chain_ids,
@@ -1022,6 +1132,28 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             }
         epitopes = remapped_epitopes or epitopes
         expression_regions = _remap_expression_regions(expression_regions, available_chains)
+        if allowed_ranges:
+            remapped_allowed: list[dict[str, str]] = []
+            for region in allowed_ranges:
+                chain = _remap_chain_label(str(region.get("chain") or ""), available_chains)
+                if not chain:
+                    continue
+                start_label = str(region.get("start") or "").strip()
+                end_label = str(region.get("end") or "").strip()
+                if not start_label or not end_label:
+                    continue
+                selection = (
+                    f"(target and chain {chain} and resi {start_label}-{end_label})"
+                    if start_label != end_label
+                    else f"(target and chain {chain} and resi {start_label})"
+                )
+                remapped_allowed.append({
+                    "chain": chain,
+                    "start": start_label,
+                    "end": end_label,
+                    "selection": selection,
+                })
+            allowed_ranges = remapped_allowed
         target_chain_ids = [_remap_chain_label(c, available_chains) for c in target_chain_ids]
         supporting_chain_ids = [_remap_chain_label(c, available_chains) for c in supporting_chain_ids]
         if len(set(available_chains)) == 1 and target_chain_ids and target_chain_ids[0] != available_chains[0]:
@@ -1041,6 +1173,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         pml_path,
         expression_regions=expression_regions,
         vendor_range=vendor_range_label,
+        allowed_ranges=allowed_ranges,
+        expressed_object_name=expressed_object_name,
         full_struct_name=raw_bundle_name,
         target_chains=target_chain_ids,
         supporting_chains=supporting_chain_ids,

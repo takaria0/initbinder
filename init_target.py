@@ -284,6 +284,25 @@ def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str,
     return chain_details
 
 
+_RANGE_NUM_RE = re.compile(r"-?\d+")
+
+
+def _parse_vendor_range(value: str | None) -> Optional[tuple[int, int]]:
+    if not value:
+        return None
+    nums = _RANGE_NUM_RE.findall(str(value))
+    if not nums:
+        return None
+    try:
+        start = int(nums[0])
+        end = int(nums[1]) if len(nums) > 1 else start
+    except ValueError:
+        return None
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
 def _populate_sequences_and_alignment(
     pdb_id: str,
     antigen_url: str,
@@ -292,6 +311,7 @@ def _populate_sequences_and_alignment(
     config: dict,
     *,
     target_accession: str | None,
+    target_vendor_range: str | None,
 ) -> tuple[list[str], dict[str, str]]:
     """Populate sequence fields and vendor alignment metadata in-place."""
     pdb_sequences: dict[str, str] = {}
@@ -314,56 +334,75 @@ def _populate_sequences_and_alignment(
     vendor_range: Optional[tuple[int, int]] = None
     alignment_summary: Optional[AlignmentResult] = None
     verification_result: Optional[dict] = None
+    vendor_range_override = _parse_vendor_range(target_vendor_range)
+    if target_vendor_range:
+        if vendor_range_override:
+            print(f"[info] Using provided vendor range override: {vendor_range_override[0]}-{vendor_range_override[1]}")
+        else:
+            print(f"[warn] Could not parse vendor range '{target_vendor_range}'.")
+    if target_accession:
+        print(f"[info] Using provided accession: {target_accession}")
 
-    if "sinobiological.com" in antigen_url:
+    if vendor_range_override and target_accession:
+        print("[info] Skipping vendor page parse (accession + vendor range provided).")
+        verification_result = _verify_antigen_compatibility(
+            pdb_id,
+            antigen_url,
+            tdir,
+            target_accession=target_accession,
+            vendor_range_override=vendor_range_override,
+            skip_vendor_parse=True,
+        )
+    elif "sinobiological.com" in antigen_url:
         verification_result = _verify_antigen_compatibility(
             pdb_id,
             antigen_url,
             tdir,
             target_accession=target_accession,
         )
-        if verification_result:
-            alignment_summary = verification_result.get("alignment")
-            accession_id = verification_result.get("accession", "") or ""
-            accession_seq = verification_result.get("full_sequence", "") or ""
-            vendor_range = verification_result.get("vendor_range")
-            expressed_seq = verification_result.get("expressed_sequence", "") or ""
-            if alignment_summary:
-                chosen_chains = list(alignment_summary.chain_ids)
-                overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
-                if overlap:
-                    chain_ranges = getattr(alignment_summary, "chain_ranges", {}) or {}
-                    formatted_ranges: list[str] = []
-                    for chain_id, span in sorted(chain_ranges.items()):
-                        chain_id_str = str(chain_id).strip()
-                        if not chain_id_str or not span:
-                            continue
-                        if isinstance(span, (list, tuple)) and len(span) >= 2:
-                            start_label = str(span[0]).strip()
-                            end_label = str(span[1]).strip()
-                        else:
-                            start_label = end_label = ""
-                        if not start_label or not end_label:
-                            continue
-                        start_disp, end_disp = start_label, end_label
-                        try:
-                            start_match = re.match(r"^-?\d+", start_label)
-                            end_match = re.match(r"^-?\d+", end_label)
-                            if start_match and end_match:
-                                start_num = int(start_match.group(0))
-                                end_num = int(end_match.group(0))
-                                if end_num < start_num:
-                                    start_disp, end_disp = end_label, start_label
-                        except ValueError:
-                            pass
-                        formatted_ranges.append(f"{chain_id_str}:{start_disp}-{end_disp}")
-
-                    if formatted_ranges:
-                        config["allowed_epitope_range"] = ", ".join(formatted_ranges)
-                    else:
-                        config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
     else:
         print(f"[warn] Antigen verification is currently only supported for sinobiological.com URLs.")
+
+    if verification_result:
+        alignment_summary = verification_result.get("alignment")
+        accession_id = verification_result.get("accession", "") or ""
+        accession_seq = verification_result.get("full_sequence", "") or ""
+        vendor_range = verification_result.get("vendor_range")
+        expressed_seq = verification_result.get("expressed_sequence", "") or ""
+        if alignment_summary:
+            chosen_chains = list(alignment_summary.chain_ids)
+            overlap = alignment_summary.vendor_overlap_range or alignment_summary.vendor_aligned_range
+            if overlap:
+                chain_ranges = getattr(alignment_summary, "chain_ranges", {}) or {}
+                formatted_ranges: list[str] = []
+                for chain_id, span in sorted(chain_ranges.items()):
+                    chain_id_str = str(chain_id).strip()
+                    if not chain_id_str or not span:
+                        continue
+                    if isinstance(span, (list, tuple)) and len(span) >= 2:
+                        start_label = str(span[0]).strip()
+                        end_label = str(span[1]).strip()
+                    else:
+                        start_label = end_label = ""
+                    if not start_label or not end_label:
+                        continue
+                    start_disp, end_disp = start_label, end_label
+                    try:
+                        start_match = re.match(r"^-?\d+", start_label)
+                        end_match = re.match(r"^-?\d+", end_label)
+                        if start_match and end_match:
+                            start_num = int(start_match.group(0))
+                            end_num = int(end_match.group(0))
+                            if end_num < start_num:
+                                start_disp, end_disp = end_label, start_label
+                    except ValueError:
+                        pass
+                    formatted_ranges.append(f"{chain_id_str}:{start_disp}-{end_disp}")
+
+                if formatted_ranges:
+                    config["allowed_epitope_range"] = ", ".join(formatted_ranges)
+                else:
+                    config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
 
     config.setdefault("sequences", {})
     existing_acc = (config["sequences"].get("accession") or {}).copy()
@@ -371,10 +410,14 @@ def _populate_sequences_and_alignment(
     for key in ("id", "aa", "expressed_range", "expressed_aa"):
         if key in existing_acc and key not in accession_block:
             accession_block[key] = existing_acc[key]
+    if not accession_id and target_accession:
+        accession_id = target_accession
     if accession_id:
         accession_block["id"] = accession_id
     if accession_seq:
         accession_block["aa"] = accession_seq
+    if not vendor_range and vendor_range_override:
+        vendor_range = vendor_range_override
     if vendor_range:
         accession_block["expressed_range"] = f"{vendor_range[0]}-{vendor_range[1]}"
     if expressed_seq:
@@ -544,56 +587,77 @@ def _verify_antigen_compatibility(
     tdir: Path,
     *,
     target_accession: str | None = None,
+    vendor_range_override: Optional[tuple[int, int]] = None,
+    expressed_seq_override: str | None = None,
+    skip_vendor_parse: bool = False,
 ) -> Optional[dict]:
     """Return verification details with multi-chain alignment against the vendor construct."""
     print(f"\n--- Verifying Antigen Compatibility for {pdb_id.upper()} ---")
 
     # 1. Parse Sino page with shared analysis helper (fallback to legacy parsing)
-    print(f"[1/5] Parsing vendor page with LLM helper: {antigen_url}")
-    analysis = _analyze_sino_product(antigen_url)
-    if analysis and getattr(analysis, "error", None):
-        print(f"[warn] LLM analysis message: {analysis.error}")
-    accession = (getattr(analysis, "accession", "") or "").strip() if analysis else ""
-    if not accession and target_accession:
-        accession = target_accession
-    vendor_range = None
-    if analysis and isinstance(getattr(analysis, "aa_start", None), int) and isinstance(getattr(analysis, "aa_end", None), int):
-        vendor_range = (int(analysis.aa_start), int(analysis.aa_end))
-    expressed_seq = ((analysis.expressed_sequence or "") if analysis and getattr(analysis, "expressed_sequence", None) else "").replace("\n", "").strip().upper()
-    expression_host = getattr(analysis, "expression_host", None) if analysis else None
-    tags = getattr(analysis, "tags", None) if analysis else None
-    molecular_weight = getattr(analysis, "molecular_weight_kda", None) if analysis else None
-    product_form = getattr(analysis, "product_form", None) if analysis else None
+    analysis = None
+    accession = (target_accession or "").strip()
+    vendor_range = vendor_range_override
+    expressed_seq = (expressed_seq_override or "").replace("\n", "").strip().upper()
+    expression_host = None
+    tags = None
+    molecular_weight = None
+    product_form = None
 
-    if not accession or not (vendor_range or expressed_seq):
-        print("[warn] LLM analysis missing accession or range; trying legacy parser.")
-        legacy = _legacy_parse_sino_page(antigen_url)
-        if not legacy:
-            if target_accession:
-                print(f"[warn] Vendor parsing failed; falling back to provided accession {target_accession}.")
-                accession = target_accession
-            else:
-                print("[fail] Could not extract accession/range from vendor page.")
-                return None
-        else:
-            accession, vendor_range = legacy
-            if analysis:
-                analysis.accession = accession
-                analysis.aa_start, analysis.aa_end = vendor_range
-                analysis.expressed_sequence = None
-            print(f"[ok] Legacy parser recovered accession {accession} and range {vendor_range[0]}-{vendor_range[1]}")
+    if skip_vendor_parse:
+        print("[1/5] Skipping vendor page parse; using provided accession/range.")
+        if not accession:
+            print("[fail] No accession provided; cannot verify alignment.")
+            return None
+        if vendor_range_override:
+            print(f"[info] Vendor range override: {vendor_range_override[0]}-{vendor_range_override[1]}")
+        if expressed_seq_override:
+            print(f"[info] Expressed sequence override length: {len(expressed_seq)}")
     else:
-        rng_desc = f"{vendor_range[0]}-{vendor_range[1]}" if vendor_range else "LLM expressed sequence"
-        print(f"[ok] LLM analysis accession={accession}, range={rng_desc}")
+        print(f"[1/5] Parsing vendor page with LLM helper: {antigen_url}")
+        analysis = _analyze_sino_product(antigen_url)
+        if analysis and getattr(analysis, "error", None):
+            print(f"[warn] LLM analysis message: {analysis.error}")
+        if not accession:
+            accession = (getattr(analysis, "accession", "") or "").strip() if analysis else ""
+        if analysis and isinstance(getattr(analysis, "aa_start", None), int) and isinstance(getattr(analysis, "aa_end", None), int):
+            vendor_range = (int(analysis.aa_start), int(analysis.aa_end))
+        if analysis and getattr(analysis, "expressed_sequence", None):
+            expressed_seq = (analysis.expressed_sequence or "").replace("\n", "").strip().upper()
+        expression_host = getattr(analysis, "expression_host", None) if analysis else None
+        tags = getattr(analysis, "tags", None) if analysis else None
+        molecular_weight = getattr(analysis, "molecular_weight_kda", None) if analysis else None
+        product_form = getattr(analysis, "product_form", None) if analysis else None
 
-    if not expression_host and analysis:
-        expression_host = getattr(analysis, "expression_host", None)
-    if not tags and analysis:
-        tags = getattr(analysis, "tags", None)
-    if molecular_weight is None and analysis:
-        molecular_weight = getattr(analysis, "molecular_weight_kda", None)
-    if product_form is None and analysis:
-        product_form = getattr(analysis, "product_form", None)
+        if not accession or not (vendor_range or expressed_seq):
+            print("[warn] LLM analysis missing accession or range; trying legacy parser.")
+            legacy = _legacy_parse_sino_page(antigen_url)
+            if not legacy:
+                if target_accession:
+                    print(f"[warn] Vendor parsing failed; falling back to provided accession {target_accession}.")
+                    accession = target_accession
+                else:
+                    print("[fail] Could not extract accession/range from vendor page.")
+                    return None
+            else:
+                accession, vendor_range = legacy
+                if analysis:
+                    analysis.accession = accession
+                    analysis.aa_start, analysis.aa_end = vendor_range
+                    analysis.expressed_sequence = None
+                print(f"[ok] Legacy parser recovered accession {accession} and range {vendor_range[0]}-{vendor_range[1]}")
+        else:
+            rng_desc = f"{vendor_range[0]}-{vendor_range[1]}" if vendor_range else "LLM expressed sequence"
+            print(f"[ok] LLM analysis accession={accession}, range={rng_desc}")
+
+        if not expression_host and analysis:
+            expression_host = getattr(analysis, "expression_host", None)
+        if not tags and analysis:
+            tags = getattr(analysis, "tags", None)
+        if molecular_weight is None and analysis:
+            molecular_weight = getattr(analysis, "molecular_weight_kda", None)
+        if product_form is None and analysis:
+            product_form = getattr(analysis, "product_form", None)
 
     # 2. Fetch NCBI sequence
     print(f"[2/5] Fetching sequence for {accession} from NCBI...")
@@ -720,7 +784,8 @@ def init_target(
     chain_id: str | None = None,
     target_name: str | None = None,
     antigen_url: str = "",
-    target_accession: str | None = None,
+    target_accession: str = "",
+    target_vendor_range: str | None = None,
     force: bool = False,
 ):
     """Downloads PDB data and creates the initial directory structure.
@@ -735,8 +800,15 @@ def init_target(
         raise ValueError("init_target: 'antigen_url' is required (non-empty string).")
 
     target_accession = (target_accession or "").strip()
+    target_vendor_range = (target_vendor_range or "").strip() or None
+    if not target_accession:
+        raise ValueError("init_target: 'target_accession' is required (non-empty string).")
 
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
+    print(f"[info] init-target accession={target_accession}")
+    if target_vendor_range:
+        print(f"[info] init-target vendor range={target_vendor_range}")
+    print(f'target_accession="{target_accession}"')
     if force:
         print("[info] --force flag supplied; continuing with fresh downloads regardless of existing files.")
 
@@ -813,6 +885,7 @@ def init_target(
         raw_cif,
         config,
         target_accession=target_accession,
+        target_vendor_range=target_vendor_range,
     )
 
     if normalized_chosen:
@@ -847,5 +920,3 @@ def init_target(
     with yml_path.open('w') as f:
         yaml.safe_dump(config, f, sort_keys=False)
     print(f"[ok] Updated {yml_path} with antigen_catalog_url, sequences.*, and target_chains.")
-
-

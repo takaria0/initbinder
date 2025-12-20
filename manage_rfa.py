@@ -700,7 +700,12 @@ def main():
     p_init.add_argument("--chain", help="Optional: Specify a target chain ID to focus on (e.g., 'A').")
     p_init.add_argument("--target_name", help="Optional: Specify the exact name of the target protein.")
     p_init.add_argument("--antigen_url", help="Optional: URL to a Sino Biological antigen page for verification.")
-    p_init.add_argument("--target_accession", help="Optional: UniProt/RefSeq accession to fetch vendor sequence directly.")
+    p_init.add_argument(
+        "--target_accession",
+        required=True,
+        help="UniProt/RefSeq accession to fetch vendor sequence directly.",
+    )
+    p_init.add_argument("--target_vendor_range", help="Optional: Vendor expressed range (e.g., 1-167) to skip vendor parsing.")
     p_init.add_argument("--force", action="store_true",
                         help="Reinitialize target even if files already exist (overwrites metadata).")
 
@@ -889,8 +894,20 @@ def main():
         )
         if args.auto_init:
             for c in cands:
-                if getattr(c, "chosen_pdb", None):
-                    init_target(c.chosen_pdb)
+                selection = (c.selections.get("biotin") or c.selections.get("any") or {})
+                pdb_id = getattr(c, "chosen_pdb", None) or selection.get("pdb_id")
+                antigen_url = selection.get("antigen_url")
+                accession = selection.get("vendor_accession") or getattr(c, "uniprot", None) or selection.get("accession")
+                vendor_range = selection.get("vendor_range")
+                if not pdb_id or not antigen_url or not accession:
+                    print(f"[warn] Skipping auto init; missing pdb/accession/url for {getattr(c, 'uniprot', '')}.")
+                    continue
+                init_target(
+                    pdb_id,
+                    antigen_url=antigen_url,
+                    target_accession=accession,
+                    target_vendor_range=vendor_range,
+                )
 
     elif args.cmd == "init-target":
         init_target(
@@ -899,6 +916,7 @@ def main():
             target_name=args.target_name,
             antigen_url=args.antigen_url,
             target_accession=getattr(args, "target_accession", None),
+            target_vendor_range=getattr(args, "target_vendor_range", None),
             force=getattr(args, "force", False),
         )
 
@@ -933,27 +951,49 @@ def main():
             header = [h.lower().strip() for h in reader.fieldnames]
             pdb_col = next((c for c in ["chosen_pdb", "pdb", "pdb_id"] if c in header), None)
             url_col = next((c for c in ["antigen_url", "url"] if c in header), None)
+            accession_col = next(
+                (c for c in ["vendor_accession", "vendor_product_accession", "accession", "uniprot"] if c in header),
+                None,
+            )
+            vendor_range_col = next(
+                (c for c in ["vendor_range", "pdb_vendor_intersection", "vendor_overlap_range"] if c in header),
+                None,
+            )
             
             if not pdb_col:
                 raise KeyError("Could not find a PDB ID column (e.g., 'chosen_pdb', 'pdb') in the TSV.")
+            if not accession_col:
+                raise KeyError("Could not find an accession column (e.g., 'vendor_accession', 'accession', 'uniprot') in the TSV.")
 
             # Get original case-sensitive column names
             pdb_col_orig = reader.fieldnames[header.index(pdb_col)]
             url_col_orig = reader.fieldnames[header.index(url_col)] if url_col else None
+            accession_col_orig = reader.fieldnames[header.index(accession_col)] if accession_col else None
+            vendor_range_col_orig = reader.fieldnames[header.index(vendor_range_col)] if vendor_range_col else None
 
             rows = list(reader)
 
         for i, row in enumerate(rows):
             pdb_id = row.get(pdb_col_orig, "").strip()
             antigen_url = row.get(url_col_orig, "").strip() if url_col_orig else None
+            accession = row.get(accession_col_orig, "").strip() if accession_col_orig else ""
+            vendor_range = row.get(vendor_range_col_orig, "").strip() if vendor_range_col_orig else None
             
             if not pdb_id or not re.match(r"^[A-Za-z0-9]{4}$", pdb_id):
                 print(f"[warn] Skipping invalid or missing PDB ID in row {i+2}.")
                 continue
+            if not accession:
+                print(f"[warn] Skipping row {i+2}; missing accession.")
+                continue
 
             print(f"\n{'='*20} Processing Target {i+1}/{len(rows)}: {pdb_id.upper()} {'='*20}")
             try:
-                init_target(pdb_id, antigen_url=antigen_url)
+                init_target(
+                    pdb_id,
+                    antigen_url=antigen_url,
+                    target_accession=accession,
+                    target_vendor_range=vendor_range,
+                )
                 llm_scope(pdb_id)
                 prep_target(pdb_id, args.sasa_cutoff)
 
