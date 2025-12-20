@@ -280,6 +280,7 @@ def init_decide_prep(
     llm_delay_seconds: float = 0.0,
     decide_scope_attempts: int = 1,
     target_accession: Optional[str] = None,
+    target_vendor_range: Optional[str] = None,
 ) -> None:
     def _log(line: str) -> None:
         job_store.append_log(job_id, line)
@@ -304,6 +305,9 @@ def init_decide_prep(
             job_store.update(job_id, status=JobStatus.SUCCESS, message="Target ready (existing epitopes found)")
             return
 
+    if not target_accession:
+        raise PipelineError("Missing target_accession; ensure the TSV includes vendor_accession/uniprot or target.yaml has sequences.accession.")
+
     job_store.append_log(job_id, f"[pipeline] init-target start for {pdb_id.upper()}")
     job_store.update(job_id, status=JobStatus.RUNNING, message="Initializing target")
     snapshot_dir = _snapshot_target_state(pdb_id)
@@ -315,6 +319,8 @@ def init_decide_prep(
         args.extend(["--antigen_url", antigen_url])
     if target_accession:
         args.extend(["--target_accession", target_accession])
+    if target_vendor_range:
+        args.extend(["--target_vendor_range", target_vendor_range])
     if force:
         args.append("--force")
     run_manage_rfa("init-target", args, log=_log)

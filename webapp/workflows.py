@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import re
 import shlex
 import subprocess
@@ -92,6 +93,131 @@ def _get_cluster_executor() -> ThreadPoolExecutor:
     return _cluster_executor
 
 
+def _detect_delimiter(header_line: str) -> str:
+    return "\t" if ("\t" in header_line and "," not in header_line) else ","
+
+
+def _find_accession_in_table(pdb_id: str, path: Path) -> tuple[str | None, str | None]:
+    if not path.exists():
+        return None, None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None, None
+    if not lines:
+        return None, None
+    delimiter = _detect_delimiter(lines[0])
+    reader = csv.DictReader(lines, delimiter=delimiter)
+    if not reader.fieldnames:
+        return None, None
+    key = pdb_id.strip().upper()
+    for row in reader:
+        if not row:
+            continue
+        lowered = {str(k).strip().lower(): (str(v).strip() if v is not None else "") for k, v in row.items() if k}
+        pdb_val = ""
+        for col in ("resolved_pdb_id", "pdb_id", "pdb", "chosen_pdb"):
+            if lowered.get(col):
+                pdb_val = lowered.get(col, "")
+                break
+        if pdb_val.strip().upper() != key:
+            continue
+        accession = ""
+        for col in ("vendor_accession", "vendor_product_accession", "accession", "uniprot"):
+            if lowered.get(col):
+                accession = lowered.get(col, "")
+                break
+        vendor_range = ""
+        for col in ("vendor_range", "pdb_vendor_intersection", "vendor_overlap_range"):
+            if lowered.get(col):
+                vendor_range = lowered.get(col, "")
+                break
+        return (accession or None), (vendor_range or None)
+    return None, None
+
+
+def _resolve_accession_from_logs(pdb_id: str, cfg) -> tuple[str | None, str | None, Path | None]:
+    log_dir = cfg.log_dir or (cfg.paths.project_root / "logs" / "webapp")
+    bulk_dir = log_dir / "bulk"
+    candidates: list[Path] = []
+    primary = bulk_dir / "detected_targets.csv"
+    if primary.exists():
+        candidates.append(primary)
+    if bulk_dir.exists():
+        extra = sorted(
+            bulk_dir.glob("**/detected_targets*.csv"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+        candidates.extend([p for p in extra if p not in candidates][:5])
+    plots_dir = (cfg.paths.workspace_root or cfg.paths.project_root) / "plots"
+    if plots_dir.exists():
+        plot_hits = sorted(
+            plots_dir.glob("**/detected_targets.csv"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+        candidates.extend([p for p in plot_hits if p not in candidates][:5])
+    for path in candidates:
+        accession, vendor_range = _find_accession_in_table(pdb_id, path)
+        if accession:
+            return accession, vendor_range, path
+    return None, None, None
+
+
+def _resolve_accession_from_catalogs(pdb_id: str, cfg) -> tuple[str | None, str | None, Path | None]:
+    candidates: list[Path] = []
+    for base in (cfg.paths.project_root, cfg.paths.workspace_root):
+        if not base:
+            continue
+        catalog_dir = Path(base) / "targets_catalog"
+        if catalog_dir.exists():
+            candidates.extend(sorted(
+                catalog_dir.glob("*.tsv"),
+                key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                reverse=True,
+            )[:5])
+    for path in candidates:
+        accession, vendor_range = _find_accession_in_table(pdb_id, path)
+        if accession:
+            return accession, vendor_range, path
+    return None, None, None
+
+
+def _resolve_accession_from_vendor_url(antigen_url: str) -> tuple[str | None, str | None]:
+    if not antigen_url:
+        return None, None
+    try:
+        import requests
+        from bs4 import BeautifulSoup  # type: ignore
+    except Exception:
+        return None, None
+    try:
+        res = requests.get(antigen_url, timeout=20)
+        res.raise_for_status()
+    except Exception:
+        return None, None
+    try:
+        soup = BeautifulSoup(res.text, "html.parser")
+    except Exception:
+        return None, None
+    acc_header = soup.find("div", class_="col-md-3", string=re.compile(r"\s*Accession#\s*"))
+    accession = None
+    if acc_header:
+        acc_value = acc_header.find_next_sibling("div")
+        if acc_value:
+            accession = acc_value.get_text(strip=True)
+    vendor_range = None
+    pc_header = soup.find("div", class_="col-md-3", string=re.compile(r"\s*Protein Construction\s*"))
+    if pc_header:
+        pc_value = pc_header.find_next_sibling("div")
+        if pc_value:
+            match = re.search(r"(\\d+)\\s*-\\s*(\\d+)", pc_value.get_text(strip=True))
+            if match:
+                vendor_range = f"{match.group(1)}-{match.group(2)}"
+    return (accession or None), (vendor_range or None)
+
+
 def submit_target_initialization(request: TargetInitRequest, *,
                                   job_store: JobStore | None = None) -> str:
     store = job_store or get_job_store(load_config().log_dir)
@@ -112,6 +238,8 @@ def submit_target_initialization(request: TargetInitRequest, *,
                 decide_scope_prompt=request.decide_scope_prompt,
                 llm_delay_seconds=getattr(request, "llm_delay_seconds", 0.0),
                 decide_scope_attempts=getattr(request, "decide_scope_attempts", 1),
+                target_accession=request.target_accession,
+                target_vendor_range=request.target_vendor_range,
             )
             try:
                 preferences.record_target_usage(
@@ -508,6 +636,43 @@ def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobSt
             if not antigen_url:
                 store.update(job.job_id, status=JobStatus.FAILED, message="Missing antigen_url for pipeline refresh.")
                 return
+            target_accession = (request.target_accession or "").strip() or None
+            target_vendor_range = (request.target_vendor_range or "").strip() or None
+            target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / request.pdb_id.upper() / "target.yaml"
+            if target_yaml.exists():
+                try:
+                    data = yaml.safe_load(target_yaml.read_text()) or {}
+                    acc_block = (data.get("sequences") or {}).get("accession") or {}
+                    if not target_accession:
+                        target_accession = str(acc_block.get("id") or "").strip() or None
+                    if not target_vendor_range:
+                        target_vendor_range = str(acc_block.get("expressed_range") or "").strip() or None
+                except Exception:
+                    target_accession = None
+                    target_vendor_range = None
+            if not target_accession:
+                acc, rng, source = _resolve_accession_from_logs(request.pdb_id, cfg)
+                if acc:
+                    target_accession = acc
+                    target_vendor_range = target_vendor_range or rng
+                    if source:
+                        store.append_log(job.job_id, f"[refresh] accession resolved from {source.name}")
+            if not target_accession:
+                acc, rng, source = _resolve_accession_from_catalogs(request.pdb_id, cfg)
+                if acc:
+                    target_accession = acc
+                    target_vendor_range = target_vendor_range or rng
+                    if source:
+                        store.append_log(job.job_id, f"[refresh] accession resolved from {source.name}")
+            if not target_accession and antigen_url:
+                acc, rng = _resolve_accession_from_vendor_url(antigen_url)
+                if acc:
+                    target_accession = acc
+                    target_vendor_range = target_vendor_range or rng
+                    store.append_log(job.job_id, "[refresh] accession resolved from vendor page")
+            if not target_accession:
+                store.update(job.job_id, status=JobStatus.FAILED, message="Missing target_accession for pipeline refresh.")
+                return
             init_decide_prep(
                 request.pdb_id,
                 antigen_url=antigen_url,
@@ -518,6 +683,8 @@ def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobSt
                 force=bool(request.force),
                 num_epitopes=request.expected_epitopes,
                 decide_scope_attempts=request.decide_scope_attempts,
+                target_accession=target_accession,
+                target_vendor_range=target_vendor_range,
             )
         except Exception as exc:  # pragma: no cover - defensive
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))

@@ -1310,6 +1310,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         "vendor_accession",
         "vendor_product_accession",
         "accession",
+        "vendor_range",
         "uniprot",
         "biotinylated",
     }
@@ -1319,6 +1320,9 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
     antigen_idx = None
     pdb_idx = None
     accession_idx = None
+    vendor_range_idx = None
+    vendor_overlap_idx = None
+    uniprot_idx = None
     protein_idx = None
     if has_header:
         preset_idx = _find_index(header, ["preset name", "preset", "name", "target"])
@@ -1328,7 +1332,13 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         if antigen_idx is None:
             antigen_idx = _find_index(header, ["antigen_catalog", "catalog"])
         pdb_idx = _find_index(header, ["pdb id", "pdb_id", "pdbid", "pdb", "chosen_pdb", "chosen pdb"])
-        accession_idx = _find_index(header, ["vendor_product_accession", "vendor_accession"])
+        accession_idx = _find_index(header, ["vendor_product_accession", "vendor_accession", "accession"])
+        vendor_range_idx = _find_index(header, ["vendor_range", "expressed_range", "vendor_expressed_range"])
+        vendor_overlap_idx = _find_index(
+            header,
+            ["pdb_vendor_intersection", "pdb_vendor_overlap", "vendor_overlap_range"],
+        )
+        uniprot_idx = _find_index(header, ["uniprot", "uniprot_id", "uniprotkb", "uniprot accession"])
         protein_idx = _find_index(header, ["protein_name", "protein name", "description", "target_name"])
     else:
         preset_idx = 0
@@ -1349,6 +1359,15 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
                     preset_name = _normalize(row[alt_idx])
         pdb_raw = _clean_pdb_id(row[pdb_idx]) if pdb_idx is not None and len(row) > pdb_idx else None
         accession_raw = _normalize(row[accession_idx]) if accession_idx is not None and len(row) > accession_idx else None
+        if not accession_raw and uniprot_idx is not None and len(row) > uniprot_idx:
+            accession_raw = _normalize(row[uniprot_idx])
+        vendor_range_raw = (
+            _normalize(row[vendor_range_idx])
+            if vendor_range_idx is not None and len(row) > vendor_range_idx
+            else None
+        )
+        if not vendor_range_raw and vendor_overlap_idx is not None and len(row) > vendor_overlap_idx:
+            vendor_range_raw = _normalize(row[vendor_overlap_idx])
         protein_name = _normalize(row[protein_idx]) if protein_idx is not None and len(row) > protein_idx else None
         if not preset_name and not antigen_url and not pdb_raw:
             continue
@@ -1359,6 +1378,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
             "protein_name": protein_name,
             "pdb_id": pdb_raw,
             "accession": accession_raw,
+            "vendor_range": vendor_range_raw,
         })
     return entries
 
@@ -1375,6 +1395,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
         antigen_url = entry.get("antigen_url") or ""
         pdb_id = _clean_pdb_id(entry.get("pdb_id"))
         accession = entry.get("accession") or ""
+        vendor_range = entry.get("vendor_range") or ""
 
         if not pdb_id and preset_name:
             preset_obj = index.by_name.get(preset_name.lower())
@@ -1400,6 +1421,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
                 antigen_url=antigen_url,
                 protein_name=protein_name,
                 accession=accession or None,
+                vendor_range=vendor_range or None,
                 pdb_id=pdb_id,
                 resolved_pdb_id=resolved_pdb,
                 preset_id=getattr(preset_obj, "id", None),
@@ -2387,13 +2409,24 @@ def run_bulk_workflow(
     targets_table_path = plot_dir / "detected_targets.csv"
     _write_csv(
         targets_table_path,
-        ["raw_index", "preset_name", "antigen_url", "accession", "pdb_id", "resolved_pdb_id", "preset_id", "warnings"],
+        [
+            "raw_index",
+            "preset_name",
+            "antigen_url",
+            "accession",
+            "vendor_range",
+            "pdb_id",
+            "resolved_pdb_id",
+            "preset_id",
+            "warnings",
+        ],
         [
             {
                 "raw_index": row.raw_index,
                 "preset_name": row.preset_name,
                 "antigen_url": row.antigen_url,
                 "accession": row.accession,
+                "vendor_range": row.vendor_range,
                 "pdb_id": row.pdb_id,
                 "resolved_pdb_id": row.resolved_pdb_id,
                 "preset_id": row.preset_id,
@@ -2462,6 +2495,7 @@ def run_bulk_workflow(
                     llm_delay_seconds=request.llm_delay_seconds,
                     decide_scope_attempts=request.decide_scope_attempts,
                     target_accession=row.accession,
+                    target_vendor_range=row.vendor_range,
                 )
                 status = get_target_status(pdb_id)
             except Exception as exc:  # pragma: no cover - defensive

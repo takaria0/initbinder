@@ -1358,6 +1358,52 @@ function openPipelineRerunModalBulk(targets = []) {
   toggleModal(el.pipelineRerunModal, true);
 }
 
+function findBulkRowForPdb(pdbId) {
+  const key = (pdbId || '').trim().toUpperCase();
+  if (!key) return null;
+  const rows = Array.isArray(state.bulkPreviewRows) ? state.bulkPreviewRows : [];
+  return rows.find((row) => {
+    const resolved = (row.resolved_pdb_id || '').trim().toUpperCase();
+    const raw = (row.pdb_id || '').trim().toUpperCase();
+    return resolved === key || raw === key;
+  }) || null;
+}
+
+function findAccessionsFromInput(pdbId) {
+  const key = (pdbId || '').trim().toUpperCase();
+  const rawText = el.bulkCsvInput?.value || '';
+  if (!key || !rawText.trim()) return null;
+  const lines = rawText.split(/\r?\n/).filter((line) => line.trim());
+  if (!lines.length) return null;
+  const headerLine = lines[0];
+  const delimiter = headerLine.includes('\t') && !headerLine.includes(',') ? '\t' : ',';
+  const header = headerLine.split(delimiter).map((cell) => cell.trim().toLowerCase());
+  const pdbIdx = header.findIndex((cell) => (
+    ['chosen_pdb', 'pdb', 'pdb_id', 'pdbid'].includes(cell)
+  ));
+  const accIdx = header.findIndex((cell) => (
+    ['vendor_accession'].includes(cell)
+  ));
+  const rangeIdx = header.findIndex((cell) => (
+    ['vendor_range', 'pdb_vendor_intersection', 'vendor_overlap_range'].includes(cell)
+  ));
+  if (pdbIdx < 0 || accIdx < 0) return null;
+  for (let i = 1; i < lines.length; i += 1) {
+    const cols = lines[i].split(delimiter);
+    if (cols.length <= Math.max(pdbIdx, accIdx)) continue;
+    const pdbVal = (cols[pdbIdx] || '').trim().toUpperCase();
+    if (pdbVal === key) {
+      const accVal = (cols[accIdx] || '').trim();
+      const rangeVal = rangeIdx >= 0 && cols.length > rangeIdx ? (cols[rangeIdx] || '').trim() : '';
+      return {
+        accession: accVal || null,
+        vendor_range: rangeVal || null,
+      };
+    }
+  }
+  return null;
+}
+
 async function submitPipelineRerun(triggerBtn = null) {
   const bulkIds = el.pipelineRerunModal?.dataset?.bulkIds;
   const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
@@ -1372,12 +1418,16 @@ async function submitPipelineRerun(triggerBtn = null) {
     if (bulkIds) {
       const list = bulkIds.split(',').map((id) => id.trim()).filter(Boolean);
       for (const id of list) {
+        const row = findBulkRowForPdb(id);
+        const fallback = row ? null : findAccessionsFromInput(id);
         const payload = {
           pdb_id: id,
           force,
           expected_epitopes: expected,
           decide_scope_attempts: attempts,
           antigen_url: null,
+          target_accession: row?.accession || fallback?.accession || null,
+          target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
         };
         const res = await fetch('/api/targets/pipeline/refresh', {
           method: 'POST',
@@ -1395,12 +1445,16 @@ async function submitPipelineRerun(triggerBtn = null) {
       }
       showAlert(`Pipeline refresh queued for ${list.length} targets.`, false);
     } else if (pdbId) {
+      const row = findBulkRowForPdb(pdbId);
+      const fallback = row ? null : findAccessionsFromInput(pdbId);
       const payload = {
         pdb_id: pdbId,
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
         antigen_url: antigenUrl,
+        target_accession: row?.accession || fallback?.accession || null,
+        target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
       };
       const res = await fetch('/api/targets/pipeline/refresh', {
         method: 'POST',

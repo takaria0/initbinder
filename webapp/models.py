@@ -38,6 +38,12 @@ class TargetPresetListResponse(BaseModel):
 class TargetInitRequest(BaseModel):
     pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$", description="4-character PDB accession")
     antigen_url: Optional[str] = Field(None, description="Vendor product URL")
+    target_accession: str = Field(..., max_length=40, description="UniProt/RefSeq accession for target")
+    target_vendor_range: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="Optional vendor expressed range (e.g., 1-167)",
+    )
     preset_name: Optional[str] = Field(None, max_length=120, description="Friendly name for saved target preset")
     num_epitopes: Optional[int] = Field(None, ge=1, le=32, description="Desired number of epitopes to surface")
     decide_scope_prompt: Optional[str] = Field(
@@ -167,6 +173,7 @@ class BulkCsvRow(BaseModel):
     protein_name: Optional[str] = None
     pdb_id: Optional[str] = Field(None, max_length=32)
     accession: Optional[str] = Field(None, max_length=40)
+    vendor_range: Optional[str] = Field(None, max_length=64)
     resolved_pdb_id: Optional[str] = None
     preset_id: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
@@ -298,6 +305,8 @@ class PipelineRefreshRequest(BaseModel):
     expected_epitopes: Optional[int] = 3
     decide_scope_attempts: int = Field(3, ge=1, le=5)
     antigen_url: Optional[str] = None
+    target_accession: Optional[str] = Field(None, max_length=40)
+    target_vendor_range: Optional[str] = Field(None, max_length=64)
 
 
 class PipelineRefreshResponse(BaseModel):
