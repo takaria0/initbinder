@@ -806,6 +806,7 @@ def init_target(
 
     print(f"--- Initializing Target: {pdb_id.upper()} ---")
     print(f"[info] init-target accession={target_accession}")
+    print(f"[info] init-target vendor_range={target_vendor_range}")
     if target_vendor_range:
         print(f"[info] init-target vendor range={target_vendor_range}")
     print(f'target_accession="{target_accession}"')

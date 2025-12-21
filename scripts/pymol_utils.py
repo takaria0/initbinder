@@ -503,7 +503,7 @@ def _collect_expression_regions(
         return None, [], {"target": [], "supporting": []}
 
     sequences = data.get("sequences") or {}
-    residue_numbers_block = sequences.get("pdb_residue_numbers")
+    residue_numbers_block = sequences.get("pdb_residue_numbers") or sequences.get("cif_residue_numbers")
     residue_numbers: Dict[str, Sequence[object]] = {}
     if isinstance(residue_numbers_block, Mapping):
         residue_numbers = {}
@@ -653,6 +653,101 @@ def _collect_allowed_epitope_ranges(pdb_id: str) -> List[dict[str, str]]:
     return ranges
 
 
+def _collect_label_residue_numbers(pdb_id: str) -> dict[str, list[str]]:
+    if ROOT is None:
+        return {}
+    target_yaml = ROOT / "targets" / pdb_id.upper() / "target.yaml"
+    if not target_yaml.exists():
+        return {}
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception as exc:
+        print(f"[pymol_utils] Warning: could not parse {target_yaml}: {exc}")
+        return {}
+
+    sequences = data.get("sequences") or {}
+    residue_numbers_block = sequences.get("cif_residue_numbers") or sequences.get("pdb_residue_numbers") or {}
+    residue_numbers: dict[str, list[str]] = {}
+    if isinstance(residue_numbers_block, Mapping):
+        for chain_id, entries in residue_numbers_block.items():
+            if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+                continue
+            cleaned = [str(x).strip() for x in entries if str(x).strip()]
+            if cleaned:
+                residue_numbers[str(chain_id).strip().upper()] = cleaned
+    return residue_numbers
+
+
+def _build_auth_selection_from_region(
+    region: Mapping[str, str],
+    label_residue_numbers: Mapping[str, Sequence[str]],
+    label_auth_map: Mapping[tuple[str, int], tuple[str, int]],
+) -> Optional[str]:
+    chain = str(region.get("chain") or "").strip().upper()
+    if not chain:
+        return None
+    start_label = str(region.get("start") or "").strip()
+    end_label = str(region.get("end") or "").strip()
+    if not start_label or not end_label:
+        return None
+    residues = label_residue_numbers.get(chain)
+    if not residues:
+        return None
+    start_idx = _find_residue_index(residues, start_label)
+    end_idx = _find_residue_index(residues, end_label)
+    if start_idx is None or end_idx is None:
+        return None
+    if end_idx < start_idx:
+        start_idx, end_idx = end_idx, start_idx
+    subset = residues[start_idx : end_idx + 1]
+    auth_buckets: dict[str, list[str]] = {}
+    for label in subset:
+        try:
+            label_int = int(float(str(label).strip()))
+        except Exception:
+            continue
+        mapped = None
+        for key in (chain, chain.upper(), chain.lower()):
+            mapped = label_auth_map.get((key, label_int))
+            if mapped:
+                break
+        if not mapped:
+            continue
+        auth_chain, auth_resi = mapped
+        auth_chain = str(auth_chain).strip()
+        if not auth_chain:
+            continue
+        auth_buckets.setdefault(auth_chain, []).append(str(auth_resi))
+    selections: list[str] = []
+    for auth_chain, resis in auth_buckets.items():
+        resi_expr = _compress_residue_terms(resis)
+        if not resi_expr:
+            continue
+        selections.append(f"(target and chain {auth_chain} and resi {resi_expr})")
+    if not selections:
+        return None
+    return " or ".join(selections)
+
+
+def _augment_regions_with_auth_selection(
+    regions: Optional[Sequence[Mapping[str, str]]],
+    label_residue_numbers: Mapping[str, Sequence[str]],
+    label_auth_map: Mapping[tuple[str, int], tuple[str, int]],
+) -> list[dict[str, str]]:
+    if not regions:
+        return []
+    if not label_residue_numbers or not label_auth_map:
+        return [dict(region) for region in regions]
+    out: list[dict[str, str]] = []
+    for region in regions:
+        entry = dict(region)
+        auth_sel = _build_auth_selection_from_region(entry, label_residue_numbers, label_auth_map)
+        if auth_sel:
+            entry["selection_auth"] = auth_sel
+        out.append(entry)
+    return out
+
+
 def _write_hotspot_pml(
     struct_name: str,
     epitopes: dict[str, dict[str, list[str]]],
@@ -661,7 +756,8 @@ def _write_hotspot_pml(
     expression_regions: Optional[List[dict[str, str]]] = None,
     vendor_range: Optional[str] = None,
     allowed_ranges: Optional[List[dict[str, str]]] = None,
-    expressed_object_name: Optional[str] = None,
+    fetch_pdb_id: Optional[str] = None,
+    full_object_name: Optional[str] = None,
     full_struct_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
     supporting_chains: Optional[Sequence[str]] = None,
@@ -744,27 +840,39 @@ def _write_hotspot_pml(
     pml.append("set cartoon_oval_width, 0.2\n")
     pml.append("set auto_zoom, off\n\n")
 
-    if full_struct_name:
+    full_obj = (
+        _sanitize(full_object_name)
+        or _sanitize(fetch_pdb_id)
+        or full_object_name
+        or fetch_pdb_id
+    )
+    if full_obj or full_struct_name or fetch_pdb_id:
         pml.append("# Load full raw PDB for context\n")
-        pml.append(f"load {full_struct_name}, assembly_full\n")
-        pml.append("hide everything, assembly_full\n")
-        pml.append("show cartoon, assembly_full\n")
-        pml.append("color gray90, assembly_full\n")
-        pml.append("set cartoon_transparency, 0.85, assembly_full\n")
-        tgt_cmd, tgt_sel = _select_chains("assembly_target", "assembly_full", target_chains)
-        if tgt_cmd and tgt_sel:
-            pml.append(f"{tgt_cmd}\\n")
-            pml.append(f"hide cartoon, {tgt_sel}\\n")
-        sup_cmd, sup_sel = _select_chains("assembly_support", "assembly_full", supporting_chains)
-        if sup_cmd and sup_sel:
-            pml.append(f"{sup_cmd}\\n")
-            pml.append(f"show cartoon, {sup_sel}\\n")
-            pml.append(f"show surface, {sup_sel}\\n")
-            pml.append(f"set cartoon_transparency, 0.35, {sup_sel}\\n")
-            pml.append(f"set surface_transparency, 0.25, {sup_sel}\\n")
-            pml.append(f"color gray60, {sup_sel}\\n")
-            pml.append(f"group full_assembly, {sup_sel}\\n")
-        pml.append("group full_assembly, assembly_full\n\n")
+        if fetch_pdb_id:
+            pml.append(f"fetch {fetch_pdb_id}, {full_obj}\n")
+        elif full_struct_name and full_obj:
+            pml.append(f"load {full_struct_name}, {full_obj}\n")
+        elif full_struct_name:
+            pml.append(f"load {full_struct_name}, assembly_full\n")
+            full_obj = "assembly_full"
+        if full_obj:
+            pml.append(f"hide everything, {full_obj}\n")
+            pml.append(f"show cartoon, {full_obj}\n")
+            pml.append(f"color gray90, {full_obj}\n")
+            pml.append(f"set cartoon_transparency, 0.85, {full_obj}\n")
+            tgt_cmd, tgt_sel = _select_chains("assembly_target", full_obj, target_chains)
+            if tgt_cmd and tgt_sel:
+                pml.append(f"{tgt_cmd}\\n")
+                pml.append(f"hide cartoon, {tgt_sel}\\n")
+            sup_cmd, sup_sel = _select_chains("assembly_support", full_obj, supporting_chains)
+            if sup_cmd and sup_sel:
+                pml.append(f"{sup_cmd}\\n")
+                pml.append(f"show cartoon, {sup_sel}\\n")
+                pml.append(f"show surface, {sup_sel}\\n")
+                pml.append(f"set cartoon_transparency, 0.35, {sup_sel}\\n")
+                pml.append(f"set surface_transparency, 0.25, {sup_sel}\\n")
+                pml.append(f"color gray60, {sup_sel}\\n")
+        pml.append("\n")
 
     if expression_regions:
         pml.append("# Highlight recombinant expression overlap\n")
@@ -774,65 +882,49 @@ def _write_hotspot_pml(
         # Use a neutral mesh overlay so expression regions don't clash with epitope colors.
         pml.append("set_color vendor_expression, [0.35, 0.35, 0.35]\n")
         pml.append("set mesh_width, 0.6\n")
-        pml.append("set cartoon_transparency, 0.6, target\n")
+        expr_obj = full_obj or "target"
+        if expr_obj == "target":
+            pml.append("set cartoon_transparency, 0.6, target\n")
         pml.append("set label_font_id, 7\n")
         pml.append("set label_size, -0.6\n")
         for idx, region in enumerate(expression_regions, start=1):
             chain = _sanitize(region.get("chain", f"chain{idx}")) or f"chain{idx}"
             sel_expr = region.get("selection")
+            sel_auth = region.get("selection_auth")
             start_label = region.get("start", "")
             end_label = region.get("end", "")
             if not sel_expr:
                 continue
-            obj_name = f"vendor_expr_{idx:02d}_{chain}"
-            pml.append(f"select {obj_name}, {sel_expr}\n")
-            pml.append(f"show mesh, {obj_name}\n")
-            pml.append(f"color vendor_expression, {obj_name}\n")
-            pml.append(f"group vendor_expression, {obj_name}\n")
-            pml.append(f"label first ({sel_expr} and name CA), \"{chain}:{start_label}\"\n")
-            pml.append(f"label last ({sel_expr} and name CA), \"{chain}:{end_label}\"\n")
-            pml.append(f"set label_color, vendor_expression, first ({sel_expr} and name CA)\n")
-            pml.append(f"set label_color, vendor_expression, last ({sel_expr} and name CA)\n")
+            expr_parts = [_swap_object(sel_expr, "target", expr_obj)]
+            if sel_auth:
+                expr_parts.append(_swap_object(sel_auth, "target", expr_obj))
+            expr_sel = " or ".join(f"({part})" for part in expr_parts)
+            pml.append(f"show mesh, {expr_sel}\n")
+            pml.append(f"color vendor_expression, {expr_sel}\n")
+            pml.append(f"label first ({expr_sel} and name CA), \"{chain}:{start_label}\"\n")
+            pml.append(f"label last ({expr_sel} and name CA), \"{chain}:{end_label}\"\n")
+            pml.append(f"set label_color, vendor_expression, first ({expr_sel} and name CA)\n")
+            pml.append(f"set label_color, vendor_expression, last ({expr_sel} and name CA)\n")
         if vendor_range:
             pml.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_range_clean}\"\n")
         pml.append("\n")
-
-    if full_struct_name and expression_regions and expressed_object_name:
-        expr_obj = _sanitize(expressed_object_name) or expressed_object_name
-        pml.append("# Vendor expressed range on full assembly\n")
-        pml.append(f"create {expr_obj}, assembly_full\n")
-        pml.append(f"show cartoon, {expr_obj}\n")
-        pml.append(f"color gray70, {expr_obj}\n")
-        pml.append(f"set cartoon_transparency, 0.55, {expr_obj}\n")
-        expr_parts = []
-        for region in expression_regions:
-            sel_expr = region.get("selection")
-            if sel_expr:
-                expr_parts.append(_swap_object(sel_expr, "target", expr_obj))
-        if expr_parts:
-            combined = " or ".join(f"({part})" for part in expr_parts)
-            expr_sel = f"{expr_obj}_vendor_expr"
-            pml.append("set_color vendor_expressed, [0.10, 0.55, 0.95]\n")
-            pml.append(f"select {expr_sel}, {combined}\n")
-            pml.append(f"show mesh, {expr_sel}\n")
-            pml.append(f"color vendor_expressed, {expr_sel}\n")
-            pml.append(f"group vendor_expressed, {expr_sel}\n")
-        pml.append(f"group vendor_expressed, {expr_obj}\n\n")
 
     if allowed_ranges:
         pml.append("# Highlight allowed epitope ranges\n")
         pml.append("set_color allowed_epitope_range, [0.200, 0.600, 0.900]\n")
         pml.append("set mesh_width, 0.5\n")
+        allowed_obj = full_obj or "target"
         for idx, region in enumerate(allowed_ranges, start=1):
-            chain = _sanitize(region.get("chain", f"chain{idx}")) or f"chain{idx}"
             sel_expr = region.get("selection")
+            sel_auth = region.get("selection_auth")
             if not sel_expr:
                 continue
-            obj_name = f"allowed_range_{idx:02d}_{chain}"
-            pml.append(f"select {obj_name}, {sel_expr}\n")
-            pml.append(f"show mesh, {obj_name}\n")
-            pml.append(f"color allowed_epitope_range, {obj_name}\n")
-            pml.append(f"group allowed_epitope_range, {obj_name}\n")
+            allowed_parts = [_swap_object(sel_expr, "target", allowed_obj)]
+            if sel_auth:
+                allowed_parts.append(_swap_object(sel_auth, "target", allowed_obj))
+            allowed_sel = " or ".join(f"({part})" for part in allowed_parts)
+            pml.append(f"show mesh, {allowed_sel}\n")
+            pml.append(f"color allowed_epitope_range, {allowed_sel}\n")
         pml.append("\n")
 
     for i, epi in enumerate(epi_names):
@@ -884,7 +976,8 @@ def _send_hotspots_to_remote(
     vendor_range: Optional[str] = None,
     expression_regions: Optional[List[dict[str, str]]] = None,
     allowed_ranges: Optional[List[dict[str, str]]] = None,
-    expressed_object_name: Optional[str] = None,
+    fetch_pdb_id: Optional[str] = None,
+    full_object_name: Optional[str] = None,
     raw_pdb_path: Optional[Path] = None,
     raw_object_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
@@ -914,7 +1007,8 @@ def _send_hotspots_to_remote(
             expression_regions=expression_regions,
             vendor_range=vendor_range,
             allowed_ranges=allowed_ranges,
-            expressed_object_name=expressed_object_name,
+            fetch_pdb_id=fetch_pdb_id,
+            full_object_name=full_object_name,
             full_struct_name=raw_object_name,
             target_chains=target_chains,
             supporting_chains=supporting_chains,
@@ -926,7 +1020,18 @@ def _send_hotspots_to_remote(
         pymol.set_state(pdb_content, object="target", format="pdb")
         if raw_pdb_path and raw_pdb_path.exists():
             raw_content = raw_pdb_path.read_text()
-            pymol.set_state(raw_content, object="assembly_full", format="pdb")
+            def _sanitize_remote(name: Optional[str]) -> Optional[str]:
+                if not name:
+                    return None
+                return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("_")
+            raw_obj = (
+                _sanitize_remote(full_object_name)
+                or _sanitize_remote(fetch_pdb_id)
+                or full_object_name
+                or fetch_pdb_id
+                or "assembly_full"
+            )
+            pymol.set_state(raw_content, object=raw_obj, format="pdb")
 
         for line in pml_path.read_text().splitlines():
             line = line.strip()
@@ -1051,7 +1156,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
 
     vendor_range_label, expression_regions, chain_meta = _collect_expression_regions(pdb_id_u)
     allowed_ranges = _collect_allowed_epitope_ranges(pdb_id_u)
-    expressed_object_name = f"{pdb_id_u}_expressed"
+    label_residue_numbers = _collect_label_residue_numbers(pdb_id_u)
+    full_object_name = pdb_id_u
     target_chain_ids = chain_meta.get("target", []) if chain_meta else []
     supporting_chain_ids = chain_meta.get("supporting", []) if chain_meta else []
     if expression_regions:
@@ -1097,6 +1203,19 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     if raw_pdb_path is not None:
         raw_bundle_name = "raw_full.pdb"
 
+    label_auth_map = _label_to_auth_map(structure_path)
+    if label_auth_map:
+        expression_regions = _augment_regions_with_auth_selection(
+            expression_regions,
+            label_residue_numbers,
+            label_auth_map,
+        )
+        allowed_ranges = _augment_regions_with_auth_selection(
+            allowed_ranges,
+            label_residue_numbers,
+            label_auth_map,
+        )
+
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
             structure_path,
@@ -1104,7 +1223,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             vendor_range=vendor_range_label,
             expression_regions=expression_regions,
             allowed_ranges=allowed_ranges,
-            expressed_object_name=expressed_object_name,
+            fetch_pdb_id=None,
+            full_object_name=full_object_name,
             raw_pdb_path=raw_pdb_path,
             raw_object_name=raw_bundle_name,
             target_chains=target_chain_ids,
@@ -1117,7 +1237,6 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
 
     # --- Bundle Mode (Default or Fallback) ---
     available_chains = _detect_structure_chains(structure_path)
-    label_auth_map = _label_to_auth_map(structure_path)
     if available_chains:
         remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
         for epi, variants in epitopes.items():
@@ -1174,7 +1293,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         expression_regions=expression_regions,
         vendor_range=vendor_range_label,
         allowed_ranges=allowed_ranges,
-        expressed_object_name=expressed_object_name,
+        fetch_pdb_id=pdb_id_u,
+        full_object_name=full_object_name,
         full_struct_name=raw_bundle_name,
         target_chains=target_chain_ids,
         supporting_chains=supporting_chain_ids,
