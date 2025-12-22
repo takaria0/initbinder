@@ -27,6 +27,8 @@ const state = {
   bulkPreviewSig: null,
 };
 
+const PIPELINE_RERUN_DELAY_MS = 70000;
+
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
   bulkCsvInput: document.querySelector('#bulk-csv-input'),
@@ -71,6 +73,23 @@ const el = {
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunPipeline: document.querySelector('#boltz-rerun-pipeline'),
   boltzRerunMissing: document.querySelector('#boltz-rerun-missing'),
+  boltzRerunRange: document.querySelector('#boltz-rerun-range'),
+  boltzShowRunRange: document.querySelector('#boltz-show-run-range'),
+  boltzRerunRangeModal: document.querySelector('#boltz-rerun-range-modal'),
+  boltzRerunRangeStart: document.querySelector('#boltz-rerun-range-start'),
+  boltzRerunRangeEnd: document.querySelector('#boltz-rerun-range-end'),
+  boltzRerunRangeExpected: document.querySelector('#boltz-rerun-range-expected'),
+  boltzRerunRangeAttempts: document.querySelector('#boltz-rerun-range-attempts'),
+  boltzRerunRangeForce: document.querySelector('#boltz-rerun-range-force'),
+  boltzRerunRangeConfirm: document.querySelector('#boltz-rerun-range-confirm'),
+  boltzRerunRangeCancel: document.querySelector('#boltz-rerun-range-cancel'),
+  boltzRerunRangeClose: document.querySelector('#boltz-rerun-range-close'),
+  boltzRunRangeModal: document.querySelector('#boltz-run-range-modal'),
+  boltzRunRangeStart: document.querySelector('#boltz-run-range-start'),
+  boltzRunRangeEnd: document.querySelector('#boltz-run-range-end'),
+  boltzRunRangeConfirm: document.querySelector('#boltz-run-range-confirm'),
+  boltzRunRangeCancel: document.querySelector('#boltz-run-range-cancel'),
+  boltzRunRangeClose: document.querySelector('#boltz-run-range-close'),
   binderPanel: document.querySelector('#boltz-binders-panel'),
   binderTable: document.querySelector('#boltz-binders-table tbody'),
   binderSummary: document.querySelector('#boltz-binders-summary'),
@@ -532,6 +551,10 @@ function appendLog(line) {
   if (atBottom) {
     el.jobLog.scrollTop = el.jobLog.scrollHeight;
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function snapshotsChanged(nextNames = []) {
@@ -1333,7 +1356,7 @@ function openPipelineRerunModal(pdbId, antigenUrl = null) {
     delete el.pipelineRerunModal.dataset.antigenUrl;
   }
   if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Re-run pipeline · ${pdbId}`;
-  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '3';
+  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
   toggleModal(el.pipelineRerunModal, true);
@@ -1352,7 +1375,7 @@ function openPipelineRerunModalBulk(targets = []) {
   if (el.pipelineRerunTitle) {
     el.pipelineRerunTitle.textContent = `Re-run pipeline · ${ids.length} targets`;
   }
-  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '3';
+  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
   toggleModal(el.pipelineRerunModal, true);
@@ -1404,6 +1427,136 @@ function findAccessionsFromInput(pdbId) {
   return null;
 }
 
+async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}) {
+  if (!Array.isArray(list) || !list.length) {
+    showAlert('No targets selected for pipeline rerun.');
+    return;
+  }
+  if (triggerBtn) triggerBtn.disabled = true;
+  try {
+    const expectedRaw = overrides.expected ?? el.pipelineRerunExpected?.value;
+    const attemptsRaw = overrides.attempts ?? el.pipelineRerunAttempts?.value;
+    const force = typeof overrides.force === 'boolean' ? overrides.force : Boolean(el.pipelineRerunForce?.checked);
+    const expected = expectedRaw ? Number(expectedRaw) || null : null;
+    const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      const id = (item?.pdb_id || item || '').trim();
+      if (!id) continue;
+      const row = findBulkRowForPdb(id);
+      const fallback = row ? null : findAccessionsFromInput(id);
+      const payload = {
+        pdb_id: id,
+        force,
+        expected_epitopes: expected,
+        decide_scope_attempts: attempts,
+        antigen_url: item?.antigen_url || null,
+        target_accession: row?.accession || fallback?.accession || null,
+        target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
+      };
+      const res = await fetch('/api/targets/pipeline/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
+      }
+      const body = await res.json();
+      if (body.job_id) {
+        startJobPolling(body.job_id);
+      }
+      if (i < list.length - 1 && PIPELINE_RERUN_DELAY_MS > 0) {
+        appendLog(`Waiting ${Math.round(PIPELINE_RERUN_DELAY_MS / 1000)}s before next pipeline refresh...`);
+        await sleep(PIPELINE_RERUN_DELAY_MS);
+      }
+    }
+    showAlert(`Pipeline refresh queued for ${list.length} targets.`, false);
+  } catch (err) {
+    showAlert(err.message || 'Failed to rerun pipeline.');
+  } finally {
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
+}
+
+function openPipelineRerunRangeModal() {
+  if (!el.boltzRerunRangeModal) return;
+  if (el.boltzRerunRangeExpected) el.boltzRerunRangeExpected.value = '10';
+  if (el.boltzRerunRangeAttempts) el.boltzRerunRangeAttempts.value = '3';
+  if (el.boltzRerunRangeForce) el.boltzRerunRangeForce.checked = true;
+  toggleModal(el.boltzRerunRangeModal, true);
+}
+
+function getBoltzRowRange(startEl, endEl, targets, label) {
+  const startRaw = Number(startEl?.value || 0);
+  const endRaw = Number(endEl?.value || 0);
+  if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || startRaw <= 0 || endRaw <= 0) {
+    showAlert(`Enter a valid ${label} row range (start/end).`);
+    return null;
+  }
+  const start = Math.min(startRaw, endRaw);
+  const end = Math.max(startRaw, endRaw);
+  if (start < 1 || end > targets.length) {
+    showAlert(`Row range must be between 1 and ${targets.length}.`);
+    return null;
+  }
+  return { start, end, slice: targets.slice(start - 1, end) };
+}
+
+async function submitPipelineRerunRangeModal(triggerBtn = null) {
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const range = getBoltzRowRange(el.boltzRerunRangeStart, el.boltzRerunRangeEnd, targets, 'pipeline');
+  if (!range) return;
+  const slice = range.slice;
+  if (!slice.length) {
+    showAlert('No targets found for that row range.');
+    return;
+  }
+  const expectedOverride = el.boltzRerunRangeExpected?.value || null;
+  const attemptsOverride = el.boltzRerunRangeAttempts?.value || null;
+  const forceOverride = Boolean(el.boltzRerunRangeForce?.checked);
+  await queuePipelineRerunTargets(slice, triggerBtn, {
+    expected: expectedOverride,
+    attempts: attemptsOverride,
+    force: forceOverride,
+  });
+  toggleModal(el.boltzRerunRangeModal, false);
+}
+
+function openRunCommandRangeModal() {
+  if (!el.boltzRunRangeModal) return;
+  toggleModal(el.boltzRunRangeModal, true);
+}
+
+async function showRunCommandRange() {
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const range = getBoltzRowRange(el.boltzRunRangeStart, el.boltzRunRangeEnd, targets, 'command');
+  if (!range) return;
+  const { start, end, slice } = range;
+  if (!slice.length) {
+    showAlert('No targets found for that row range.');
+    return;
+  }
+  if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
+  if (el.boltzRunTitle) el.boltzRunTitle.textContent = `Manual run · rows ${start}-${end}`;
+  toggleModal(el.boltzRunModal, true);
+  if (!state.clusterStatus) {
+    await loadClusterStatus();
+  }
+  const text = buildAllRunCommandsText(slice);
+  renderRunCommandBlocks(text);
+  toggleModal(el.boltzRunRangeModal, false);
+}
+
 async function submitPipelineRerun(triggerBtn = null) {
   const bulkIds = el.pipelineRerunModal?.dataset?.bulkIds;
   const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
@@ -1417,33 +1570,7 @@ async function submitPipelineRerun(triggerBtn = null) {
   try {
     if (bulkIds) {
       const list = bulkIds.split(',').map((id) => id.trim()).filter(Boolean);
-      for (const id of list) {
-        const row = findBulkRowForPdb(id);
-        const fallback = row ? null : findAccessionsFromInput(id);
-        const payload = {
-          pdb_id: id,
-          force,
-          expected_epitopes: expected,
-          decide_scope_attempts: attempts,
-          antigen_url: null,
-          target_accession: row?.accession || fallback?.accession || null,
-          target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
-        };
-        const res = await fetch('/api/targets/pipeline/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          const detail = await res.json().catch(() => ({}));
-          throw new Error(detail.detail || `Pipeline refresh failed (${res.status})`);
-        }
-        const body = await res.json();
-        if (body.job_id) {
-          startJobPolling(body.job_id);
-        }
-      }
-      showAlert(`Pipeline refresh queued for ${list.length} targets.`, false);
+      await queuePipelineRerunTargets(list);
     } else if (pdbId) {
       const row = findBulkRowForPdb(pdbId);
       const fallback = row ? null : findAccessionsFromInput(pdbId);
@@ -2725,6 +2852,30 @@ function init() {
       openPipelineRerunModalBulk(missing);
     });
   }
+  if (el.boltzRerunRange) {
+    el.boltzRerunRange.addEventListener('click', openPipelineRerunRangeModal);
+  }
+  if (el.boltzShowRunRange) {
+    el.boltzShowRunRange.addEventListener('click', openRunCommandRangeModal);
+  }
+  if (el.boltzRerunRangeConfirm) {
+    el.boltzRerunRangeConfirm.addEventListener('click', (event) => submitPipelineRerunRangeModal(event.currentTarget));
+  }
+  if (el.boltzRerunRangeCancel) {
+    el.boltzRerunRangeCancel.addEventListener('click', () => toggleModal(el.boltzRerunRangeModal, false));
+  }
+  if (el.boltzRerunRangeClose) {
+    el.boltzRerunRangeClose.addEventListener('click', () => toggleModal(el.boltzRerunRangeModal, false));
+  }
+  if (el.boltzRunRangeConfirm) {
+    el.boltzRunRangeConfirm.addEventListener('click', showRunCommandRange);
+  }
+  if (el.boltzRunRangeCancel) {
+    el.boltzRunRangeCancel.addEventListener('click', () => toggleModal(el.boltzRunRangeModal, false));
+  }
+  if (el.boltzRunRangeClose) {
+    el.boltzRunRangeClose.addEventListener('click', () => toggleModal(el.boltzRunRangeModal, false));
+  }
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
@@ -2748,6 +2899,8 @@ function init() {
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);
     if (closeTarget === 'boltz-log') toggleModal(el.boltzLogModal, false);
     if (closeTarget === 'boltz-run') toggleModal(el.boltzRunModal, false);
+    if (closeTarget === 'boltz-rerun-range') toggleModal(el.boltzRerunRangeModal, false);
+    if (closeTarget === 'boltz-run-range') toggleModal(el.boltzRunRangeModal, false);
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
   });
 

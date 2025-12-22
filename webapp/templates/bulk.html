@@ -131,6 +131,10 @@
                   <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
                   <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
                 </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <button type="button" id="boltz-show-run-range" class="ghost">Show run command (rows)</button>
+                  <button type="button" id="boltz-rerun-range" class="ghost">Re-run pipeline (rows)</button>
+                </div>
               </div>
               <p class="help-text" style="margin-top: 0;">Detected <code>boltzgen_config.yaml</code> files under each target. Click a PDB row to reveal epitopes. Use Command for a copy-paste set of cluster steps.</p>
               <table id="boltz-config-table">
@@ -275,7 +279,7 @@
           <p class="help-text" style="margin-top: 0;">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
           <div class="flex-row" style="gap: 12px; align-items: center; flex-wrap: wrap;">
             <label>Expected epitopes
-              <input type="number" id="pipeline-rerun-expected" value="3" min="1" max="32">
+              <input type="number" id="pipeline-rerun-expected" value="10" min="1" max="32">
             </label>
             <label>Decide attempts
               <input type="number" id="pipeline-rerun-attempts" value="3" min="1" max="5">
@@ -289,6 +293,66 @@
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
           <button type="button" id="pipeline-rerun-confirm">Run pipeline</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-rerun-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-rerun-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Re-run pipeline · rows</h3>
+          <button type="button" id="boltz-rerun-range-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" style="margin-top: 0;">Run init-target, decide-scope, and prep-target for the selected row range.</p>
+          <div class="flex-row" style="gap: 10px; align-items: center; flex-wrap: wrap;">
+            <label>Row start
+              <input type="number" id="boltz-rerun-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-rerun-range-end" placeholder="End" min="1">
+            </label>
+            <label>Expected epitopes
+              <input type="number" id="boltz-rerun-range-expected" value="10" min="1" max="32">
+            </label>
+            <label>Decide attempts
+              <input type="number" id="boltz-rerun-range-attempts" value="3" min="1" max="5">
+            </label>
+            <label style="display:flex; gap:6px; align-items:center;">
+              <input type="checkbox" id="boltz-rerun-range-force" checked>
+              Force re-init
+            </label>
+          </div>
+        </div>
+        <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
+          <button type="button" id="boltz-rerun-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-rerun-range-confirm">Run pipeline</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-run-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-run-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Show run command · rows</h3>
+          <button type="button" id="boltz-run-range-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" style="margin-top: 0;">Choose a row range to generate manual run commands.</p>
+          <div class="flex-row" style="gap: 10px; align-items: center; flex-wrap: wrap;">
+            <label>Row start
+              <input type="number" id="boltz-run-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-run-range-end" placeholder="End" min="1">
+            </label>
+          </div>
+        </div>
+        <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
+          <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-run-range-confirm">Show commands</button>
         </div>
       </div>
     </div>
