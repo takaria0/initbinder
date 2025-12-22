@@ -8,7 +8,7 @@ import re
 from bs4 import BeautifulSoup
 from Bio.PDB.Polypeptide import three_to_index, index_to_one
 from playwright.sync_api import sync_playwright
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional, Sequence
 
 from sequence_alignment import AlignmentResult, biotite_local_alignments, extract_subsequence
 from bioseq_fetcher import fetch_sequence
@@ -403,6 +403,34 @@ def _populate_sequences_and_alignment(
                     config["allowed_epitope_range"] = ", ".join(formatted_ranges)
                 else:
                     config["allowed_epitope_range"] = f"{overlap[0]}-{overlap[1]}"
+                if formatted_ranges and raw_cif.exists():
+                    label_auth_map = _label_to_auth_map(raw_cif)
+                    if label_auth_map:
+                        allowed_mmcif: list[str] = []
+                        for spec in formatted_ranges:
+                            token = str(spec).strip()
+                            if not token or ":" not in token:
+                                continue
+                            chain_part, span_part = token.split(":", 1)
+                            chain_part = chain_part.strip()
+                            span_part = span_part.strip().replace("..", "-")
+                            match = re.match(r"^\s*(-?\d+)\s*[-\u2013]\s*(-?\d+)\s*$", span_part)
+                            if match:
+                                start_label = match.group(1)
+                                end_label = match.group(2)
+                            else:
+                                start_label = end_label = span_part
+                            allowed_mmcif.extend(
+                                _map_label_span_to_auth_ranges(
+                                    chain_part,
+                                    start_label,
+                                    end_label,
+                                    cif_residue_numbers,
+                                    label_auth_map,
+                                )
+                            )
+                        if allowed_mmcif:
+                            config["allowed_epitope_range_mmcif"] = ", ".join(allowed_mmcif)
 
     config.setdefault("sequences", {})
     existing_acc = (config["sequences"].get("accession") or {}).copy()
@@ -529,6 +557,104 @@ def _get_mmcif_chain_sequences(cif_path: Path) -> tuple[dict[str, str], dict[str
         break  # first model only
     return sequences, residue_numbers
 
+
+def _label_to_auth_map(cif_path: Path) -> dict[tuple[str, int], tuple[str, int]]:
+    """Return mapping from (label_asym_id,label_seq_id) -> (auth_asym_id,auth_seq_id)."""
+    try:
+        from Bio.PDB.MMCIF2Dict import MMCIF2Dict  # type: ignore
+    except Exception:
+        return {}
+    if cif_path.suffix.lower() not in {".cif", ".mmcif"}:
+        return {}
+    try:
+        mm = MMCIF2Dict(str(cif_path))
+    except Exception:
+        return {}
+    label_asym = mm.get("_atom_site.label_asym_id") or []
+    label_seq = mm.get("_atom_site.label_seq_id") or []
+    auth_asym = mm.get("_atom_site.auth_asym_id") or []
+    auth_seq = mm.get("_atom_site.auth_seq_id") or []
+    if not (label_asym and label_seq and auth_asym and auth_seq):
+        return {}
+    if not isinstance(label_asym, list):
+        label_asym = [label_asym]
+    if not isinstance(label_seq, list):
+        label_seq = [label_seq]
+    if not isinstance(auth_asym, list):
+        auth_asym = [auth_asym]
+    if not isinstance(auth_seq, list):
+        auth_seq = [auth_seq]
+    mapping: dict[tuple[str, int], tuple[str, int]] = {}
+    for la, ls, aa, asq in zip(label_asym, label_seq, auth_asym, auth_seq):
+        try:
+            ls_val = int(float(str(ls).strip()))
+            as_val = int(float(str(asq).strip()))
+        except Exception:
+            continue
+        la_id = str(la).strip().upper()
+        aa_id = str(aa).strip().upper()
+        if not la_id or not aa_id:
+            continue
+        mapping[(la_id, ls_val)] = (aa_id, as_val)
+    return mapping
+
+
+def _find_residue_index(residues: Sequence[object], label: str) -> Optional[int]:
+    target = str(label).strip()
+    if not target:
+        return None
+    for idx, entry in enumerate(residues):
+        if str(entry).strip() == target:
+            return idx
+    digits = re.match(r"-?\d+", target)
+    if digits:
+        target_digits = digits.group(0)
+        for idx, entry in enumerate(residues):
+            entry_digits = re.match(r"-?\d+", str(entry).strip())
+            if entry_digits and entry_digits.group(0) == target_digits:
+                return idx
+    return None
+
+
+def _map_label_span_to_auth_ranges(
+    chain_id: str,
+    start_label: str,
+    end_label: str,
+    residue_numbers: Mapping[str, Sequence[object]],
+    label_auth_map: Mapping[tuple[str, int], tuple[str, int]],
+) -> list[str]:
+    chain = str(chain_id).strip().upper()
+    if not chain:
+        return []
+    residues = residue_numbers.get(chain) or residue_numbers.get(chain.lower()) or residue_numbers.get(chain.upper())
+    if not residues:
+        return []
+    start_idx = _find_residue_index(residues, start_label)
+    end_idx = _find_residue_index(residues, end_label)
+    if start_idx is None or end_idx is None:
+        return []
+    if end_idx < start_idx:
+        start_idx, end_idx = end_idx, start_idx
+    subset = residues[start_idx : end_idx + 1]
+    auth_positions: dict[str, list[int]] = {}
+    for label in subset:
+        try:
+            label_int = int(float(str(label).strip()))
+        except Exception:
+            continue
+        mapped = label_auth_map.get((chain, label_int))
+        if not mapped:
+            continue
+        auth_chain, auth_pos = mapped
+        auth_positions.setdefault(str(auth_chain).strip().upper(), []).append(int(auth_pos))
+    ranges: list[str] = []
+    for auth_chain, positions in sorted(auth_positions.items()):
+        if not positions:
+            continue
+        lo = min(positions)
+        hi = max(positions)
+        ranges.append(f"{auth_chain}:{lo}-{hi}" if lo != hi else f"{auth_chain}:{lo}")
+    return ranges
 
 
 def _analyze_sino_product(url: str, gene_hint: Optional[str] = None, protein_name: Optional[str] = None):
