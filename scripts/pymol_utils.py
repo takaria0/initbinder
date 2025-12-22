@@ -408,28 +408,75 @@ def _label_to_auth_map(struct_path: Path) -> dict[tuple[str, int], tuple[str, in
     return mapping
 
 
-def _append_auth_tokens(keys: Sequence[str], mapping: dict[tuple[str, int], tuple[str, int]]) -> list[str]:
-    """Append auth numbering tokens alongside label-based tokens for PyMOL selection."""
-    out: list[str] = list(keys)
-    for key in keys:
-        m = _BUNDLE_TOKEN.match(str(key).strip()) or _BUNDLE_RANGE.match(str(key).strip())
-        if not m:
+def _append_auth_tokens(
+    keys: Sequence[str],
+    mapping: dict[tuple[str, int], tuple[str, int]],
+    *,
+    strict_auth: bool = False,
+    dropped: Optional[list[str]] = None,
+) -> list[str]:
+    """Map label-based residue keys onto auth numbering when possible."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in keys or []:
+        text = str(key).strip()
+        if not text:
             continue
-        chain = m.group(1)
-        try:
-            a = int(m.group(2))
-            b = int(m.group(3)) if m.lastindex == 3 and m.group(3) else a
-        except Exception:
-            continue
-        lo, hi = (a, b) if a <= b else (b, a)
-        for pos in range(lo, hi + 1):
-            mapped = mapping.get((chain, pos))
-            if not mapped:
+        m_range = _BUNDLE_RANGE.match(text)
+        if m_range:
+            chain = m_range.group(1)
+            try:
+                a = int(m_range.group(2))
+                b = int(m_range.group(3))
+            except Exception:
+                if dropped is not None:
+                    dropped.append(text)
                 continue
-            aa, apos = mapped
-            token = f"{aa}{apos}"
-            if token not in out:
+            lo, hi = (a, b) if a <= b else (b, a)
+            for pos in range(lo, hi + 1):
+                mapped = mapping.get((chain, pos))
+                if mapped:
+                    aa, apos = mapped
+                    token = f"{aa}{apos}"
+                elif strict_auth:
+                    if dropped is not None:
+                        dropped.append(f"{chain}{pos}")
+                    continue
+                else:
+                    token = f"{chain}{pos}"
+                if token not in seen:
+                    out.append(token)
+                    seen.add(token)
+            continue
+        m_tok = _BUNDLE_TOKEN.match(text)
+        if m_tok:
+            chain = m_tok.group(1)
+            try:
+                pos = int(m_tok.group(2))
+            except Exception:
+                if dropped is not None:
+                    dropped.append(text)
+                continue
+            mapped = mapping.get((chain, pos))
+            if mapped:
+                token = f"{mapped[0]}{mapped[1]}"
+            elif strict_auth:
+                if dropped is not None:
+                    dropped.append(text)
+                continue
+            else:
+                token = f"{chain}{pos}"
+            if token not in seen:
                 out.append(token)
+                seen.add(token)
+            continue
+        if strict_auth:
+            if dropped is not None:
+                dropped.append(text)
+            continue
+        if text not in seen:
+            out.append(text)
+            seen.add(text)
     return out
 
 
@@ -761,6 +808,7 @@ def _write_hotspot_pml(
     full_struct_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
     supporting_chains: Optional[Sequence[str]] = None,
+    selection_mode: str = "auto",
 ) -> None:
     """
     struct_name: バンドル内に配置した prepared 構造のファイル名（例: prepared.pdb）
@@ -862,19 +910,19 @@ def _write_hotspot_pml(
             pml.append(f"set cartoon_transparency, 0.85, {full_obj}\n")
             tgt_cmd, tgt_sel = _select_chains("assembly_target", full_obj, target_chains)
             if tgt_cmd and tgt_sel:
-                pml.append(f"{tgt_cmd}\\n")
-                pml.append(f"hide cartoon, {tgt_sel}\\n")
+                pml.append(f"{tgt_cmd}\n")
+                pml.append(f"hide cartoon, {tgt_sel}\n")
             sup_cmd, sup_sel = _select_chains("assembly_support", full_obj, supporting_chains)
             if sup_cmd and sup_sel:
-                pml.append(f"{sup_cmd}\\n")
-                pml.append(f"show cartoon, {sup_sel}\\n")
-                pml.append(f"show surface, {sup_sel}\\n")
-                pml.append(f"set cartoon_transparency, 0.35, {sup_sel}\\n")
-                pml.append(f"set surface_transparency, 0.25, {sup_sel}\\n")
-                pml.append(f"color gray60, {sup_sel}\\n")
+                pml.append(f"{sup_cmd}\n")
+                pml.append(f"show cartoon, {sup_sel}\n")
+                pml.append(f"show surface, {sup_sel}\n")
+                pml.append(f"set cartoon_transparency, 0.35, {sup_sel}\n")
+                pml.append(f"set surface_transparency, 0.25, {sup_sel}\n")
+                pml.append(f"color gray60, {sup_sel}\n")
         pml.append("\n")
 
-    if expression_regions:
+    if expression_regions and not allowed_ranges:
         pml.append("# Highlight recombinant expression overlap\n")
         if vendor_range:
             vendor_range_clean = str(vendor_range).replace("\n", " ").replace("\"", "")
@@ -895,10 +943,15 @@ def _write_hotspot_pml(
             end_label = region.get("end", "")
             if not sel_expr:
                 continue
-            expr_parts = [_swap_object(sel_expr, "target", expr_obj)]
-            if sel_auth:
-                expr_parts.append(_swap_object(sel_auth, "target", expr_obj))
-            expr_sel = " or ".join(f"({part})" for part in expr_parts)
+            if selection_mode == "auth":
+                chosen_expr = sel_auth
+            elif selection_mode == "label":
+                chosen_expr = sel_expr
+            else:
+                chosen_expr = sel_auth or sel_expr
+            if not chosen_expr:
+                continue
+            expr_sel = _swap_object(chosen_expr, "target", expr_obj)
             pml.append(f"show mesh, {expr_sel}\n")
             pml.append(f"color vendor_expression, {expr_sel}\n")
             pml.append(f"label first ({expr_sel} and name CA), \"{chain}:{start_label}\"\n")
@@ -919,10 +972,15 @@ def _write_hotspot_pml(
             sel_auth = region.get("selection_auth")
             if not sel_expr:
                 continue
-            allowed_parts = [_swap_object(sel_expr, "target", allowed_obj)]
-            if sel_auth:
-                allowed_parts.append(_swap_object(sel_auth, "target", allowed_obj))
-            allowed_sel = " or ".join(f"({part})" for part in allowed_parts)
+            if selection_mode == "auth":
+                chosen_expr = sel_auth
+            elif selection_mode == "label":
+                chosen_expr = sel_expr
+            else:
+                chosen_expr = sel_auth or sel_expr
+            if not chosen_expr:
+                continue
+            allowed_sel = _swap_object(chosen_expr, "target", allowed_obj)
             pml.append(f"show mesh, {allowed_sel}\n")
             pml.append(f"color allowed_epitope_range, {allowed_sel}\n")
         pml.append("\n")
@@ -982,6 +1040,7 @@ def _send_hotspots_to_remote(
     raw_object_name: Optional[str] = None,
     target_chains: Optional[Sequence[str]] = None,
     supporting_chains: Optional[Sequence[str]] = None,
+    selection_mode: str = "auto",
 ) -> bool:
     """Attempts to send hotspot visualization commands to a remote PyMOL."""
     try:
@@ -1012,6 +1071,7 @@ def _send_hotspots_to_remote(
             full_struct_name=raw_object_name,
             target_chains=target_chains,
             supporting_chains=supporting_chains,
+            selection_mode=selection_mode,
         )
 
         # Execute line-by-line
@@ -1204,6 +1264,10 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         raw_bundle_name = "raw_full.pdb"
 
     label_auth_map = _label_to_auth_map(structure_path)
+    selection_mode = "auth" if label_auth_map else "label"
+    dropped_keys: list[str] = []
+    available_chains = _detect_structure_chains(structure_path)
+    epitopes_mapped = False
     if label_auth_map:
         expression_regions = _augment_regions_with_auth_selection(
             expression_regions,
@@ -1215,6 +1279,27 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             label_residue_numbers,
             label_auth_map,
         )
+        if selection_mode == "auth":
+            missing_expr = [r for r in (expression_regions or []) if not r.get("selection_auth")]
+            missing_allowed = [r for r in (allowed_ranges or []) if not r.get("selection_auth")]
+            if missing_expr or missing_allowed:
+                print("[pymol_utils] Warning: auth mapping missing for some ranges; those meshes will be skipped to avoid mixing numbering.")
+    if available_chains:
+        remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
+        for epi, variants in epitopes.items():
+            if not isinstance(variants, Mapping):
+                continue
+            remapped_epitopes[epi] = {
+                var: _remap_keys_to_chains(
+                    _append_auth_tokens(keys, label_auth_map, strict_auth=selection_mode == "auth", dropped=dropped_keys)
+                    if label_auth_map
+                    else keys,
+                    available_chains,
+                )
+                for var, keys in variants.items()
+            }
+        epitopes = remapped_epitopes or epitopes
+        epitopes_mapped = True
 
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
@@ -1229,6 +1314,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             raw_object_name=raw_bundle_name,
             target_chains=target_chain_ids,
             supporting_chains=supporting_chain_ids,
+            selection_mode=selection_mode,
         )
         if success:
             return None # Success in remote mode, no bundle created.
@@ -1236,22 +1322,24 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             print("[info] Falling back to 'bundle' mode due to remote error.")
 
     # --- Bundle Mode (Default or Fallback) ---
-    available_chains = _detect_structure_chains(structure_path)
     if available_chains:
-        remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
-        for epi, variants in epitopes.items():
-            if not isinstance(variants, Mapping):
-                continue
-            remapped_epitopes[epi] = {
-                var: _remap_keys_to_chains(
-                    _append_auth_tokens(keys, label_auth_map) if label_auth_map else keys,
-                    available_chains,
-                )
-                for var, keys in variants.items()
-            }
-        epitopes = remapped_epitopes or epitopes
+        if not epitopes_mapped:
+            remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
+            for epi, variants in epitopes.items():
+                if not isinstance(variants, Mapping):
+                    continue
+                remapped_epitopes[epi] = {
+                    var: _remap_keys_to_chains(
+                        _append_auth_tokens(keys, label_auth_map, strict_auth=selection_mode == "auth", dropped=dropped_keys)
+                        if label_auth_map
+                        else keys,
+                        available_chains,
+                    )
+                    for var, keys in variants.items()
+                }
+            epitopes = remapped_epitopes or epitopes
         expression_regions = _remap_expression_regions(expression_regions, available_chains)
-        if allowed_ranges:
+        if allowed_ranges and selection_mode != "auth":
             remapped_allowed: list[dict[str, str]] = []
             for region in allowed_ranges:
                 chain = _remap_chain_label(str(region.get("chain") or ""), available_chains)
@@ -1273,10 +1361,24 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
                     "selection": selection,
                 })
             allowed_ranges = remapped_allowed
+            if label_auth_map:
+                allowed_ranges = _augment_regions_with_auth_selection(
+                    allowed_ranges,
+                    label_residue_numbers,
+                    label_auth_map,
+                )
+                if selection_mode == "auth":
+                    missing_allowed = [r for r in allowed_ranges if not r.get("selection_auth")]
+                    if missing_allowed:
+                        print("[pymol_utils] Warning: auth mapping missing for some allowed ranges; those meshes will be skipped to avoid mixing numbering.")
         target_chain_ids = [_remap_chain_label(c, available_chains) for c in target_chain_ids]
         supporting_chain_ids = [_remap_chain_label(c, available_chains) for c in supporting_chain_ids]
         if len(set(available_chains)) == 1 and target_chain_ids and target_chain_ids[0] != available_chains[0]:
             print(f"[pymol_utils] Remapped hotspot chains to available chain '{available_chains[0]}' ({structure_path.name}).")
+        if dropped_keys:
+            sample = ", ".join(dropped_keys[:6])
+            suffix = "..." if len(dropped_keys) > 6 else ""
+            print(f"[pymol_utils] Warning: dropped {len(dropped_keys)} epitope residues without auth mapping (e.g., {sample}{suffix}).")
 
     bundle_dir = Path(tempfile.mkdtemp(prefix=f"{pdb_id_u}_prep_pymol_"))
     # Copy chosen structure with just its basename
@@ -1298,6 +1400,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         full_struct_name=raw_bundle_name,
         target_chains=target_chain_ids,
         supporting_chains=supporting_chain_ids,
+        selection_mode=selection_mode,
     )
     # Optionally copy to remote
     _maybe_scp_to_local(bundle_dir)
