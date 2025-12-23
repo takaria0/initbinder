@@ -377,6 +377,22 @@ class BoltzgenConfigRunResponse(BaseModel):
     message: str
 
 
+class BoltzgenConfigRegenerateRequest(BaseModel):
+    pdb_ids: List[str] = Field(default_factory=list, description="PDB IDs to regenerate configs for")
+    design_count: int = Field(100, ge=1, le=50000, description="Designs per epitope to store in configs")
+
+
+class BoltzgenConfigRegenerateResult(BaseModel):
+    pdb_id: str
+    status: Literal["ok", "skipped", "error"] = "ok"
+    configs_written: int = 0
+    message: Optional[str] = None
+
+
+class BoltzgenConfigRegenerateResponse(BaseModel):
+    results: List[BoltzgenConfigRegenerateResult] = Field(default_factory=list)
+
+
 class BoltzgenBinderPymolRequest(BaseModel):
     pdb_id: str
     design_path: str

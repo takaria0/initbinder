@@ -129,6 +129,7 @@
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
                   <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
+                  <button type="button" id="boltz-config-regenerate" class="ghost">Regenerate configs</button>
                   <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
@@ -353,6 +354,31 @@
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>
           <button type="button" id="boltz-run-range-confirm">Show commands</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-regenerate-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-regenerate-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Regenerate configs · rows</h3>
+          <button type="button" id="boltz-regenerate-range-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" style="margin-top: 0;">Choose a row range to regenerate BoltzGen configs using the Epitope design num value.</p>
+          <div class="flex-row" style="gap: 10px; align-items: center; flex-wrap: wrap;">
+            <label>Row start
+              <input type="number" id="boltz-regenerate-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-regenerate-range-end" placeholder="End" min="1">
+            </label>
+          </div>
+        </div>
+        <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
+          <button type="button" id="boltz-regenerate-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-regenerate-range-confirm">Regenerate</button>
         </div>
       </div>
     </div>

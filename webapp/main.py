@@ -40,6 +40,8 @@ from .models import (
     BoltzgenBinderResponse,
     BoltzgenConfigContent,
     BoltzgenConfigListResponse,
+    BoltzgenConfigRegenerateRequest,
+    BoltzgenConfigRegenerateResponse,
     BoltzgenConfigRunRequest,
     BoltzgenConfigRunResponse,
     BoltzGenRunListResponse,
@@ -96,6 +98,7 @@ from .bulk import (
     build_boltzgen_diversity_report,
     list_boltzgen_binders,
     list_boltzgen_config_state,
+    regenerate_boltzgen_configs,
     load_boltzgen_config_content,
     preview_bulk_targets,
 )
@@ -925,6 +928,14 @@ async def api_boltzgen_config_list(
 ) -> BoltzgenConfigListResponse:
     ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
     return list_boltzgen_config_state(ids)
+
+
+@app.post("/api/bulk/boltzgen/configs/regenerate", response_model=BoltzgenConfigRegenerateResponse)
+async def api_boltzgen_config_regenerate(
+    payload: BoltzgenConfigRegenerateRequest,
+) -> BoltzgenConfigRegenerateResponse:
+    ids = [(p or "").strip().upper() for p in (payload.pdb_ids or []) if (p or "").strip()]
+    return regenerate_boltzgen_configs(ids, payload.design_count)
 
 
 @app.get("/api/bulk/boltzgen/config", response_model=BoltzgenConfigContent)

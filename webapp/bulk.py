@@ -26,6 +26,8 @@ from .models import (
     BoltzgenBinderRow,
     BoltzgenConfigContent,
     BoltzgenConfigListResponse,
+    BoltzgenConfigRegenerateResponse,
+    BoltzgenConfigRegenerateResult,
     BoltzgenConfigRunRequest,
     BoltzgenConfigRunResponse,
     BoltzgenEpitopeConfig,
@@ -1147,6 +1149,93 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
             )
         )
     return BoltzgenConfigListResponse(targets=targets)
+
+
+def regenerate_boltzgen_configs(
+    pdb_ids: List[str],
+    design_count: int,
+) -> BoltzgenConfigRegenerateResponse:
+    if not pdb_ids:
+        return BoltzgenConfigRegenerateResponse(results=[])
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    results: List[BoltzgenConfigRegenerateResult] = []
+    seen: set[str] = set()
+
+    for raw_id in pdb_ids:
+        pdb_id = (raw_id or "").strip().upper()
+        if not pdb_id or pdb_id in seen:
+            continue
+        seen.add(pdb_id)
+        log_lines: List[str] = []
+
+        def _log(line: str) -> None:
+            log_lines.append(line)
+
+        prepared_structure = _prepared_structure_path_for_target(pdb_id)
+        if not prepared_structure.exists():
+            results.append(
+                BoltzgenConfigRegenerateResult(
+                    pdb_id=pdb_id,
+                    status="skipped",
+                    configs_written=0,
+                    message=f"Missing prepared structure ({prepared_structure}).",
+                )
+            )
+            continue
+
+        epitopes = _load_epitopes_for_target(pdb_id)
+        if not epitopes:
+            results.append(
+                BoltzgenConfigRegenerateResult(
+                    pdb_id=pdb_id,
+                    status="skipped",
+                    configs_written=0,
+                    message="No epitope metadata found.",
+                )
+            )
+            continue
+
+        config_root = targets_dir / pdb_id / "configs"
+        removed = 0
+        if config_root.exists():
+            for ep_dir in sorted(config_root.glob("epitope_*")):
+                if not ep_dir.is_dir():
+                    continue
+                try:
+                    shutil.rmtree(ep_dir)
+                    removed += 1
+                except Exception as exc:  # pragma: no cover - defensive
+                    _log(f"[boltzgen-config] warn: failed to remove {ep_dir}: {exc}")
+
+        design_counts = [design_count] * len(epitopes)
+        try:
+            _write_boltzgen_configs(pdb_id, epitopes, design_counts, _log)
+        except Exception as exc:  # pragma: no cover - defensive
+            results.append(
+                BoltzgenConfigRegenerateResult(
+                    pdb_id=pdb_id,
+                    status="error",
+                    configs_written=0,
+                    message=str(exc),
+                )
+            )
+            continue
+
+        config_paths = list(config_root.rglob("boltzgen_config.yaml")) if config_root.exists() else []
+        msg = f"Regenerated {len(config_paths)} configs"
+        if removed:
+            msg = f"{msg} (removed {removed} old epitope folder{'' if removed == 1 else 's'})"
+        results.append(
+            BoltzgenConfigRegenerateResult(
+                pdb_id=pdb_id,
+                status="ok",
+                configs_written=len(config_paths),
+                message=msg,
+            )
+        )
+
+    return BoltzgenConfigRegenerateResponse(results=results)
 
 
 def load_boltzgen_config_content(pdb_id: str, config_path: str) -> BoltzgenConfigContent:

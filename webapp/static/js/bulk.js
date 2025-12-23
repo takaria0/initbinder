@@ -69,6 +69,7 @@ const el = {
   boltzSummary: document.querySelector('#boltz-config-summary'),
   boltzDesignCount: document.querySelector('#boltz-design-count'),
   boltzTimeHours: document.querySelector('#boltz-time-hours'),
+  boltzRegenerate: document.querySelector('#boltz-config-regenerate'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunPipeline: document.querySelector('#boltz-rerun-pipeline'),
@@ -90,6 +91,12 @@ const el = {
   boltzRunRangeConfirm: document.querySelector('#boltz-run-range-confirm'),
   boltzRunRangeCancel: document.querySelector('#boltz-run-range-cancel'),
   boltzRunRangeClose: document.querySelector('#boltz-run-range-close'),
+  boltzRegenerateRangeModal: document.querySelector('#boltz-regenerate-range-modal'),
+  boltzRegenerateRangeStart: document.querySelector('#boltz-regenerate-range-start'),
+  boltzRegenerateRangeEnd: document.querySelector('#boltz-regenerate-range-end'),
+  boltzRegenerateRangeConfirm: document.querySelector('#boltz-regenerate-range-confirm'),
+  boltzRegenerateRangeCancel: document.querySelector('#boltz-regenerate-range-cancel'),
+  boltzRegenerateRangeClose: document.querySelector('#boltz-regenerate-range-close'),
   binderPanel: document.querySelector('#boltz-binders-panel'),
   binderTable: document.querySelector('#boltz-binders-table tbody'),
   binderSummary: document.querySelector('#boltz-binders-summary'),
@@ -1533,6 +1540,36 @@ function openRunCommandRangeModal() {
   toggleModal(el.boltzRunRangeModal, true);
 }
 
+function openRegenerateRangeModal() {
+  if (!el.boltzRegenerateRangeModal) return;
+  toggleModal(el.boltzRegenerateRangeModal, true);
+}
+
+async function submitRegenerateRangeModal(triggerBtn = null) {
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const range = getBoltzRowRange(
+    el.boltzRegenerateRangeStart,
+    el.boltzRegenerateRangeEnd,
+    targets,
+    'regenerate',
+  );
+  if (!range) return;
+  const slice = range.slice;
+  if (!slice.length) {
+    showAlert('No targets found for that row range.');
+    return;
+  }
+  const ids = slice
+    .map((row) => (row?.pdb_id || '').trim().toUpperCase())
+    .filter(Boolean);
+  await regenerateBoltzConfigs({ pdbIds: ids, triggerBtn });
+  toggleModal(el.boltzRegenerateRangeModal, false);
+}
+
 async function showRunCommandRange() {
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
@@ -1929,6 +1966,52 @@ async function loadBoltzConfigs(options = {}) {
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
     renderBoltzConfigs();
+  }
+}
+
+async function regenerateBoltzConfigs(options = {}) {
+  const { pdbIds = null, triggerBtn = null } = options;
+  const candidates = Array.isArray(state.boltzConfigs) && state.boltzConfigs.length
+    ? state.boltzConfigs
+    : (state.bulkPreviewRows || []);
+  const ids = Array.from(new Set(
+    (pdbIds && pdbIds.length ? pdbIds : candidates)
+      .map((row) => (row?.pdb_id || row?.resolved_pdb_id || row || '').trim().toUpperCase())
+      .filter(Boolean),
+  ));
+  if (!ids.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const designCount = getBoltzDesignCount() || 100;
+  const activeBtn = triggerBtn || el.boltzRegenerate;
+  if (activeBtn) activeBtn.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/boltzgen/configs/regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdb_ids: ids, design_count: designCount }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to regenerate configs (${res.status})`);
+    }
+    const body = await res.json();
+    const results = Array.isArray(body.results) ? body.results : [];
+    const ok = results.filter((row) => row && row.status === 'ok');
+    const skipped = results.filter((row) => row && row.status === 'skipped');
+    const failed = results.filter((row) => row && row.status === 'error');
+    let message = `Regenerated configs for ${ok.length} target${ok.length === 1 ? '' : 's'}.`;
+    if (skipped.length) message += ` Skipped ${skipped.length}.`;
+    if (failed.length) message += ` Failed ${failed.length}.`;
+    showAlert(message, failed.length > 0);
+    if (ok.length) {
+      await loadBoltzConfigs({ silent: true });
+    }
+  } catch (err) {
+    showAlert(err.message || 'Failed to regenerate BoltzGen configs.');
+  } finally {
+    if (activeBtn) activeBtn.disabled = false;
   }
 }
 
@@ -2841,6 +2924,9 @@ function init() {
       }
     });
   }
+  if (el.boltzRegenerate) {
+    el.boltzRegenerate.addEventListener('click', openRegenerateRangeModal);
+  }
   if (el.diversityRefresh) el.diversityRefresh.addEventListener('click', () => refreshDiversity());
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
@@ -2876,6 +2962,17 @@ function init() {
   if (el.boltzRunRangeClose) {
     el.boltzRunRangeClose.addEventListener('click', () => toggleModal(el.boltzRunRangeModal, false));
   }
+  if (el.boltzRegenerateRangeConfirm) {
+    el.boltzRegenerateRangeConfirm.addEventListener('click', (event) => {
+      submitRegenerateRangeModal(event.currentTarget);
+    });
+  }
+  if (el.boltzRegenerateRangeCancel) {
+    el.boltzRegenerateRangeCancel.addEventListener('click', () => toggleModal(el.boltzRegenerateRangeModal, false));
+  }
+  if (el.boltzRegenerateRangeClose) {
+    el.boltzRegenerateRangeClose.addEventListener('click', () => toggleModal(el.boltzRegenerateRangeModal, false));
+  }
   if (el.boltzTable) el.boltzTable.addEventListener('click', handleBoltzTableClick);
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
@@ -2901,6 +2998,7 @@ function init() {
     if (closeTarget === 'boltz-run') toggleModal(el.boltzRunModal, false);
     if (closeTarget === 'boltz-rerun-range') toggleModal(el.boltzRerunRangeModal, false);
     if (closeTarget === 'boltz-run-range') toggleModal(el.boltzRunRangeModal, false);
+    if (closeTarget === 'boltz-regenerate-range') toggleModal(el.boltzRegenerateRangeModal, false);
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
   });
 
