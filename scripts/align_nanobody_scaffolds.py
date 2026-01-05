@@ -14,6 +14,15 @@ Dependencies:
 
 Example:
   python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/scripts/align_nanobody_scaffolds.py \
+      --plot --plot-out /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/scripts/nanobody_alignment.png \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/7eow.cif \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/7xl0.cif \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/8coh.cif \
+    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/8z8v.cif
+
+  # Optional alignment plot (blue=match, red=mismatch):
+  python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/scripts/align_nanobody_scaffolds.py \
+    --plot --plot-out nanobody_alignment.png \
     /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/7eow.cif \
     /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/7xl0.cif \
     /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/boltzgen-main/example/nanobody_scaffolds/8coh.cif \
@@ -23,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -113,27 +123,41 @@ def make_aligner() -> PairwiseAligner:
     return aligner
 
 
+def alignment_to_strings(aln, seq_a: str, seq_b: str) -> Tuple[str, str]:
+    """
+    Convert a Biopython alignment to gapped strings using alignment coordinates.
+    """
+    coords = getattr(aln, "coordinates", None)
+    if coords is None or len(coords) < 2:
+        return seq_a, seq_b
+    a_coords = coords[0]
+    b_coords = coords[1]
+    parts_a: List[str] = []
+    parts_b: List[str] = []
+    steps = min(len(a_coords), len(b_coords))
+    for i in range(1, steps):
+        a0, a1 = int(a_coords[i - 1]), int(a_coords[i])
+        b0, b1 = int(b_coords[i - 1]), int(b_coords[i])
+        da = a1 - a0
+        db = b1 - b0
+        if da > 0 and db > 0:
+            parts_a.append(seq_a[a0:a1])
+            parts_b.append(seq_b[b0:b1])
+        elif da > 0 and db == 0:
+            parts_a.append(seq_a[a0:a1])
+            parts_b.append("-" * da)
+        elif db > 0 and da == 0:
+            parts_a.append("-" * db)
+            parts_b.append(seq_b[b0:b1])
+    return "".join(parts_a), "".join(parts_b)
+
+
 def score_alignment(aligner: PairwiseAligner, seq_a: str, seq_b: str) -> Tuple[float, str, str]:
     """
     Returns (score, aligned_a, aligned_b) for the best alignment.
     """
     aln = next(iter(aligner.align(seq_a, seq_b)))
-    # Biopython alignment formatting gives us a nice string; we want the two aligned seq lines.
-    s = str(aln).splitlines()
-    # Typical:
-    # seqA
-    # |||.. etc
-    # seqB
-    # There can be additional lines for long alignments; Biopython prints blocks.
-    # We'll reconstruct by reading every 3rd line pattern.
-    a_parts, b_parts = [], []
-    for i in range(0, len(s), 4):
-        # Blocks can be 4 lines: a, mid, b, blank
-        if i + 2 < len(s):
-            a_parts.append(s[i].strip())
-            b_parts.append(s[i + 2].strip())
-    aligned_a = "".join(a_parts)
-    aligned_b = "".join(b_parts)
+    aligned_a, aligned_b = alignment_to_strings(aln, seq_a, seq_b)
     return float(aln.score), aligned_a, aligned_b
 
 
@@ -159,6 +183,198 @@ def compute_diff_stats(aligned_a: str, aligned_b: str) -> Tuple[int, int, int, i
 
     identity = (matches / aligned_len) if aligned_len else 0.0
     return aligned_len, matches, mismatches, gaps, identity
+
+
+def merge_gapped_refs(ref_a: str, ref_b: str) -> str:
+    """
+    Merge two gapped reference strings (same ungapped sequence) by taking the union of gaps.
+    """
+    i = 0
+    j = 0
+    out: List[str] = []
+    while i < len(ref_a) or j < len(ref_b):
+        ca = ref_a[i] if i < len(ref_a) else None
+        cb = ref_b[j] if j < len(ref_b) else None
+        if ca == "-" and cb == "-":
+            out.append("-")
+            i += 1
+            j += 1
+            continue
+        if ca == "-":
+            out.append("-")
+            i += 1
+            continue
+        if cb == "-":
+            out.append("-")
+            j += 1
+            continue
+        if ca is None and cb is not None:
+            out.append(cb)
+            j += 1
+            continue
+        if cb is None and ca is not None:
+            out.append(ca)
+            i += 1
+            continue
+        out.append(ca)
+        i += 1
+        j += 1
+    return "".join(out)
+
+
+def expand_aligned_seq(aligned_ref: str, aligned_seq: str, master_ref: str) -> str:
+    """
+    Expand an aligned sequence to match a master reference (superset of gaps).
+    """
+    out: List[str] = []
+    i = 0
+    for m in master_ref:
+        if i < len(aligned_ref) and aligned_ref[i] == m:
+            out.append(aligned_seq[i])
+            i += 1
+            continue
+        if m == "-":
+            out.append("-")
+            continue
+        while i < len(aligned_ref) and aligned_ref[i] == "-":
+            i += 1
+        if i < len(aligned_ref) and aligned_ref[i] == m:
+            out.append(aligned_seq[i])
+            i += 1
+        else:
+            out.append("-")
+    return "".join(out)
+
+
+def build_reference_alignment(
+    aligner: PairwiseAligner,
+    reps: Dict[str, ChainSeq],
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Align all representative chains to a reference and return (master_ref, aligned_seqs).
+    """
+    ref_key = max(reps.keys(), key=lambda k: len(reps[k].sequence))
+    ref_seq = reps[ref_key].sequence
+    aligned_refs: Dict[str, str] = {}
+    aligned_seqs: Dict[str, str] = {}
+    for key, chain in reps.items():
+        if key == ref_key:
+            continue
+        _, al_ref, al_seq = score_alignment(aligner, ref_seq, chain.sequence)
+        aligned_refs[key] = al_ref
+        aligned_seqs[key] = al_seq
+
+    master_ref = ref_seq
+    for al_ref in aligned_refs.values():
+        master_ref = merge_gapped_refs(master_ref, al_ref)
+
+    expanded: Dict[str, str] = {ref_key: master_ref}
+    for key, al_ref in aligned_refs.items():
+        expanded[key] = expand_aligned_seq(al_ref, aligned_seqs[key], master_ref)
+    return master_ref, expanded
+
+
+def column_statuses(aligned: List[str]) -> List[str]:
+    """
+    Determine per-column status: match, mismatch, solo, or gap.
+    """
+    if not aligned:
+        return []
+    aln_len = len(aligned[0])
+    statuses: List[str] = []
+    for idx in range(aln_len):
+        letters = [seq[idx] for seq in aligned if seq[idx] != "-"]
+        if not letters:
+            statuses.append("gap")
+            continue
+        uniq = set(letters)
+        if len(uniq) == 1 and len(letters) >= 2:
+            statuses.append("match")
+        elif len(uniq) == 1:
+            statuses.append("solo")
+        else:
+            statuses.append("mismatch")
+    return statuses
+
+
+def render_alignment_plot(
+    aligned_map: Dict[str, str],
+    out_path: Path,
+    block_size: int = 80,
+) -> None:
+    """
+    Render a colored alignment view using matplotlib.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional dependency
+        print(f"[plot] Matplotlib not available: {exc}")
+        return
+
+    labels = list(aligned_map.keys())
+    sequences = [aligned_map[name] for name in labels]
+    if not sequences:
+        print("[plot] No alignment sequences to render.")
+        return
+    aln_len = len(sequences[0])
+    status = column_statuses(sequences)
+    blocks = int(math.ceil(aln_len / block_size))
+    rows_per_block = len(labels)
+    total_rows = blocks * rows_per_block + (blocks - 1)
+
+    fig_w = max(10, block_size * 0.18 + 4)
+    fig_h = max(4, total_rows * 0.35)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.set_axis_off()
+
+    colors = {
+        "match": "#1d4ed8",
+        "mismatch": "#dc2626",
+        "solo": "#64748b",
+        "gap": "#cbd5f5",
+    }
+
+    y_cursor = 0
+    for block in range(blocks):
+        start = block * block_size
+        end = min(aln_len, (block + 1) * block_size)
+        for row_idx, label in enumerate(labels):
+            seq = aligned_map[label]
+            y = -(y_cursor + row_idx)
+            ax.text(
+                -2.5,
+                y,
+                label,
+                ha="right",
+                va="center",
+                fontsize=9,
+                family="monospace",
+                color="#0f172a",
+            )
+            for col in range(start, end):
+                char = seq[col]
+                if char == "-":
+                    color = colors["gap"]
+                else:
+                    color = colors[status[col]]
+                ax.text(
+                    col - start,
+                    y,
+                    char,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    family="monospace",
+                    color=color,
+                )
+        y_cursor += rows_per_block + 1
+
+    ax.set_xlim(-3, block_size + 1)
+    ax.set_ylim(-total_rows - 1, 1)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    print(f"[plot] alignment saved: {out_path}")
 
 
 def best_chain_pair_alignment(
@@ -239,6 +455,22 @@ def pick_representative_chain(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cifs", nargs="+", help="mmCIF files")
+    ap.add_argument(
+        "--plot",
+        action="store_true",
+        help="Render a colored alignment plot for representative chains (requires matplotlib)",
+    )
+    ap.add_argument(
+        "--plot-out",
+        default="nanobody_alignment.png",
+        help="Output path for the alignment plot (default: nanobody_alignment.png)",
+    )
+    ap.add_argument(
+        "--plot-block",
+        type=int,
+        default=80,
+        help="Alignment columns per block in the plot (default: 80)",
+    )
     args = ap.parse_args()
 
     cif_paths = [Path(p).expanduser().resolve() for p in args.cifs]
@@ -298,6 +530,11 @@ def main():
                 f"mismatches={mismatches} (non-gap aligned={aligned_len}), "
                 f"identity={identity:.3f}, gaps={gaps}, score={score:.1f}"
             )
+
+    if args.plot:
+        master_ref, aligned = build_reference_alignment(aligner, reps)
+        plot_path = Path(args.plot_out).expanduser().resolve()
+        render_alignment_plot(aligned, plot_path, block_size=max(20, args.plot_block))
 
     print("\nDone.\n")
 

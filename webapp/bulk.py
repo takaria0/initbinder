@@ -10,6 +10,9 @@ import time
 import shutil
 import base64
 import traceback
+import statistics
+import math
+from difflib import SequenceMatcher
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +48,11 @@ from .pipeline import get_target_status, init_decide_prep
 from .preferences import list_presets
 from .result_collectors import load_boltzgen_metrics
 from .pymol import PyMolLaunchError, launch_hotspots, render_hotspot_snapshot, resolve_boltz_design_path
+from .hotspot_distance import (
+    _load_cif_coords as _hs_load_cif_coords,
+    _pick_binder_chain_by_seq_biopython as _hs_pick_binder_chain_by_seq,
+    _min_distance as _hs_min_distance,
+)
 try:  # For mapping vendor expression chains to the prepared structure
     from scripts.pymol_utils import _collect_expression_regions  # type: ignore
 except Exception:  # pragma: no cover - defensive import
@@ -227,79 +235,106 @@ def _expand_binding_label(label: Optional[str]) -> Dict[str, List[int]]:
     return {cid: sorted(set(vals)) for cid, vals in mapping.items() if cid and vals}
 
 
-def _extract_ca_atoms(struct_path: Path):
-    """Load CA atoms with chain/resseq info using Bio.PDB."""
-    try:
-        if struct_path.suffix.lower() in {".cif", ".mmcif"}:
-            from Bio.PDB import MMCIFParser  # type: ignore
-            parser = MMCIFParser(QUIET=True)
-        else:
-            from Bio.PDB import PDBParser  # type: ignore
-            parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("STRUCT", str(struct_path))
-    except Exception:
-        return []
-    atoms = []
-    try:
-        model = next(structure.get_models())
-    except Exception:
-        return []
-    for chain in model:
-        chain_id = str(chain.id).strip()
-        for residue in chain:
-            hetflag, resseq, _icode = residue.get_id()
-            if hetflag != " ":
-                continue
-            try:
-                pos = int(resseq)
-            except Exception:
-                continue
-            if "CA" not in residue:
-                continue
-            atom = residue["CA"]
-            atoms.append((chain_id, pos, atom))
-    return atoms
-
-
 def _min_hotspot_distance(
     *,
     binding_label: Optional[str],
     include_label: Optional[str],
     design_path: Optional[str],
     target_path: Optional[str],
+    binder_seq: Optional[str] = None,
 ) -> Optional[float]:
-    """Compute minimum CA-CA distance between binder and target hotspot residues using Bio.PDB NeighborSearch."""
+    """Compute binder↔epitope CA distance using the shared hotspot_distance helper."""
+
     label = binding_label or include_label
-    if not label or not design_path or not target_path:
+    if not label or not design_path:
         return None
+
     binding_map = _expand_binding_label(label)
+    if not binding_map:
+        return None
+
+    design_file = Path(design_path)
+    if not design_file.exists():
+        return None
+
     try:
-        from Bio.PDB.NeighborSearch import NeighborSearch  # type: ignore
+        design_data = _hs_load_cif_coords(design_file)
     except Exception:
         return None
-
-    target_atoms = []
-    for cid, pos, atom in _extract_ca_atoms(Path(target_path)):
-        if cid in binding_map and pos in binding_map[cid]:
-            target_atoms.append(atom)
-    if not target_atoms:
-        return None
-    design_atoms = [atm for _cid, _pos, atm in _extract_ca_atoms(Path(design_path))]
-    if not design_atoms:
+    if not design_data:
         return None
 
-    ns = NeighborSearch(design_atoms)
-    min_dist = None
-    for atom in target_atoms:
-        neighbors = ns.search(atom.coord, 100.0, level="A")  # 100 Å radius to capture any neighbor
-        for nb in neighbors:
+    target_data: Dict[str, dict] = {}
+    if target_path:
+        target_file = Path(target_path)
+        if target_file.exists():
             try:
-                d = atom - nb  # Bio.PDB Atom distance
+                target_data = _hs_load_cif_coords(target_file)
             except Exception:
+                target_data = {}
+
+    def _coords_for_residues(chain_info: dict, residues: List[int]) -> List[Tuple[float, float, float]]:
+        res_map_label = chain_info.get("res_map_label") or chain_info.get("res_map") or {}
+        res_map_auth = chain_info.get("res_map_auth") or {}
+        coords = [res_map_label.get(res) for res in residues if res in res_map_label]
+        if not coords and res_map_auth:
+            coords = [res_map_auth.get(res) for res in residues if res in res_map_auth]
+        return [c for c in coords if c is not None]
+
+    antigen_chain_ids: set[str] = set()
+    hotspot_coords: List[Tuple[float, float, float]] = []
+
+    for chain_id, residues in binding_map.items():
+        if not residues:
+            continue
+
+        chain_info = design_data.get(chain_id)
+        if chain_info is None and target_data:
+            target_seq = (target_data.get(chain_id) or {}).get("sequence") or ""
+            if target_seq:
+                match_id, _score = _hs_pick_binder_chain_by_seq(design_data, target_seq, min_identity=0.50)
+                if match_id:
+                    chain_info = design_data.get(match_id)
+                    chain_id = match_id  # map to design chain ID
+
+        if chain_info is None:
+            continue
+
+        coords = _coords_for_residues(chain_info, residues)
+        if coords:
+            hotspot_coords.extend(coords)
+            antigen_chain_ids.add(chain_id)
+
+    if not hotspot_coords:
+        return None
+
+    binder_chain_id = None
+    if binder_seq:
+        try:
+            binder_chain_id, _info = _hs_pick_binder_chain_by_seq(
+                design_data, binder_seq, min_identity=0.50
+            )
+        except Exception:
+            binder_chain_id = None
+
+    binder_coords: List[Tuple[float, float, float]] = []
+    if binder_chain_id and binder_chain_id in design_data:
+        binder_coords.extend(design_data[binder_chain_id].get("coords") or [])
+    else:
+        for cid, info in design_data.items():
+            if cid in antigen_chain_ids:
                 continue
-            if min_dist is None or d < min_dist:
-                min_dist = d
-    return min_dist
+            binder_coords.extend(info.get("coords") or [])
+
+    if not binder_coords and design_data:
+        # Fallback: if antigen chains could not be excluded, use all chains.
+        for info in design_data.values():
+            binder_coords.extend(info.get("coords") or [])
+
+    if not binder_coords:
+        return None
+
+    return _hs_min_distance(binder_coords, hotspot_coords)
 
 
 def _read_mmcif_chain_label_seq_range(mmcif_path: Path) -> Dict[str, Tuple[int, int]]:
@@ -1835,6 +1870,296 @@ def _write_epitope_plots(
     return saved
 
 
+def _style_scatter(ax) -> None:
+    ax.set_facecolor("#ffffff")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color("#334155")
+        ax.spines[spine].set_linewidth(0.8)
+    ax.tick_params(colors="#334155", labelsize=9)
+    ax.grid(True, alpha=0.2, linewidth=0.6)
+    try:
+        ax.set_box_aspect(1)
+    except Exception:
+        pass
+
+def _percentile(values: List[float], pct: float) -> float:
+    if not values:
+        return float("nan")
+    vals = sorted(values)
+    if len(vals) == 1:
+        return vals[0]
+    if pct <= 0:
+        return vals[0]
+    if pct >= 100:
+        return vals[-1]
+    k = (len(vals) - 1) * (pct / 100.0)
+    f = int(math.floor(k))
+    c = int(math.ceil(k))
+    if f == c:
+        return vals[f]
+    return vals[f] + (vals[c] - vals[f]) * (k - f)
+
+def _normalize_seq(seq: str) -> str:
+    return "".join(ch for ch in str(seq).upper() if ch.isalpha())
+
+def _load_cif_chain_data(cif_path: Path) -> Dict[str, dict]:
+    def _fallback_parse_atom_site(path: Path) -> Dict[str, dict]:
+        aa_map = {
+            "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+            "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+            "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+            "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+            "MSE": "M",
+        }
+        chain_seq: Dict[str, Dict[int, str]] = defaultdict(dict)
+        res_map_label: Dict[str, Dict[int, Tuple[float, float, float]]] = defaultdict(dict)
+        res_map_auth: Dict[str, Dict[int, Tuple[float, float, float]]] = defaultdict(dict)
+        coords_list: Dict[str, List[Tuple[float, float, float]]] = defaultdict(list)
+        columns: List[str] = []
+        in_loop = False
+        atom_loop = False
+        with path.open() as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw:
+                    continue
+                if raw == "loop_":
+                    in_loop = True
+                    atom_loop = False
+                    columns = []
+                    continue
+                if in_loop and raw.startswith("_"):
+                    columns.append(raw)
+                    if raw.startswith("_atom_site."):
+                        atom_loop = True
+                    continue
+                if in_loop and atom_loop:
+                    if raw.startswith("#") or raw.startswith("loop_") or raw.startswith("_"):
+                        in_loop = False
+                        atom_loop = False
+                        if raw == "loop_":
+                            in_loop = True
+                            columns = []
+                        continue
+                    parts = raw.split()
+                    if len(parts) < len(columns):
+                        continue
+                    row = {col: parts[idx] for idx, col in enumerate(columns)}
+                    model_num = row.get("_atom_site.pdbx_PDB_model_num", "1")
+                    if model_num not in ("1", "1.0"):
+                        continue
+                    chain_id = row.get("_atom_site.label_asym_id") or row.get("_atom_site.auth_asym_id")
+                    if not chain_id:
+                        continue
+                    label_seq_raw = row.get("_atom_site.label_seq_id") or ""
+                    auth_seq_raw = row.get("_atom_site.auth_seq_id") or ""
+                    try:
+                        label_seq = int(label_seq_raw) if label_seq_raw not in {".", "?"} else None
+                    except ValueError:
+                        label_seq = None
+                    try:
+                        auth_seq = int(auth_seq_raw) if auth_seq_raw not in {".", "?"} else None
+                    except ValueError:
+                        auth_seq = None
+                    comp = row.get("_atom_site.label_comp_id") or row.get("_atom_site.auth_comp_id") or ""
+                    atom_id = row.get("_atom_site.label_atom_id") or row.get("_atom_site.auth_atom_id") or ""
+                    if label_seq and comp and label_seq not in chain_seq[chain_id]:
+                        chain_seq[chain_id][label_seq] = aa_map.get(comp.upper(), "X")
+                    if atom_id != "CA":
+                        continue
+                    try:
+                        x = float(row.get("_atom_site.Cartn_x", 0.0))
+                        y = float(row.get("_atom_site.Cartn_y", 0.0))
+                        z = float(row.get("_atom_site.Cartn_z", 0.0))
+                    except ValueError:
+                        continue
+                    coord = (x, y, z)
+                    if label_seq:
+                        res_map_label[chain_id][label_seq] = coord
+                    if auth_seq:
+                        res_map_auth[chain_id][auth_seq] = coord
+                    coords_list[chain_id].append(coord)
+                if raw.startswith("#"):
+                    in_loop = False
+                    atom_loop = False
+        chain_data: Dict[str, dict] = {}
+        for chain_id, seq_map in chain_seq.items():
+            seq = "".join(seq_map[i] for i in sorted(seq_map))
+            chain_data[chain_id] = {
+                "sequence": _normalize_seq(seq),
+                "res_map": res_map_label.get(chain_id, {}),
+                "res_map_label": res_map_label.get(chain_id, {}),
+                "res_map_auth": res_map_auth.get(chain_id, {}),
+                "coords": coords_list.get(chain_id, []),
+            }
+        return chain_data
+
+    try:
+        from Bio.PDB import MMCIFParser, PPBuilder
+        from Bio.SeqUtils import seq1
+    except Exception as exc:  # pragma: no cover - optional dependency
+        print(f"[boltzgen-diversity] Biopython unavailable for CIF parsing: {exc}")
+        return _fallback_parse_atom_site(cif_path)
+    try:
+        parser = MMCIFParser(QUIET=True)
+        structure = parser.get_structure(cif_path.stem, str(cif_path))
+        model = next(structure.get_models(), None)
+        if model is None:
+            return _fallback_parse_atom_site(cif_path)
+        ppb = PPBuilder()
+        chain_data: Dict[str, dict] = {}
+        for chain in model.get_chains():
+            chain_id = str(chain.id)
+            peptides = ppb.build_peptides(chain)
+            if peptides:
+                seq = "".join(str(pp.get_sequence()) for pp in peptides)
+            else:
+                aas = []
+                for res in chain.get_residues():
+                    hetflag, _, _icode = res.id
+                    if str(hetflag).strip():
+                        continue
+                    resname = res.get_resname()
+                    try:
+                        aas.append(seq1(resname, custom_map={"MSE": "M"}))
+                    except Exception:
+                        aas.append("X")
+                seq = "".join(aas)
+            seq = _normalize_seq(seq)
+            res_map: Dict[int, Tuple[float, float, float]] = {}
+            ca_coords: List[Tuple[float, float, float]] = []
+            for res in chain.get_residues():
+                hetflag, resseq, _icode = res.id
+                if str(hetflag).strip():
+                    continue
+                atom = res["CA"] if res.has_id("CA") else None
+                if atom is None:
+                    atoms = list(res.get_atoms())
+                    if atoms:
+                        atom = atoms[0]
+                if atom is None:
+                    continue
+                coord = tuple(float(x) for x in atom.coord)
+                res_map[int(resseq)] = coord
+                ca_coords.append(coord)
+            chain_data[chain_id] = {
+                "sequence": seq,
+                "res_map": res_map,
+                "res_map_label": res_map,
+                "res_map_auth": res_map,
+                "coords": ca_coords,
+            }
+        return chain_data
+    except Exception as exc:
+        print(f"[boltzgen-diversity] failed to parse CIF with Biopython: {cif_path}")
+        print(exc)
+        traceback.print_exc()
+        return _fallback_parse_atom_site(cif_path)
+
+def _pick_chain_by_sequence(chain_data: Dict[str, dict], designed_seq: str) -> Tuple[Optional[str], Optional[float]]:
+    seq = _normalize_seq(designed_seq)
+    if not seq or not chain_data:
+        return None, None
+    for cid, data in chain_data.items():
+        if data.get("sequence") == seq:
+            return cid, 1.0
+    best_id = None
+    best_score = 0.0
+    for cid, data in chain_data.items():
+        other = data.get("sequence") or ""
+        if not other:
+            continue
+        score = SequenceMatcher(None, seq, other).ratio()
+        if score > best_score:
+            best_score = score
+            best_id = cid
+    return best_id, best_score if best_id else None
+
+def _parse_binding_string(binding: str) -> List[int]:
+    tokens = []
+    for part in re.split(r"[,\s]+", str(binding)):
+        token = part.strip()
+        if not token:
+            continue
+        if ".." in token:
+            lo, hi = token.split("..", 1)
+        elif "-" in token:
+            lo, hi = token.split("-", 1)
+        else:
+            lo = hi = token
+        try:
+            start = int(lo)
+            end = int(hi)
+        except ValueError:
+            continue
+        if start > end:
+            start, end = end, start
+        tokens.extend(list(range(start, end + 1)))
+    return sorted(set(tokens))
+
+def _load_binding_types(config_path: Path) -> Dict[str, List[int]]:
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return {}
+    out: Dict[str, List[int]] = defaultdict(list)
+    entities = data.get("entities") or []
+    for entity in entities:
+        file_block = entity.get("file") if isinstance(entity, dict) else None
+        if not isinstance(file_block, dict):
+            continue
+        binding_types = file_block.get("binding_types") or []
+        for entry in binding_types:
+            if not isinstance(entry, dict):
+                continue
+            chain = entry.get("chain") if isinstance(entry.get("chain"), dict) else {}
+            chain_id = str(chain.get("id") or "").strip()
+            binding = str(chain.get("binding") or "").strip()
+            if chain_id and binding:
+                out[chain_id].extend(_parse_binding_string(binding))
+    return {cid: sorted(set(vals)) for cid, vals in out.items() if vals}
+
+def _resolve_config_path(target_dir: Path, ep_name: str, idx_map: Dict[str, int]) -> Optional[Path]:
+    candidates: List[Path] = []
+    if ep_name:
+        candidates.append(target_dir / "configs" / ep_name / "boltzgen_config.yaml")
+    ep_idx = idx_map.get(ep_name)
+    if ep_idx:
+        candidates.append(target_dir / "configs" / f"epitope_{ep_idx}" / "boltzgen_config.yaml")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+def _resolve_design_cif(metrics_path: Path, file_name: str, cache: Dict[str, Dict[str, Path]]) -> Optional[Path]:
+    base_dir = metrics_path.parent
+    cache_key = str(base_dir.resolve())
+    index = cache.get(cache_key)
+    if index is None:
+        index = {}
+        for cif in base_dir.rglob("*.cif"):
+            index[cif.name] = cif
+            stripped = re.sub(r"^rank\\d+_", "", cif.name)
+            index.setdefault(stripped, cif)
+        cache[cache_key] = index
+    return index.get(file_name) or index.get(re.sub(r"^rank\\d+_", "", file_name))
+
+def _min_distance(coords_a: List[Tuple[float, float, float]], coords_b: List[Tuple[float, float, float]]) -> Optional[float]:
+    if not coords_a or not coords_b:
+        return None
+    best = None
+    for ax, ay, az in coords_a:
+        for bx, by, bz in coords_b:
+            dx = ax - bx
+            dy = ay - by
+            dz = az - bz
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if best is None or dist < best:
+                best = dist
+    return best
+
 def build_boltzgen_diversity_report(
     *,
     include_binders: bool = False,
@@ -1862,6 +2187,10 @@ def build_boltzgen_diversity_report(
     seen_metrics: set[str] = set()
     metrics_files: List[Dict[str, str]] = []
     epitope_residues: Dict[str, Dict[str, str]] = defaultdict(dict)
+    epitope_index_map: Dict[str, Dict[str, int]] = defaultdict(dict)
+    cif_chain_cache: Dict[str, Dict[str, dict]] = {}
+    cif_index_cache: Dict[str, Dict[str, Path]] = {}
+    binding_cache: Dict[str, Dict[str, List[int]]] = {}
 
     for pdb_dir in sorted(targets_dir.iterdir()):
         if not pdb_dir.is_dir():
@@ -1876,6 +2205,15 @@ def build_boltzgen_diversity_report(
                 data = json.loads(stats_file.read_text())
                 dir_name = stats_file.parent.name
                 ep_name = str(data.get("epitope_name") or "").strip() or dir_name
+                raw_index = data.get("epitope_index")
+                try:
+                    ep_index = int(raw_index) if raw_index is not None else None
+                except (TypeError, ValueError):
+                    ep_index = None
+                if ep_index:
+                    epitope_index_map[pdb_id][ep_name] = ep_index
+                    if dir_name:
+                        epitope_index_map[pdb_id][dir_name] = ep_index
                 residues = data.get("hotspots")
                 residues = [str(r).strip() for r in residues if str(r).strip()]
                 if residues:
@@ -1948,6 +2286,59 @@ def build_boltzgen_diversity_report(
                             record.setdefault("epitope_name", epitope_name)
                             record.setdefault("datetime", run_label)
                             record.setdefault("source_path", str(metrics_path))
+                            record.setdefault("binder_chain_id", None)
+                            record.setdefault("binder_chain_match", None)
+                            record.setdefault("antigen_chain_id", None)
+                            record.setdefault("hotspot_residue_count", None)
+                            record.setdefault("hotspot_residue_found", None)
+                            record.setdefault("binder_hotspot_min_dist", None)
+
+                            designed_seq = row.get("designed_chain_sequence") or row.get("designed_sequence") or ""
+                            file_name = str(row.get("file_name") or "").strip()
+                            cif_path = None
+                            if file_name:
+                                cif_path = _resolve_design_cif(metrics_path, file_name, cif_index_cache)
+                            if cif_path and cif_path.exists():
+                                cache_key = str(cif_path.resolve())
+                                chain_data = cif_chain_cache.get(cache_key)
+                                if chain_data is None:
+                                    chain_data = _load_cif_chain_data(cif_path)
+                                    cif_chain_cache[cache_key] = chain_data
+                                binder_chain_id, binder_score = _pick_chain_by_sequence(chain_data, designed_seq)
+                                if binder_chain_id:
+                                    record["binder_chain_id"] = binder_chain_id
+                                if binder_score is not None:
+                                    record["binder_chain_match"] = round(float(binder_score), 4)
+
+                                config_path = _resolve_config_path(
+                                    pdb_dir,
+                                    epitope_name,
+                                    epitope_index_map.get(pdb_id, {}),
+                                )
+                                if config_path and config_path.exists():
+                                    config_key = str(config_path.resolve())
+                                    binding_info = binding_cache.get(config_key)
+                                    if binding_info is None:
+                                        binding_info = _load_binding_types(config_path)
+                                        binding_cache[config_key] = binding_info
+                                    if binding_info:
+                                        antigen_chain_id = sorted(binding_info.keys())[0]
+                                        binding_residues = binding_info.get(antigen_chain_id, [])
+                                        record["antigen_chain_id"] = antigen_chain_id
+                                        record["hotspot_residue_count"] = len(binding_residues)
+                                        if binder_chain_id and antigen_chain_id in chain_data:
+                                            binder_coords = chain_data[binder_chain_id]["coords"]
+                                            res_map_label = chain_data[antigen_chain_id].get("res_map_label") or {}
+                                            res_map_auth = chain_data[antigen_chain_id].get("res_map_auth") or {}
+                                            res_map = res_map_label or chain_data[antigen_chain_id].get("res_map") or {}
+                                            hotspot_coords = [res_map.get(res) for res in binding_residues if res in res_map]
+                                            if not hotspot_coords and res_map_auth:
+                                                hotspot_coords = [res_map_auth.get(res) for res in binding_residues if res in res_map_auth]
+                                            hotspot_coords = [c for c in hotspot_coords if c is not None]
+                                            record["hotspot_residue_found"] = len(hotspot_coords)
+                                            min_dist = _min_distance(binder_coords, hotspot_coords)
+                                            if min_dist is not None:
+                                                record["binder_hotspot_min_dist"] = round(min_dist, 3)
                             aggregate_rows.append(record)
 
                             rmsd_val = _safe_float(row.get("filter_rmsd") or row.get("native_rmsd"))
@@ -2049,20 +2440,9 @@ def build_boltzgen_diversity_report(
     html_sections: List[str] = []
     cmap = plt.get_cmap("tab20")
     global_target_means: List[tuple[str, float, float, int]] = []
+    global_target_medians: List[tuple[str, float, float, int]] = []
+    global_target_p99: List[tuple[str, float, float, int]] = []
 
-    def _style_scatter(ax) -> None:
-        ax.set_facecolor("#ffffff")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        for spine in ("left", "bottom"):
-            ax.spines[spine].set_color("#334155")
-            ax.spines[spine].set_linewidth(0.8)
-        ax.tick_params(colors="#334155", labelsize=9)
-        ax.grid(True, alpha=0.2, linewidth=0.6)
-        try:
-            ax.set_box_aspect(1)
-        except Exception:
-            pass
 
     for pdb_id, ep_data in metrics.items():
         ep_names = sorted(ep_data.keys())
@@ -2215,6 +2595,236 @@ def build_boltzgen_diversity_report(
                     len(all_rmsd),
                 )
             )
+            global_target_medians.append(
+                (
+                    pdb_id,
+                    float(statistics.median(all_rmsd)),
+                    float(statistics.median(all_iptm)),
+                    len(all_rmsd),
+                )
+            )
+            global_target_p99.append(
+                (
+                    pdb_id,
+                    _percentile(all_rmsd, 1.0),
+                    _percentile(all_iptm, 99.0),
+                    len(all_rmsd),
+                )
+            )
+
+    top_inserted = 0
+    # Scatter across all targets: per-epitope 1st percentile RMSD vs 99th percentile ipTM.
+    epitope_points: List[tuple[str, str, float, float, str]] = []
+    target_rows = {pdb_id: idx + 1 for idx, pdb_id in enumerate(sorted(metrics.keys()))}
+    for pdb_id, ep_data in metrics.items():
+        row_idx = target_rows.get(pdb_id, 0)
+        idx_map = epitope_index_map.get(pdb_id, {})
+        for ep_name, ep_vals in ep_data.items():
+            rmsd_vals = [float(v) for v in (ep_vals.get("rmsd") or []) if v is not None]
+            iptm_vals = [float(v) for v in (ep_vals.get("iptm") or []) if v is not None]
+            if not rmsd_vals or not iptm_vals:
+                continue
+            ep_index = idx_map.get(ep_name)
+            if ep_index is None:
+                match = re.match(r"^epitope_(\d+)$", str(ep_name).strip(), flags=re.IGNORECASE)
+                if match:
+                    try:
+                        ep_index = int(match.group(1))
+                    except (TypeError, ValueError):
+                        ep_index = None
+            label = f"#{row_idx}.{ep_index if ep_index is not None else '?'}"
+            epitope_points.append(
+                (
+                    pdb_id,
+                    ep_name,
+                    _percentile(rmsd_vals, 1.0),
+                    _percentile(iptm_vals, 99.0),
+                    label,
+                )
+            )
+
+    if epitope_points:
+        point_count = len(epitope_points)
+        fig_w = max(14, min(36, 10 + point_count * 0.01))
+        fig_h = max(12, min(30, 8 + point_count * 0.008))
+        font_size = 6 if point_count > 300 else 7
+        fig_epi, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+        xs = [pt[2] for pt in epitope_points]
+        ys = [pt[3] for pt in epitope_points]
+        ax.scatter(xs, ys, s=60, alpha=0.55, color="#2563eb", edgecolors="none")
+        for _, _, x, y, label in epitope_points:
+            ax.text(x, y, label, fontsize=font_size, ha="center", va="center", color="#0f172a")
+        ax.set_title(
+            "1st percentile RMSD vs 99th percentile ipTM (one point per epitope, all targets)",
+            fontsize=12,
+            fontweight="semibold",
+        )
+        ax.set_xlabel("1st percentile RMSD (Å)")
+        ax.set_ylabel("99th percentile ipTM")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(left=0.0)
+        _style_scatter(ax)
+        plt.tight_layout()
+
+        epi_png = out_dir / f"boltzgen_global_epitope_p01_p99_{timestamp}.png"
+        epi_svg = out_dir / f"boltzgen_global_epitope_p01_p99_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_epi.savefig(epi_png, dpi=220)
+            fig_epi.savefig(epi_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[boltzgen-diversity] failed to save epitope percentile scatter plot: {epi_png} / {epi_svg}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_epi)
+
+        if saved_ok:
+            epi_plot = BoltzgenDiversityPlot(
+                pdb_id="Per-epitope p01/p99 scatter (all targets)",
+                png_name=epi_png.name,
+                png_path=str(epi_png),
+                svg_name=epi_svg.name,
+                svg_path=str(epi_svg),
+                epitope_colors={},
+            )
+            plot_entries.insert(0, epi_plot)
+            top_inserted += 1
+        try:
+            encoded = base64.b64encode(epi_png.read_bytes()).decode("ascii")
+            html_sections.insert(
+                0,
+                "<section><h2>1st percentile RMSD vs 99th percentile ipTM (one point per epitope, all targets)</h2>"
+                "<p>Dots labeled as #row.epitope_index from the target order in this report.</p>"
+                f"<img alt='All targets epitope scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+            )
+        except Exception as exc:
+            print(f"[boltzgen-diversity] failed to embed epitope percentile scatter into HTML: {epi_png}")
+            print(exc)
+            traceback.print_exc()
+
+    # Scatter across targets: 99th percentile RMSD vs 99th percentile ipTM per target.
+    if global_target_p99:
+        fig_p99, ax = plt.subplots(1, 1, figsize=(6, 6))
+        for idx, (pdb_id, p99_rmsd, p99_iptm, count) in enumerate(sorted(global_target_p99, key=lambda t: t[0])):
+            color = mcolors.to_hex(cmap(idx / max(1, len(global_target_p99))))
+            ax.scatter(
+                p99_rmsd,
+                p99_iptm,
+                s=60,
+                alpha=0.85,
+                color=color,
+                label=f"{pdb_id} (n={count})",
+                edgecolors="none",
+            )
+        ax.set_title("1st percentile RMSD vs 99th percentile ipTM (one point per target)", fontsize=11, fontweight="semibold")
+        ax.set_xlabel("1st percentile RMSD (Å)")
+        ax.set_ylabel("99th percentile ipTM")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(left=0.0)
+        _style_scatter(ax)
+        ax.legend(loc="best", fontsize=8, frameon=False)
+        plt.tight_layout()
+
+        p99_png = out_dir / f"boltzgen_global_p99_scatter_{timestamp}.png"
+        p99_svg = out_dir / f"boltzgen_global_p99_scatter_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_p99.savefig(p99_png, dpi=200)
+            fig_p99.savefig(p99_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[boltzgen-diversity] failed to save p99 scatter plot: {p99_png} / {p99_svg}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_p99)
+
+        if saved_ok:
+            p99_plot = BoltzgenDiversityPlot(
+                pdb_id="1st percentile RMSD vs 99th percentile ipTM (one point per target)",
+                png_name=p99_png.name,
+                png_path=str(p99_png),
+                svg_name=p99_svg.name,
+                svg_path=str(p99_svg),
+                epitope_colors={},
+            )
+            plot_entries.insert(top_inserted, p99_plot)
+            top_inserted += 1
+        try:
+            encoded = base64.b64encode(p99_png.read_bytes()).decode("ascii")
+            html_sections.insert(
+                top_inserted - 1,
+                "<section><h2>1st percentile RMSD vs 99th percentile ipTM (one point per target)</h2>"
+                "<p>One point per target, RMSD at 1st percentile and ipTM at 99th percentile across all designs.</p>"
+                f"<img alt='All targets p99 scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+            )
+        except Exception as exc:
+            print(f"[boltzgen-diversity] failed to embed p99 scatter into HTML: {p99_png}")
+            print(exc)
+            traceback.print_exc()
+
+    # Scatter across targets: median RMSD vs median ipTM per target (one dot per antigen).
+    if global_target_medians:
+        fig_median, ax = plt.subplots(1, 1, figsize=(6, 6))
+        for idx, (pdb_id, med_rmsd, med_iptm, count) in enumerate(sorted(global_target_medians, key=lambda t: t[0])):
+            color = mcolors.to_hex(cmap(idx / max(1, len(global_target_medians))))
+            ax.scatter(
+                med_rmsd,
+                med_iptm,
+                s=60,
+                alpha=0.85,
+                color=color,
+                label=f"{pdb_id} (n={count})",
+                edgecolors="none",
+            )
+        ax.set_title("Median RMSD vs Median ipTM (one point per target)", fontsize=11, fontweight="semibold")
+        ax.set_xlabel("Median RMSD (Å)")
+        ax.set_ylabel("Median ipTM")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(left=0.0)
+        _style_scatter(ax)
+        ax.legend(loc="best", fontsize=8, frameon=False)
+        plt.tight_layout()
+
+        median_png = out_dir / f"boltzgen_global_median_scatter_{timestamp}.png"
+        median_svg = out_dir / f"boltzgen_global_median_scatter_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_median.savefig(median_png, dpi=200)
+            fig_median.savefig(median_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[boltzgen-diversity] failed to save median scatter plot: {median_png} / {median_svg}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_median)
+
+        if saved_ok:
+            median_plot = BoltzgenDiversityPlot(
+                pdb_id="Median RMSD vs Median ipTM (one point per target)",
+                png_name=median_png.name,
+                png_path=str(median_png),
+                svg_name=median_svg.name,
+                svg_path=str(median_svg),
+                epitope_colors={},
+            )
+            plot_entries.insert(top_inserted, median_plot)
+            top_inserted += 1
+        try:
+            encoded = base64.b64encode(median_png.read_bytes()).decode("ascii")
+            html_sections.insert(
+                top_inserted - 1,
+                "<section><h2>Median RMSD vs Median ipTM (one point per target)</h2>"
+                "<p>One point per target, median across all designs.</p>"
+                f"<img alt='All targets median scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+            )
+        except Exception as exc:
+            print(f"[boltzgen-diversity] failed to embed median scatter into HTML: {median_png}")
+            print(exc)
+            traceback.print_exc()
 
     # Scatter across targets: mean RMSD vs mean ipTM per target (one dot per antigen).
     if global_target_means:
@@ -2255,18 +2865,18 @@ def build_boltzgen_diversity_report(
 
         if saved_ok:
             global_plot = BoltzgenDiversityPlot(
-                    pdb_id="Mean RMSD vs Mean ipTM (one point per target)",
-                    png_name=global_png.name,
-                    png_path=str(global_png),
-                    svg_name=global_svg.name,
-                    svg_path=str(global_svg),
-                    epitope_colors={},
-                )
-            plot_entries.insert(0, global_plot)
+                pdb_id="Mean RMSD vs Mean ipTM (one point per target)",
+                png_name=global_png.name,
+                png_path=str(global_png),
+                svg_name=global_svg.name,
+                svg_path=str(global_svg),
+                epitope_colors={},
+            )
+            plot_entries.insert(top_inserted, global_plot)
         try:
             encoded = base64.b64encode(global_png.read_bytes()).decode("ascii")
             html_sections.insert(
-                0,
+                top_inserted,
                 "<section><h2>Mean RMSD vs Mean ipTM (one point per target)</h2>"
                 "<p>One point per target, averaged across all designs.</p>"
                 f"<img alt='All targets scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
@@ -2378,11 +2988,22 @@ def _load_binder_rows_from_csv(
             cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
             binding_label = cfg_meta.get("binding_label")
             include_label = cfg_meta.get("include_label")
+            binder_seq = (
+                raw.get("designed_chain_sequence")
+                or raw.get("designed_sequence")
+                or raw.get("binder_seq")
+                or raw.get("binder_sequence")
+                or raw.get("binder_sequence_aa")
+                or raw.get("aa_seq")
+                or raw.get("sequence_aa")
+                or raw.get("sequence")
+            )
             hotspot_dist = _min_hotspot_distance(
                 binding_label=binding_label,
                 include_label=include_label,
                 design_path=design_path,
                 target_path=target_path,
+                binder_seq=str(binder_seq).strip() if binder_seq else None,
             )
 
             all_rows.append(
