@@ -128,9 +128,8 @@
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
-                  <button type="button" id="boltz-rerun-missing" class="ghost">Re-run missing PyMOL</button>
-                  <button type="button" id="boltz-config-regenerate" class="ghost">Regenerate configs</button>
-                  <button type="button" id="boltz-config-refresh" class="ghost">Refresh configs</button>
+                  <button type="button" id="boltz-config-regenerate" class="ghost">Rebuild configs</button>
+                  <button type="button" id="boltz-config-refresh" class="ghost">Reload configs</button>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-show-run-range" class="ghost">Show run command (rows)</button>
@@ -362,11 +361,11 @@
       <div class="modal-backdrop" data-close="boltz-regenerate-range"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3>Regenerate configs · rows</h3>
+          <h3>Rebuild configs · rows</h3>
           <button type="button" id="boltz-regenerate-range-close" class="ghost">Close</button>
         </div>
         <div style="padding: 12px 0;">
-          <p class="help-text" style="margin-top: 0;">Choose a row range to regenerate BoltzGen configs using the Epitope design num value.</p>
+          <p class="help-text" style="margin-top: 0;">Choose a row range to rebuild BoltzGen configs using the Epitope design num value.</p>
           <div class="flex-row" style="gap: 10px; align-items: center; flex-wrap: wrap;">
             <label>Row start
               <input type="number" id="boltz-regenerate-range-start" placeholder="Start" min="1">
@@ -378,7 +377,7 @@
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-regenerate-range-cancel" class="ghost">Cancel</button>
-          <button type="button" id="boltz-regenerate-range-confirm">Regenerate</button>
+          <button type="button" id="boltz-regenerate-range-confirm">Rebuild</button>
         </div>
       </div>
     </div>

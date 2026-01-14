@@ -72,8 +72,6 @@ const el = {
   boltzRegenerate: document.querySelector('#boltz-config-regenerate'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
-  boltzRerunPipeline: document.querySelector('#boltz-rerun-pipeline'),
-  boltzRerunMissing: document.querySelector('#boltz-rerun-missing'),
   boltzRerunRange: document.querySelector('#boltz-rerun-range'),
   boltzShowRunRange: document.querySelector('#boltz-show-run-range'),
   boltzRerunRangeModal: document.querySelector('#boltz-rerun-range-modal'),
@@ -1555,7 +1553,7 @@ async function submitRegenerateRangeModal(triggerBtn = null) {
     el.boltzRegenerateRangeStart,
     el.boltzRegenerateRangeEnd,
     targets,
-    'regenerate',
+    'rebuild',
   );
   if (!range) return;
   const slice = range.slice;
@@ -1671,16 +1669,12 @@ function renderBoltzConfigs() {
   const tbody = el.boltzTable;
   tbody.innerHTML = '';
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
-  if (el.boltzRerunMissing) {
-    const missing = targets.filter((t) => t && t.pdb_id && t.has_prep === false);
-    el.boltzRerunMissing.hidden = missing.length === 0;
-  }
   if (!targets.length) {
     const emptyRow = document.createElement('tr');
     const emptyCell = document.createElement('td');
     emptyCell.colSpan = 7;
     emptyCell.className = 'empty-note';
-    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV and click Preview CSV or Refresh configs to load.';
+    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV and click Preview CSV or Reload configs to load.';
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
     if (el.boltzSummary) el.boltzSummary.hidden = true;
@@ -1994,14 +1988,14 @@ async function regenerateBoltzConfigs(options = {}) {
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Failed to regenerate configs (${res.status})`);
+      throw new Error(detail.detail || `Failed to rebuild configs (${res.status})`);
     }
     const body = await res.json();
     const results = Array.isArray(body.results) ? body.results : [];
     const ok = results.filter((row) => row && row.status === 'ok');
     const skipped = results.filter((row) => row && row.status === 'skipped');
     const failed = results.filter((row) => row && row.status === 'error');
-    let message = `Regenerated configs for ${ok.length} target${ok.length === 1 ? '' : 's'}.`;
+    let message = `Rebuilt configs for ${ok.length} target${ok.length === 1 ? '' : 's'}.`;
     if (skipped.length) message += ` Skipped ${skipped.length}.`;
     if (failed.length) message += ` Failed ${failed.length}.`;
     showAlert(message, failed.length > 0);
@@ -2009,7 +2003,7 @@ async function regenerateBoltzConfigs(options = {}) {
       await loadBoltzConfigs({ silent: true });
     }
   } catch (err) {
-    showAlert(err.message || 'Failed to regenerate BoltzGen configs.');
+    showAlert(err.message || 'Failed to rebuild BoltzGen configs.');
   } finally {
     if (activeBtn) activeBtn.disabled = false;
   }
@@ -2942,13 +2936,6 @@ function init() {
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
-  if (el.boltzRerunMissing) {
-    el.boltzRerunMissing.addEventListener('click', () => {
-      const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
-      const missing = targets.filter((t) => t && t.pdb_id && t.has_prep === false);
-      openPipelineRerunModalBulk(missing);
-    });
-  }
   if (el.boltzRerunRange) {
     el.boltzRerunRange.addEventListener('click', openPipelineRerunRangeModal);
   }

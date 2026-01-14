@@ -1592,6 +1592,7 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
+_BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
@@ -1620,6 +1621,89 @@ def _write_diversity_cache(out_dir: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except Exception as exc:
         print(f"[boltzgen-diversity] warn: failed to write cache manifest: {exc}")
+
+
+def _binder_cache_path(out_dir: Path) -> Path:
+    return out_dir / _BINDER_CACHE_NAME
+
+
+def _load_binder_cache(out_dir: Path, csv_path: Path) -> Optional[dict]:
+    path = _binder_cache_path(out_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("csv_name") != csv_path.name:
+        return None
+    try:
+        cached_mtime = float(data.get("csv_mtime") or 0)
+        cached_size = int(data.get("csv_size") or 0)
+    except (TypeError, ValueError):
+        return None
+    try:
+        stat = csv_path.stat()
+    except OSError:
+        return None
+    if stat.st_mtime != cached_mtime or stat.st_size != cached_size:
+        return None
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        return None
+    return data
+
+
+def _write_binder_cache(out_dir: Path, csv_path: Path, rows: Sequence[BoltzgenBinderRow]) -> None:
+    try:
+        stat = csv_path.stat()
+    except OSError:
+        return
+    payload = {
+        "csv_name": csv_path.name,
+        "csv_mtime": stat.st_mtime,
+        "csv_size": stat.st_size,
+        "generated_at": time.time(),
+        "rows": [row.dict() for row in rows],
+    }
+    path = _binder_cache_path(out_dir)
+    try:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as exc:
+        print(f"[boltzgen-binders] warn: failed to write cache manifest: {exc}")
+
+
+def _get_cached_binder_rows(
+    csv_path: Path,
+    *,
+    ids: Optional[List[str]] = None,
+    page: int = 1,
+    page_size: int = 100,
+    out_dir: Optional[Path] = None,
+) -> Tuple[List[BoltzgenBinderRow], int]:
+    out_dir = out_dir or _output_dir()
+    cache = _load_binder_cache(out_dir, csv_path)
+    rows: List[dict]
+    if cache:
+        rows = [row for row in cache.get("rows") if isinstance(row, dict)]
+    else:
+        all_rows = _load_binder_rows_from_csv(csv_path, ids=None, compute_hotspot_distance=False)
+        _write_binder_cache(out_dir, csv_path, all_rows)
+        rows = [row.dict() for row in all_rows]
+
+    if ids:
+        wanted = {p.strip().upper() for p in ids if p and str(p).strip()}
+        rows = [row for row in rows if str(row.get("pdb_id") or "").strip().upper() in wanted]
+
+    total = len(rows)
+    page_val = max(1, int(page))
+    page_size_val = min(200, max(1, int(page_size)))
+    start = (page_val - 1) * page_size_val
+    end = start + page_size_val
+    page_rows = [BoltzgenBinderRow(**row) for row in rows[start:end]]
+    return page_rows, total
 
 
 def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
@@ -1685,11 +1769,13 @@ def _response_from_diversity_cache(
             for entry in metrics_files
             if entry.get("pdb_id")
         })
-        binder_rows_all = _load_binder_rows_from_csv(csv_path, ids=binder_ids)
-        binder_total = len(binder_rows_all)
-        start = (page_val - 1) * page_size_val
-        end = start + page_size_val
-        binder_rows = binder_rows_all[start:end]
+        binder_rows, binder_total = _get_cached_binder_rows(
+            csv_path,
+            ids=binder_ids,
+            page=page_val,
+            page_size=page_size_val,
+            out_dir=out_dir,
+        )
         binder_msg = (
             f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
         )
@@ -2555,11 +2641,13 @@ def build_boltzgen_diversity_report(
     binder_msg: Optional[str] = None
     if include_binders:
         binder_ids = sorted({entry.get("pdb_id", "").strip().upper() for entry in metrics_files if entry.get("pdb_id")})
-        binder_rows_all = _load_binder_rows_from_csv(csv_path, ids=binder_ids)
-        binder_total = len(binder_rows_all)
-        start = (page_val - 1) * page_size_val
-        end = start + page_size_val
-        binder_rows = binder_rows_all[start:end]
+        binder_rows, binder_total = _get_cached_binder_rows(
+            csv_path,
+            ids=binder_ids,
+            page=page_val,
+            page_size=page_size_val,
+            out_dir=out_dir,
+        )
         binder_msg = (
             f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
         )
@@ -3111,6 +3199,7 @@ def _load_binder_rows_from_csv(
     csv_path: Path,
     *,
     ids: Optional[List[str]] = None,
+    compute_hotspot_distance: bool = True,
 ) -> List[BoltzgenBinderRow]:
     wanted = [p.strip().upper() for p in (ids or []) if p and str(p).strip()]
     wanted_set = set(wanted)
@@ -3166,23 +3255,25 @@ def _load_binder_rows_from_csv(
             cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
             binding_label = cfg_meta.get("binding_label")
             include_label = cfg_meta.get("include_label")
-            binder_seq = (
-                raw.get("designed_chain_sequence")
-                or raw.get("designed_sequence")
-                or raw.get("binder_seq")
-                or raw.get("binder_sequence")
-                or raw.get("binder_sequence_aa")
-                or raw.get("aa_seq")
-                or raw.get("sequence_aa")
-                or raw.get("sequence")
-            )
-            hotspot_dist = _min_hotspot_distance(
-                binding_label=binding_label,
-                include_label=include_label,
-                design_path=design_path,
-                target_path=target_path,
-                binder_seq=str(binder_seq).strip() if binder_seq else None,
-            )
+            hotspot_dist = None
+            if compute_hotspot_distance:
+                binder_seq = (
+                    raw.get("designed_chain_sequence")
+                    or raw.get("designed_sequence")
+                    or raw.get("binder_seq")
+                    or raw.get("binder_sequence")
+                    or raw.get("binder_sequence_aa")
+                    or raw.get("aa_seq")
+                    or raw.get("sequence_aa")
+                    or raw.get("sequence")
+                )
+                hotspot_dist = _min_hotspot_distance(
+                    binding_label=binding_label,
+                    include_label=include_label,
+                    design_path=design_path,
+                    target_path=target_path,
+                    binder_seq=str(binder_seq).strip() if binder_seq else None,
+                )
 
             all_rows.append(
                 BoltzgenBinderRow(
@@ -3231,14 +3322,16 @@ def list_boltzgen_binders(
             message=f"Aggregated metrics CSV missing: {csv_path}", page=page, page_size=page_size
         )
 
-    all_rows = _load_binder_rows_from_csv(csv_path, ids=ids)
-    total_rows = len(all_rows)
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_rows = all_rows[start:end]
+    page_rows, total_rows = _get_cached_binder_rows(
+        csv_path,
+        ids=ids,
+        page=page,
+        page_size=page_size,
+        out_dir=_output_dir(),
+    )
 
     message = report.message
-    if not all_rows:
+    if total_rows == 0:
         message = report.message or "No BoltzGen metrics detected for the requested targets."
     else:
         message = f"Showing {len(page_rows)} of {total_rows} binders"
