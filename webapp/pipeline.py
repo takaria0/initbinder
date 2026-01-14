@@ -337,7 +337,7 @@ def init_decide_prep(
             decide_args_base.append("--force")
         if num_epitopes is not None and num_epitopes > 0:
             expected = int(num_epitopes)
-            llm_retries = 100
+            llm_retries = 10
             decide_args_base.extend(["--expected_epitopes", str(expected)])
             decide_args_base.extend(["--max_llm_retries", str(llm_retries)])
             job_store.append_log(job_id, f"[decide-scope] expecting {expected} epitopes with retrys up to {llm_retries}")

@@ -104,6 +104,16 @@ except Exception as e:
     MAX_BODY_CHARS_PER_PAGE = 10_000
     MAX_BODY_TOTAL_CHARS = 1_000_000
 
+# OpenAI configuration (optional)
+try:
+    from env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER
+except Exception:
+    _OPENAI_API_KEY = None
+    _LLM_PROVIDER = None
+OPENAI_API_KEY = _OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+LLM_PROVIDER = str((_LLM_PROVIDER or os.getenv("LLM_PROVIDER", ""))).strip().lower()
+OPENAI_FLASH_MODEL_NAME = os.getenv("OPENAI_FLASH_MODEL_NAME", "gpt-4o-mini")
+
 # Groq fallback for LLM Flash (vendor parsing)
 try:
     from env import GROQ_API_KEY as _GROQ_API_KEY
@@ -116,6 +126,13 @@ if not USE_LLM and GROQ_API_KEY:
     USE_LLM = True
     GEMINI_AVAILABLE = False
     print("[info] Google GenAI unavailable; falling back to Groq for vendor LLM parsing.")
+
+if LLM_PROVIDER == "openai":
+    if OPENAI_API_KEY:
+        USE_LLM = True
+    else:
+        USE_LLM = False
+        print("[warn] LLM_PROVIDER=openai but OPENAI_API_KEY is missing; LLM disabled.")
 
 # --- Vendor connectors ---
 try:
@@ -452,6 +469,63 @@ def _safe_json_loads(text: str):
     except Exception:
         return None
 
+def _openai_flash_json(prompt: str) -> Optional[dict]:
+    """JSON extractor using OpenAI chat completions."""
+    api_key = OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        log_info("[warn] OPENAI_API_KEY not set; OpenAI LLM disabled.")
+        return None
+    try:
+        try:
+            from openai import OpenAI
+        except Exception as exc:
+            log_info(f"[warn] openai package not available: {exc}")
+            return None
+
+        client = OpenAI(api_key=api_key)
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an extraction model. Reply with ONLY valid JSON matching the requested fields. No markdown, no prose.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            completion = client.chat.completions.create(
+                model=OPENAI_FLASH_MODEL_NAME,
+                temperature=0.1,
+                max_tokens=1024,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 429:
+                log_info("[warn] OpenAI flash hit 429; backing off for 10s.")
+                time.sleep(10)
+                return None
+            log_info(f"[warn] OpenAI JSON mode failed; retrying without response_format: {exc}")
+            try:
+                completion = client.chat.completions.create(
+                    model=OPENAI_FLASH_MODEL_NAME,
+                    temperature=0.1,
+                    max_tokens=1024,
+                    messages=messages,
+                )
+            except Exception as exc2:
+                if getattr(exc2, "status_code", None) == 429:
+                    log_info("[warn] OpenAI flash hit 429; backing off for 10s.")
+                    time.sleep(10)
+                    return None
+                raise
+
+        content = (completion.choices[0].message.content or "").strip()
+        if not content:
+            return None
+        return _safe_json_loads(content)
+    except Exception as e:
+        log_info(f"[error] OpenAI flash JSON parse failed: {e}")
+        return None
+
 def _groq_flash_json(prompt: str) -> Optional[dict]:
     """Fallback JSON extractor using Groq chat completions."""
     groq_key = GROQ_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
@@ -502,6 +576,12 @@ def _groq_flash_json(prompt: str) -> Optional[dict]:
 def _llm_flash_json(prompt: str):
     if not USE_LLM:
         return None
+
+    provider = (LLM_PROVIDER or "").lower().strip()
+    if provider == "openai":
+        return _openai_flash_json(prompt)
+    if provider == "groq":
+        return _groq_flash_json(prompt)
 
     # Build schema/config when Gemini is available so we keep the stricter JSON contract.
     SCHEMA_BATCH = None

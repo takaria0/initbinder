@@ -35,7 +35,7 @@ from utils import (
     UNIPROT_IDMAPPING_STATUS_API,
     UNIPROT_API,
 )
-from env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY
+from env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
 
 # ====== HF cache (あなたの指定どおり。env.py に HF_ROOT があればそれを優先) ======
 try:
@@ -682,9 +682,33 @@ def _call_llm_provider_once(
     prompt: str,
     max_new_tokens: int,
     groq_key: Optional[str],
+    openai_key: Optional[str],
 ) -> str:
     """One-shot provider call (no retries/validation)."""
     provider = (provider or "").lower().strip()
+
+    if provider == "openai":
+        openai_api_key = openai_key or os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for LLM_PROVIDER=openai")
+
+        try:
+            from openai import OpenAI
+        except Exception as exc:
+            raise RuntimeError("openai package is required for LLM_PROVIDER=openai") from exc
+
+        client = OpenAI(api_key=openai_api_key)
+        completion = client.chat.completions.create(
+            model=model,
+            # temperature=0.1,
+            max_completion_tokens=max_new_tokens,
+            messages=[
+                {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        draft = (completion.choices[0].message.content or "").strip()
+        return draft.strip()
 
     if provider == "groq":
         groq_api_key = groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
@@ -730,7 +754,7 @@ def _call_llm_provider_once(
         return (response.text or "").strip()
 
     # Preserve original behavior: unsupported providers are explicit errors.
-    raise RuntimeError(f"Unsupported LLM_PROVIDER '{provider}'. Use 'groq' or 'gemini'.")
+    raise RuntimeError(f"Unsupported LLM_PROVIDER '{provider}'. Use 'openai', 'groq', or 'gemini'.")
 
 def _run_scope_llm_with_retries(
     compose_prompt: Callable[[str], str],
@@ -741,6 +765,7 @@ def _run_scope_llm_with_retries(
     max_new_tokens: int,
     max_llm_retries: int,
     groq_key: Optional[str],
+    openai_key: Optional[str],
     schema: dict,
     expected_epitopes: Optional[int],
 ) -> tuple[dict, str, int, str, str]:
@@ -761,6 +786,7 @@ def _run_scope_llm_with_retries(
 
     for attempt in range(max(0, max_llm_retries) + 1):
         attempts_used = attempt + 1
+        print(f"[info] LLM attempt {attempt + 1}/{max(0, max_llm_retries) + 1}")
         final_prompt = compose_prompt(retry_extra)
         last_prompt = final_prompt
 
@@ -783,6 +809,7 @@ def _run_scope_llm_with_retries(
                 prompt=final_prompt,
                 max_new_tokens=max_new_tokens,
                 groq_key=groq_key,
+                openai_key=openai_key,
             )
         except Exception as exc:
             last_error = exc
@@ -790,12 +817,17 @@ def _run_scope_llm_with_retries(
                 raise
 
             delay = min(60, 5 * (attempt + 1))
-            status = getattr(getattr(exc, "response", None), "status_code", None) if hasattr(exc, "response") else None
+            response = getattr(exc, "response", None) if hasattr(exc, "response") else None
+            status = getattr(response, "status_code", None)
+            # print traceback
+            import traceback
+            traceback.print_exc()
+            if status is None:
+                status = getattr(exc, "status_code", None)
             if status == 429:
                 retry_after = None
-                resp = getattr(exc, "response", None)
-                if resp is not None:
-                    retry_after = resp.headers.get("Retry-After")
+                if response is not None:
+                    retry_after = response.headers.get("Retry-After")
                 try:
                     delay = int(retry_after) if retry_after else 0
                 except (TypeError, ValueError):
@@ -820,6 +852,7 @@ def _run_scope_llm_with_retries(
             if attempt == max(0, max_llm_retries):
                 raise RuntimeError("No YAML block returned; see reports/scope_draft_attempt_*.md")
 
+            print(f"[warn] No YAML block returned; retrying (next attempt {attempt + 2}/{max(0, max_llm_retries) + 1}).")
             retry_extra = textwrap.dedent(
                 """
                 --- CRITICAL REMINDER: YAML OUTPUT REQUIRED ---
@@ -838,6 +871,7 @@ def _run_scope_llm_with_retries(
             if attempt == max(0, max_llm_retries):
                 raise
 
+            print(f"[warn] YAML schema validation failed; retrying (next attempt {attempt + 2}/{max(0, max_llm_retries) + 1}).")
             retry_extra = textwrap.dedent(
                 """
                 --- CRITICAL REMINDER: YAML SCHEMA ---
@@ -855,6 +889,10 @@ def _run_scope_llm_with_retries(
                 if attempt == max(0, max_llm_retries):
                     raise last_error
 
+                print(
+                    f"[warn] Expected {expected_epitopes} epitopes, got {len(epi_list)}; "
+                    f"retrying (next attempt {attempt + 2}/{max(0, max_llm_retries) + 1})."
+                )
                 retry_extra = textwrap.dedent(
                     f"""
                     --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
@@ -896,8 +934,9 @@ def llm_scope(
         _llm_provider = str(getattr(_env, "LLM_PROVIDER", "gpt-oss-local")).lower()
         _max_new = int(getattr(_env, "MAX_NEW_TOKENS", "8000"))
         _groq_key = GROQ_API_KEY
+        _openai_key = OPENAI_API_KEY
     except Exception:
-        _llm_provider, _max_new, _groq_key = "gpt-oss-local", 1024, None
+        _llm_provider, _max_new, _groq_key, _openai_key = "gpt-oss-local", 1024, None, None
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
     tdir = TARGETS_ROOT_LOCAL / pdb_id.upper()
@@ -982,6 +1021,7 @@ def llm_scope(
         max_new_tokens=_max_new,
         max_llm_retries=max_llm_retries,
         groq_key=_groq_key,
+        openai_key=_openai_key,
         schema=SCHEMA,
         expected_epitopes=expected_epitopes,
     )
