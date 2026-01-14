@@ -280,6 +280,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     entries: List[PipelineEntry] = []
     pdb_token = _sanitize_token(args.pdb)
     label_token = _sanitize_token(run_label)
+    output_root_name = output_root.name
+    append_label = output_root_name not in {run_label, label_token}
     seen_tokens: set[str] = set()
     for raw_spec, spec_path in specs:
         if not spec_path.exists():
@@ -292,7 +294,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
             counter += 1
         seen_tokens.add(spec_token)
         job_name = f"boltzgen_{pdb_token}_{label_token}_{spec_token}"
-        out_dir = output_root / spec_token / run_label
+        out_dir = output_root / spec_token
+        if append_label:
+            out_dir = out_dir / run_label
         script_path = scripts_dir / f"submit_{job_name}.sh"
         entries.append(
             PipelineEntry(

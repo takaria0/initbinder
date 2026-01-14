@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import json
 import io
 import re
@@ -1590,6 +1591,125 @@ def _plots_dir(timestamp: str) -> Path:
     return out
 
 
+_DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
+_DIVERSITY_SOURCE_FILES = (
+    "all_designs_metrics.csv",
+    "epitope_stats.json",
+    "boltzgen_config.yaml",
+)
+
+
+def _diversity_cache_path(out_dir: Path) -> Path:
+    return out_dir / _DIVERSITY_CACHE_NAME
+
+
+def _load_diversity_cache(out_dir: Path) -> Optional[dict]:
+    path = _diversity_cache_path(out_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_diversity_cache(out_dir: Path, payload: dict) -> None:
+    path = _diversity_cache_path(out_dir)
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception as exc:
+        print(f"[boltzgen-diversity] warn: failed to write cache manifest: {exc}")
+
+
+def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
+    latest_mtime = 0.0
+    count = 0
+    if not targets_dir.exists():
+        return latest_mtime, count
+    for root, _, files in os.walk(targets_dir):
+        for name in files:
+            if name not in _DIVERSITY_SOURCE_FILES:
+                continue
+            path = Path(root) / name
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            count += 1
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+    return latest_mtime, count
+
+
+def _diversity_cache_is_fresh(cache: dict, latest_mtime: float, source_count: int) -> bool:
+    try:
+        cached_mtime = float(cache.get("source_mtime") or 0)
+        cached_count = int(cache.get("source_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    if source_count != cached_count:
+        return False
+    return latest_mtime <= cached_mtime
+
+
+def _response_from_diversity_cache(
+    cache: dict,
+    out_dir: Path,
+    *,
+    include_binders: bool,
+    binder_page: int,
+    binder_page_size: int,
+) -> Optional[BoltzgenDiversityResponse]:
+    csv_name = cache.get("csv_name") or None
+    csv_path = out_dir / csv_name if csv_name else None
+    if csv_path and not csv_path.exists():
+        return None
+
+    html_name = cache.get("html_name") or None
+    if html_name and not (out_dir / html_name).exists():
+        html_name = None
+
+    plots = [entry for entry in (cache.get("plots") or []) if isinstance(entry, dict)]
+    metrics_files = [entry for entry in (cache.get("metrics_files") or []) if isinstance(entry, dict)]
+    binder_counts = cache.get("binder_counts") if isinstance(cache.get("binder_counts"), dict) else {}
+
+    binder_rows: List[BoltzgenBinderRow] = []
+    binder_total = 0
+    binder_msg: Optional[str] = None
+    page_val = max(1, int(binder_page or 1))
+    page_size_val = min(200, max(1, int(binder_page_size or 100)))
+    if include_binders and csv_path:
+        binder_ids = sorted({
+            str(entry.get("pdb_id") or "").strip().upper()
+            for entry in metrics_files
+            if entry.get("pdb_id")
+        })
+        binder_rows_all = _load_binder_rows_from_csv(csv_path, ids=binder_ids)
+        binder_total = len(binder_rows_all)
+        start = (page_val - 1) * page_size_val
+        end = start + page_size_val
+        binder_rows = binder_rows_all[start:end]
+        binder_msg = (
+            f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
+        )
+
+    return BoltzgenDiversityResponse(
+        csv_name=csv_name,
+        output_dir=cache.get("output_dir") or str(out_dir),
+        html_name=html_name,
+        plots=plots,
+        metrics_files=metrics_files,
+        message=cache.get("message"),
+        binder_rows=binder_rows,
+        binder_total=binder_total,
+        binder_page=page_val if include_binders else 1,
+        binder_page_size=page_size_val if include_binders else 0,
+        binder_message=binder_msg,
+        binder_counts=binder_counts,
+    )
+
+
 def _snapshot_root() -> Path:
     cfg = load_config()
     cache_root = cfg.paths.cache_dir or (cfg.paths.workspace_root / "cache")
@@ -2178,6 +2298,21 @@ def build_boltzgen_diversity_report(
         )
 
     out_dir = _output_dir()
+    scan_result: Optional[Tuple[float, int]] = None
+    cache = _load_diversity_cache(out_dir)
+    if cache:
+        scan_result = _scan_boltzgen_sources(targets_dir)
+        if _diversity_cache_is_fresh(cache, scan_result[0], scan_result[1]):
+            cached = _response_from_diversity_cache(
+                cache,
+                out_dir,
+                include_binders=include_binders,
+                binder_page=binder_page,
+                binder_page_size=binder_page_size,
+            )
+            if cached:
+                return cached
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
     aggregate_rows: List[Dict[str, object]] = []
@@ -2361,18 +2496,33 @@ def build_boltzgen_diversity_report(
 
     binder_counts: Dict[str, int] = {}
     if not aggregate_rows:
+        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
         if metrics_files:
-            return BoltzgenDiversityResponse(
-                metrics_files=metrics_files,
-                message="Detected BoltzGen metrics files, but none could be parsed into rows (check CSV format/permissions).",
-                output_dir=str(out_dir),
-                binder_counts=binder_counts,
+            message = (
+                "Detected BoltzGen metrics files, but none could be parsed into rows "
+                "(check CSV format/permissions)."
             )
-        return BoltzgenDiversityResponse(
-            message="No BoltzGen metrics found under targets directory.",
+        else:
+            message = "No BoltzGen metrics found under targets directory."
+        response = BoltzgenDiversityResponse(
+            metrics_files=metrics_files,
+            message=message,
             output_dir=str(out_dir),
             binder_counts=binder_counts,
         )
+        _write_diversity_cache(out_dir, {
+            "csv_name": None,
+            "html_name": None,
+            "output_dir": str(out_dir),
+            "plots": [],
+            "metrics_files": metrics_files,
+            "message": message,
+            "binder_counts": binder_counts,
+            "source_mtime": source_mtime,
+            "source_count": source_count,
+            "generated_at": timestamp,
+        })
+        return response
 
     for row in aggregate_rows:
         pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
@@ -2424,7 +2574,8 @@ def build_boltzgen_diversity_report(
         print("[boltzgen-diversity] matplotlib unavailable; generated CSV only.")
         print(exc)
         traceback.print_exc()
-        return BoltzgenDiversityResponse(
+        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+        response = BoltzgenDiversityResponse(
             csv_name=csv_path.name,
             metrics_files=metrics_files,
             message="Matplotlib unavailable; generated CSV only.",
@@ -2436,6 +2587,19 @@ def build_boltzgen_diversity_report(
             binder_message=binder_msg,
             binder_counts=binder_counts,
         )
+        _write_diversity_cache(out_dir, {
+            "csv_name": csv_path.name,
+            "html_name": None,
+            "output_dir": str(out_dir),
+            "plots": [],
+            "metrics_files": metrics_files,
+            "message": "Matplotlib unavailable; generated CSV only.",
+            "binder_counts": binder_counts,
+            "source_mtime": source_mtime,
+            "source_count": source_count,
+            "generated_at": timestamp,
+        })
+        return response
 
     html_sections: List[str] = []
     cmap = plt.get_cmap("tab20")
@@ -2901,14 +3065,15 @@ def build_boltzgen_diversity_report(
         ]
     )
     html_path.write_text(html_content, encoding="utf-8")
-
-    return BoltzgenDiversityResponse(
+    source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+    message = f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets."
+    response = BoltzgenDiversityResponse(
         csv_name=csv_path.name,
         output_dir=str(out_dir),
         html_name=html_path.name,
         plots=plot_entries,
         metrics_files=metrics_files,
-        message=f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets.",
+        message=message,
         binder_rows=binder_rows,
         binder_total=binder_total,
         binder_page=page_val if include_binders else 1,
@@ -2916,6 +3081,19 @@ def build_boltzgen_diversity_report(
         binder_message=binder_msg,
         binder_counts=binder_counts,
     )
+    _write_diversity_cache(out_dir, {
+        "csv_name": csv_path.name,
+        "html_name": html_path.name,
+        "output_dir": str(out_dir),
+        "plots": [plot.dict() for plot in plot_entries],
+        "metrics_files": metrics_files,
+        "message": message,
+        "binder_counts": binder_counts,
+        "source_mtime": source_mtime,
+        "source_count": source_count,
+        "generated_at": timestamp,
+    })
+    return response
 
 
 def _binder_config_map(entries: List[dict]) -> Dict[str, dict]:

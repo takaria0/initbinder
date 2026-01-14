@@ -846,7 +846,7 @@ function renderDiversityPlots(items = []) {
     const message = (state.diversityMessage || '').trim();
     empty.textContent =
       message ||
-      'No BoltzGen diversity plots yet. Download metrics to targets/<PDB>/designs/boltzgen/*/*/final_ranked_designs/all_designs_metrics.csv, then click Refresh.';
+      'No BoltzGen diversity plots yet. Download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs), then click Refresh.';
     el.diversityGrid.appendChild(empty);
   }
   state.diversityPlots = list;
@@ -2133,6 +2133,15 @@ function runLabelFor(pdbId) {
   return `${cleanedPrefix}_${upper || 'target'}_${stamp}`;
 }
 
+function outputRootFor(baseRoot, runLabel) {
+  const cleaned = `${baseRoot || ''}`.replace(/\/$/, '');
+  if (!cleaned || !runLabel) return cleaned;
+  const parts = cleaned.split('/').filter(Boolean);
+  const last = parts[parts.length - 1] || '';
+  if (last === runLabel) return cleaned;
+  return `${cleaned}/${runLabel}`;
+}
+
 function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const upper = (pdbId || '').toUpperCase();
   const {
@@ -2148,9 +2157,10 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const cpus = boltz.cpus || '<cpus>';
   const memVal = boltz.mem_gb ?? '<mem>';
   const memLabel = Number.isFinite(memVal) ? `${memVal}G` : `${memVal}`;
-  const outputRoot = boltz.output_root
+  const outputRootBase = boltz.output_root
     ? `${boltz.output_root}`.replace(/\/$/, '')
     : `${remoteTarget}/designs/boltzgen`;
+  const outputRoot = outputRootFor(outputRootBase, runLabel);
   const cacheDir = boltz.cache_dir ? `${boltz.cache_dir}` : null;
   const extraArgs = Array.isArray(boltz.extra_args) ? boltz.extra_args : (boltz.extra_args ? [boltz.extra_args] : []);
   const specs = (specPaths && specPaths.length) ? specPaths : ['configs/*/boltzgen_config.yaml'];
@@ -2250,9 +2260,10 @@ function buildAllRunCommandsText(targets = []) {
     if (!pdb) return;
     const runLabel = runLabelFor(pdb);
     const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
-    const outputRoot = boltz.output_root
+    const outputRootBase = boltz.output_root
       ? `${boltz.output_root}`.replace(/\/$/, '')
       : `${remoteTarget}/designs/boltzgen`;
+    const outputRoot = outputRootFor(outputRootBase, runLabel);
     const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
     const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
       .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
