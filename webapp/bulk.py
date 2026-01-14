@@ -22,6 +22,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 from .alignment import AlignmentNotFoundError, compute_alignment
+from .bulk_utils import EpitopeDiversityPlotSpec, build_epitope_diversity_plots
 from .config import load_config
 from .designs import BoltzGenEngine
 from .job_store import JobStatus, JobStore, get_job_store
@@ -1592,11 +1593,13 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
+_DIVERSITY_CACHE_VERSION = 2
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
     "boltzgen_config.yaml",
+    "target.yaml",
 )
 
 
@@ -1618,6 +1621,7 @@ def _load_diversity_cache(out_dir: Path) -> Optional[dict]:
 def _write_diversity_cache(out_dir: Path, payload: dict) -> None:
     path = _diversity_cache_path(out_dir)
     try:
+        payload["cache_version"] = _DIVERSITY_CACHE_VERSION
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except Exception as exc:
         print(f"[boltzgen-diversity] warn: failed to write cache manifest: {exc}")
@@ -1727,6 +1731,8 @@ def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
 
 
 def _diversity_cache_is_fresh(cache: dict, latest_mtime: float, source_count: int) -> bool:
+    if int(cache.get("cache_version") or 0) != _DIVERSITY_CACHE_VERSION:
+        return False
     try:
         cached_mtime = float(cache.get("source_mtime") or 0)
         cached_count = int(cache.get("source_count") or 0)
@@ -2400,6 +2406,16 @@ def build_boltzgen_diversity_report(
                 return cached
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+    epitope_plot_specs: List[EpitopeDiversityPlotSpec] = []
+    try:
+        epitope_plot_specs, _, _ = build_epitope_diversity_plots(
+            targets_dir=targets_dir,
+            out_dir=out_dir,
+            timestamp=timestamp,
+            log=print,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[epitope-diversity] failed to build plots: {exc}")
 
     aggregate_rows: List[Dict[str, object]] = []
     metrics: Dict[str, Dict[str, Dict[str, List[object]]]] = defaultdict(
@@ -2580,6 +2596,33 @@ def build_boltzgen_diversity_report(
                     traceback.print_exc()
                     continue
 
+    epitope_plot_entries: List[BoltzgenDiversityPlot] = []
+    epitope_html_sections: List[str] = []
+    if epitope_plot_specs:
+        for spec in epitope_plot_specs:
+            epitope_plot_entries.append(
+                BoltzgenDiversityPlot(
+                    pdb_id=spec.title,
+                    png_name=spec.png_path.name,
+                    png_path=str(spec.png_path),
+                    svg_name=spec.svg_path.name,
+                    svg_path=str(spec.svg_path),
+                    epitope_colors={},
+                )
+            )
+            try:
+                encoded = base64.b64encode(spec.png_path.read_bytes()).decode("ascii")
+                epitope_html_sections.append(
+                    "<section>"
+                    f"<h2>{spec.title}</h2>"
+                    f"<p>{spec.description}</p>"
+                    f"<img alt='{spec.title}' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'>"
+                    "</section>"
+                )
+            except Exception as exc:
+                print(f"[epitope-diversity] failed to embed plot into HTML: {spec.png_path}")
+                print(exc)
+
     binder_counts: Dict[str, int] = {}
     if not aggregate_rows:
         source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
@@ -2595,12 +2638,13 @@ def build_boltzgen_diversity_report(
             message=message,
             output_dir=str(out_dir),
             binder_counts=binder_counts,
+            plots=epitope_plot_entries,
         )
         _write_diversity_cache(out_dir, {
             "csv_name": None,
             "html_name": None,
             "output_dir": str(out_dir),
-            "plots": [],
+            "plots": [plot.dict() for plot in epitope_plot_entries],
             "metrics_files": metrics_files,
             "message": message,
             "binder_counts": binder_counts,
@@ -2652,7 +2696,7 @@ def build_boltzgen_diversity_report(
             f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
         )
 
-    plot_entries: List[BoltzgenDiversityPlot] = []
+    plot_entries: List[BoltzgenDiversityPlot] = list(epitope_plot_entries)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -2668,6 +2712,7 @@ def build_boltzgen_diversity_report(
             metrics_files=metrics_files,
             message="Matplotlib unavailable; generated CSV only.",
             output_dir=str(out_dir),
+            plots=plot_entries,
             binder_rows=binder_rows,
             binder_total=binder_total,
             binder_page=page_val if include_binders else 1,
@@ -2679,7 +2724,7 @@ def build_boltzgen_diversity_report(
             "csv_name": csv_path.name,
             "html_name": None,
             "output_dir": str(out_dir),
-            "plots": [],
+            "plots": [plot.dict() for plot in plot_entries],
             "metrics_files": metrics_files,
             "message": "Matplotlib unavailable; generated CSV only.",
             "binder_counts": binder_counts,
@@ -2689,7 +2734,7 @@ def build_boltzgen_diversity_report(
         })
         return response
 
-    html_sections: List[str] = []
+    html_sections: List[str] = list(epitope_html_sections)
     cmap = plt.get_cmap("tab20")
     global_target_means: List[tuple[str, float, float, int]] = []
     global_target_medians: List[tuple[str, float, float, int]] = []
@@ -3146,8 +3191,20 @@ def build_boltzgen_diversity_report(
             "<style>body{font-family:Inter,system-ui,sans-serif;padding:20px;}h1{margin-top:0;}section{margin-bottom:24px;}img{border:1px solid #e2e8f0;border-radius:8px;padding:6px;background:#f8fafc;}</style>",
             "</head><body>",
             "<h1>BoltzGen binder diversity</h1>",
-            "<p>Aggregated metrics across targets and epitopes. PNG and SVG files are available alongside this HTML.",
-            "</p>",
+            "<p>Aggregated metrics across targets and epitopes. PNG and SVG files are available alongside this HTML.</p>",
+            "<section><h2>How epitopes and hotspots are selected</h2>",
+            "<p><strong>Epitopes</strong> come from the prep pipeline (decide-scope) and are stored under "
+            "<code>targets/&lt;PDB&gt;/prep/epitopes_metadata.json</code>. When that metadata is missing, "
+            "we fall back to the <code>epitopes</code> list in <code>targets/&lt;PDB&gt;/target.yaml</code>.</p>",
+            "<p><strong>Hotspots</strong> are the residue lists inside each epitope definition (or mask JSON files). "
+            "When epitope stats are generated, residues are validated against the prepared mmCIF label indexing "
+            "and out-of-range residues are dropped.</p>",
+            "<p><strong>Hotspot selection algorithm</strong> (prep-target default): choose <code>n_hotspots</code> "
+            "(default 3, clamped 1–5) deterministically, spaced evenly across the epitope residue spans. "
+            "The GUI runs prep-target in minimal mode (no SASA filtering). If prep-target is run with "
+            "<code>--check</code>, candidates are first filtered to SASA ≥ cutoff, then the same spacing logic applies.</p>",
+            "<p>The epitope diversity plots in this report use <code>target.yaml</code> residue ranges mapped onto "
+            "the PDB chain sequences.</p></section>",
             *html_sections,
             "</body></html>",
         ]
