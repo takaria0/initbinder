@@ -700,7 +700,7 @@ def _call_llm_provider_once(
         client = OpenAI(api_key=openai_api_key)
         completion = client.chat.completions.create(
             model=model,
-            # temperature=0.1,
+            temperature=0.1,
             max_completion_tokens=max_new_tokens,
             messages=[
                 {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
@@ -749,7 +749,7 @@ def _call_llm_provider_once(
         )
         response = model_client.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.2),
+            generation_config=genai.types.GenerationConfig(temperature=0.1),
         )
         return (response.text or "").strip()
 
@@ -992,8 +992,19 @@ def llm_scope(
                 ]
             )
 
+    expected_block = ""
+    if expected_epitopes is not None and expected_epitopes > 0:
+        expected_block = textwrap.dedent(
+            f"""
+            --- CRITICAL REMINDER: EXACT EPITOPE COUNT ---
+            You must propose exactly {expected_epitopes} epitopes.
+            Update your selection so that the `epitopes` list contains exactly {expected_epitopes} entries.
+            --- END CRITICAL REMINDER ---
+            """
+        ).strip()
+
     prompt_sections: List[str] = []
-    for block in (target_focus_prompt, range_constraint_prompt, guidance_block, numbering_prompt):
+    for block in (target_focus_prompt, range_constraint_prompt, expected_block, guidance_block, numbering_prompt):
         if block:
             text = str(block).strip()
             if text:

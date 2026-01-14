@@ -685,6 +685,7 @@ def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobSt
                 decide_scope_attempts=request.decide_scope_attempts,
                 target_accession=target_accession,
                 target_vendor_range=target_vendor_range,
+                design_count=request.design_count,
             )
         except Exception as exc:  # pragma: no cover - defensive
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))

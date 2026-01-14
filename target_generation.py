@@ -112,7 +112,7 @@ except Exception:
     _LLM_PROVIDER = None
 OPENAI_API_KEY = _OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
 LLM_PROVIDER = str((_LLM_PROVIDER or os.getenv("LLM_PROVIDER", ""))).strip().lower()
-OPENAI_FLASH_MODEL_NAME = os.getenv("OPENAI_FLASH_MODEL_NAME", "gpt-4o-mini")
+OPENAI_FLASH_MODEL_NAME = OPENAI_API_KEY
 
 # Groq fallback for LLM Flash (vendor parsing)
 try:

@@ -1444,6 +1444,8 @@ async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}
     const force = typeof overrides.force === 'boolean' ? overrides.force : Boolean(el.pipelineRerunForce?.checked);
     const expected = expectedRaw ? Number(expectedRaw) || null : null;
     const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+    const designCountRaw = overrides.designCount ?? getBoltzDesignCount();
+    const designCount = designCountRaw ? Number(designCountRaw) || null : null;
     for (let i = 0; i < list.length; i += 1) {
       const item = list[i];
       const id = (item?.pdb_id || item || '').trim();
@@ -1455,6 +1457,7 @@ async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
+        design_count: designCount,
         antigen_url: item?.antigen_url || null,
         target_accession: row?.accession || fallback?.accession || null,
         target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
@@ -1600,6 +1603,7 @@ async function submitPipelineRerun(triggerBtn = null) {
   const attemptsRaw = el.pipelineRerunAttempts?.value;
   const expected = expectedRaw ? Number(expectedRaw) || null : null;
   const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+  const designCount = getBoltzDesignCount();
   const force = Boolean(el.pipelineRerunForce?.checked);
   if (triggerBtn) triggerBtn.disabled = true;
   try {
@@ -1614,6 +1618,7 @@ async function submitPipelineRerun(triggerBtn = null) {
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
+        design_count: designCount,
         antigen_url: antigenUrl,
         target_accession: row?.accession || fallback?.accession || null,
         target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,

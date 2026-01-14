@@ -307,6 +307,12 @@ class PipelineRefreshRequest(BaseModel):
     antigen_url: Optional[str] = None
     target_accession: Optional[str] = Field(None, max_length=40)
     target_vendor_range: Optional[str] = Field(None, max_length=64)
+    design_count: Optional[int] = Field(
+        None,
+        ge=1,
+        le=50000,
+        description="Designs per epitope to store in BoltzGen configs after prep",
+    )
 
 
 class PipelineRefreshResponse(BaseModel):

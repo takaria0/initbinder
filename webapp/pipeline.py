@@ -276,6 +276,7 @@ def init_decide_prep(
     run_prep: bool = True,
     force: bool = False,
     num_epitopes: Optional[int] = None,
+    design_count: Optional[int] = None,
     decide_scope_prompt: Optional[str] = None,
     llm_delay_seconds: float = 0.0,
     decide_scope_attempts: int = 1,
@@ -389,6 +390,27 @@ def init_decide_prep(
         # prep-target does not accept --force; init-target already cleared prep when force=True.
         run_manage_rfa("prep-target", [pdb_id], log=_log)
         job_store.append_log(job_id, f"[pipeline] prep-target complete for {pdb_id.upper()}")
+
+        try:
+            from .bulk import regenerate_boltzgen_configs
+
+            resolved_count = max(1, int(design_count or 100))
+            job_store.append_log(
+                job_id,
+                f"[pipeline] rebuild configs start for {pdb_id.upper()} (design_count={resolved_count})",
+            )
+            regen = regenerate_boltzgen_configs([pdb_id], resolved_count)
+            results = getattr(regen, "results", []) or []
+            for row in results:
+                status = getattr(row, "status", "unknown")
+                message = getattr(row, "message", None)
+                suffix = f" ({message})" if message else ""
+                job_store.append_log(
+                    job_id,
+                    f"[pipeline] rebuild configs {pdb_id.upper()}: {status}{suffix}",
+                )
+        except Exception as exc:
+            job_store.append_log(job_id, f"[warn] rebuild configs failed: {exc}")
 
     if num_epitopes is not None:
         try:

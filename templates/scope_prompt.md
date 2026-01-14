@@ -1,7 +1,7 @@
 You are a protein design expert. Your task is to analyze the provided PDB metadata and propose a design scope for creating a binder against this target.
 
-Based on the metadata below, identify *3* potential epitopes. For each epitope, provide a list of residue ranges (e.g., "A:10-20") and a brief rationale for your choice.
-Please ensure the proposed epitopes are three distinct regions on the target protein that are likely to be accessible and relevant for binding.
+Based on the metadata below, identify potential epitopes. For each epitope, provide a list of residue ranges (e.g., "A:10-20") and a brief rationale for your choice.
+Please ensure the proposed epitopes are distinct regions on the target protein that are likely to be accessible and relevant for binding.
 
 The final output must be a single YAML block.
 
