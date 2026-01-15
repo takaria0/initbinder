@@ -283,6 +283,7 @@ class BoltzgenBinderRow(BaseModel):
     iptm: Optional[float] = None
     rmsd: Optional[float] = None
     hotspot_dist: Optional[float] = None
+    ipsae_min: Optional[float] = None
     binder_seq: Optional[str] = None
     design_path: Optional[str] = None
     metrics_path: Optional[str] = None

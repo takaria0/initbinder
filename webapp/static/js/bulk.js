@@ -1108,7 +1108,7 @@ function renderBinderRows(rows = []) {
   const noteRow = () => {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 8;
+    td.colSpan = 9;
     td.style.color = '#64748b';
     td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No BoltzGen binders found.');
     tr.appendChild(td);
@@ -1128,6 +1128,7 @@ function renderBinderRows(rows = []) {
         row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
         row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
         row.hotspot_dist !== null && row.hotspot_dist !== undefined ? Number(row.hotspot_dist).toFixed(2) : '—',
+        row.ipsae_min !== null && row.ipsae_min !== undefined ? Number(row.ipsae_min).toFixed(3) : '—',
       ];
       values.forEach((val, colIdx) => {
         const td = document.createElement('td');

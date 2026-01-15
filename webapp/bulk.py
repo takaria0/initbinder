@@ -1811,7 +1811,7 @@ def _plots_dir(timestamp: str) -> Path:
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
 _DIVERSITY_CACHE_VERSION = 2
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
-_BINDER_CACHE_VERSION = 3
+_BINDER_CACHE_VERSION = 4
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
@@ -3624,6 +3624,12 @@ def _load_binder_rows_from_csv(
                 or raw.get("design_iptm")
                 or raw.get("af2_iptm")
             )
+            ipsae_val = _safe_float(
+                raw.get("ipsae_min")
+                or raw.get("ipsae")
+                or raw.get("ipSAE_min")
+                or raw.get("ipsae_minimum")
+            )
             rmsd_val = _safe_float(
                 raw.get("filter_rmsd")
                 or raw.get("filter_rmsd_design")
@@ -3690,6 +3696,7 @@ def _load_binder_rows_from_csv(
                     iptm=iptm_val,
                     rmsd=rmsd_val,
                     hotspot_dist=hotspot_dist,
+                    ipsae_min=ipsae_val,
                     binder_seq=binder_seq_clean,
                     design_path=design_path,
                     metrics_path=str(metrics_path) if metrics_path else None,
