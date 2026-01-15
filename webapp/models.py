@@ -278,6 +278,7 @@ class BoltzgenDiversityResponse(BaseModel):
 class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None
+    epitope_id: Optional[str] = None
     rank: int
     iptm: Optional[float] = None
     rmsd: Optional[float] = None

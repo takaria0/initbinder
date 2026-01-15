@@ -30,6 +30,30 @@ const state = {
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
 
+// Keep in sync with scripts/pymol_utils.py base_palette.
+const EPITOPE_COLORS = [
+  [0.90, 0.40, 0.00],
+  [0.00, 0.55, 0.60],
+  [0.60, 0.20, 0.75],
+  [0.10, 0.60, 0.10],
+  [0.20, 0.40, 0.85],
+  [0.80, 0.00, 0.20],
+  [0.75, 0.55, 0.10],
+  [0.00, 0.70, 0.95],
+  [0.95, 0.55, 0.80],
+  [0.30, 0.30, 0.30],
+];
+
+function epitopeColor(label) {
+  const match = String(label || '').match(/epitope[_-]?(\d+)/i);
+  if (!match) return null;
+  const idx = Number(match[1]);
+  if (!Number.isFinite(idx) || idx <= 0) return null;
+  const base = EPITOPE_COLORS[(idx - 1) % EPITOPE_COLORS.length];
+  const rgb = base.map((val) => Math.round(val * 255));
+  return `rgb(${rgb.join(',')})`;
+}
+
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
   bulkCsvInput: document.querySelector('#bulk-csv-input'),
@@ -1095,18 +1119,23 @@ function renderBinderRows(rows = []) {
     tbody.appendChild(noteRow());
   } else {
     list.forEach((row, idx) => {
+      const epLabel = row.epitope_id || row.epitope || '—';
       const tr = document.createElement('tr');
       const values = [
         row.pdb_id || '—',
-        row.epitope || '—',
+        epLabel,
         row.rank ?? '—',
         row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
         row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
         row.hotspot_dist !== null && row.hotspot_dist !== undefined ? Number(row.hotspot_dist).toFixed(2) : '—',
       ];
-      values.forEach((val) => {
+      values.forEach((val, colIdx) => {
         const td = document.createElement('td');
         td.textContent = val;
+        if (colIdx === 1) {
+          const color = epitopeColor(val);
+          if (color) td.style.color = color;
+        }
         tr.appendChild(td);
       });
 
@@ -1271,10 +1300,11 @@ async function launchBinderPymol(index) {
     return;
   }
   try {
+    const epLabel = row.epitope_id || row.epitope || null;
     const payload = {
       pdb_id: row.pdb_id,
       design_path: row.design_path,
-      epitope_label: row.epitope,
+      epitope_label: epLabel,
       binding_label: row.binding_label || null,
       include_label: row.include_label || null,
       target_path: row.target_path || null,

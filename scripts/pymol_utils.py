@@ -800,6 +800,7 @@ def _write_hotspot_pml(
     epitopes: dict[str, dict[str, list[str]]],
     pml_path: Path,
     *,
+    epitope_index_map: Optional[Mapping[str, str]] = None,
     expression_regions: Optional[List[dict[str, str]]] = None,
     vendor_range: Optional[str] = None,
     allowed_ranges: Optional[List[dict[str, str]]] = None,
@@ -874,6 +875,19 @@ def _write_hotspot_pml(
             return (r * (1 - m), g * (1 - m), b * (1 - m))
 
     epi_names = sorted(epitopes.keys())
+    if epitope_index_map:
+        indexed: list[tuple[int, str]] = []
+        fallback: list[str] = []
+        for name in epi_names:
+            label = epitope_index_map.get(_norm_label(name))
+            match = re.search(r"(\d+)", str(label)) if label else None
+            if match:
+                indexed.append((int(match.group(1)), name))
+            else:
+                fallback.append(name)
+        if indexed:
+            indexed.sort(key=lambda item: item[0])
+            epi_names = [name for _, name in indexed] + sorted(fallback)
 
     pml = []
     pml.append("reinitialize\n")
@@ -985,6 +999,7 @@ def _write_hotspot_pml(
             pml.append(f"color allowed_epitope_range, {allowed_sel}\n")
         pml.append("\n")
 
+    label_specs: list[tuple[str, str, str]] = []
     for i, epi in enumerate(epi_names):
         epi_key = _sanitize(epi)
         base = base_palette[i % len(base_palette)]
@@ -1021,7 +1036,34 @@ def _write_hotspot_pml(
             pml.append(f"color {color_name}, {obj}\n")
             pml.append(f"group {epi_key}, {obj}\n")
 
+        label_sel = f"epi_label_{epi_key}"
+        pml.append(f"select {label_sel}, epi_mask_{epi_key} or epi_hot_{epi_key}_*\n")
+        norm_name = _norm_label(epi)
+        label_text = None
+        if epitope_index_map and norm_name in epitope_index_map:
+            label_text = epitope_index_map.get(norm_name)
+        label_specs.append((label_sel, label_text or epi, f"epi_{epi_key}"))
         pml.append("\n")
+
+    if label_specs:
+        pml.append("python\n")
+        pml.append("from pymol import cmd\n")
+        pml.append("def _label_epitope(sel_name, label, color):\n")
+        pml.append("    if cmd.count_atoms(sel_name) < 1:\n")
+        pml.append("        return\n")
+        pml.append("    (x1,y1,z1),(x2,y2,z2) = cmd.get_extent(sel_name)\n")
+        pml.append("    pos = ((x1+x2)/2.0, (y1+y2)/2.0, (z1+z2)/2.0)\n")
+        pml.append("    obj = f\"label_{sel_name}\"\n")
+        pml.append("    cmd.pseudoatom(obj, pos=pos, label=label)\n")
+        pml.append("    cmd.color(color, obj)\n")
+        pml.append("    cmd.set('label_color', color, obj)\n")
+        pml.append("    cmd.set('label_outline_color', 'white', obj)\n")
+        pml.append("    cmd.set('label_size', -2.0, obj)\n")
+        pml.append("    cmd.group('epitope_labels', obj)\n")
+        for sel_name, label_text, color_name in label_specs:
+            safe_label = str(label_text).replace("\"", "'")
+            pml.append(f"_label_epitope(\"{sel_name}\", \"{safe_label}\", \"{color_name}\")\n")
+        pml.append("python end\n\n")
 
     pml.append("zoom target\n")
     pml_path.write_text("".join(pml))
@@ -1031,6 +1073,7 @@ def _send_hotspots_to_remote(
     prepared_pdb_path: Path,
     epitopes: dict[str, dict[str, list[str]]],
     *,
+    epitope_index_map: Optional[Mapping[str, str]] = None,
     vendor_range: Optional[str] = None,
     expression_regions: Optional[List[dict[str, str]]] = None,
     allowed_ranges: Optional[List[dict[str, str]]] = None,
@@ -1063,6 +1106,7 @@ def _send_hotspots_to_remote(
             "target",
             epitopes,
             pml_path,
+            epitope_index_map=epitope_index_map,
             expression_regions=expression_regions,
             vendor_range=vendor_range,
             allowed_ranges=allowed_ranges,
@@ -1117,6 +1161,40 @@ def _send_hotspots_to_remote(
 
 def _norm_label(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _load_epitope_index_map(pdb_id: str) -> Dict[str, str]:
+    if ROOT is None:
+        return {}
+    target_dir = ROOT / "targets" / pdb_id.upper()
+    mapping: Dict[str, str] = {}
+    meta_path = target_dir / "prep" / "epitopes_metadata.json"
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text())
+            epitopes = data.get("epitopes") or []
+            for idx, ep in enumerate(epitopes, start=1):
+                name = ep.get("name") or ep.get("epitope_name") or ep.get("display_name")
+                if name:
+                    mapping[_norm_label(str(name))] = f"epitope_{idx}"
+        except Exception:
+            mapping = {}
+    if mapping:
+        return mapping
+    target_yaml = target_dir / "target.yaml"
+    if not target_yaml.exists():
+        return {}
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        return {}
+    for idx, ep in enumerate(data.get("epitopes") or [], start=1):
+        if not isinstance(ep, dict):
+            continue
+        name = ep.get("name") or ep.get("epitope_name") or ep.get("display_name")
+        if name:
+            mapping[_norm_label(str(name))] = f"epitope_{idx}"
+    return mapping
 
 
 def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = None) -> Path | None:
@@ -1301,10 +1379,12 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         epitopes = remapped_epitopes or epitopes
         epitopes_mapped = True
 
+    epitope_index_map = _load_epitope_index_map(pdb_id_u)
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
             structure_path,
             epitopes,
+            epitope_index_map=epitope_index_map,
             vendor_range=vendor_range_label,
             expression_regions=expression_regions,
             allowed_ranges=allowed_ranges,
@@ -1392,6 +1472,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         dest_pdb_name,
         epitopes,
         pml_path,
+        epitope_index_map=epitope_index_map,
         expression_regions=expression_regions,
         vendor_range=vendor_range_label,
         allowed_ranges=allowed_ranges,

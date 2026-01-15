@@ -694,37 +694,62 @@ def launch_boltzgen_binder(
     session_dir = dest_root / f"{pdb_id.upper()}_{label}_{timestamp}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    hotspot_pml: Optional[Path] = None
+    if export_hotspot_bundle is not None:
+        try:
+            bundle_path = export_hotspot_bundle(pdb_id)
+        except Exception:
+            bundle_path = None
+        if bundle_path:
+            try:
+                shutil.copytree(Path(bundle_path), session_dir, dirs_exist_ok=True)
+                candidate = session_dir / "hotspot_visualization.pml"
+                if candidate.exists():
+                    hotspot_pml = candidate
+            except Exception:
+                hotspot_pml = None
+
     design_dest = session_dir / design_src.name
     shutil.copy2(design_src, design_dest)
 
     target_dest: Optional[Path] = None
-    if target_path:
+    if target_path and not hotspot_pml:
         candidate = Path(target_path).expanduser()
         if candidate.exists():
             target_dest = session_dir / candidate.name
             shutil.copy2(candidate, target_dest)
 
     selection = _selection_from_labels(binding_label, include_label)
-    selection_obj = "target" if target_dest else "complex"
+    selection_obj = "target" if (target_dest or hotspot_pml) else "complex"
 
     vendor_label, expression_regions, target_chain_ids = _gather_expression_regions(pdb_id)
-    target_obj = "target" if target_dest else "complex"
+    target_obj = "target" if (target_dest or hotspot_pml) else "complex"
     pdb_fetch_name = (pdb_id or "").strip().upper()
 
-    script_lines = [
-        "reinitialize",
-        "bg_color white",
-        "set ray_opaque_background, off",
-        "set cartoon_fancy_helices, on",
-        "set cartoon_smooth_loops, on",
-        "set_color designed_binder, [0.220, 0.420, 0.780]",
-        f"load {design_dest.name}, complex",
-        "hide everything, complex",
-        "show cartoon, complex",
-        "color designed_binder, complex",
-    ]
+    script_lines: list[str] = []
+    if hotspot_pml:
+        script_lines.append(f"@{hotspot_pml.name}")
+    else:
+        script_lines.extend(
+            [
+                "reinitialize",
+                "bg_color white",
+            ]
+        )
+    script_lines.extend(
+        [
+            "set ray_opaque_background, off",
+            "set cartoon_fancy_helices, on",
+            "set cartoon_smooth_loops, on",
+            "set_color designed_binder, [0.220, 0.420, 0.780]",
+            f"load {design_dest.name}, complex",
+            "hide everything, complex",
+            "show cartoon, complex",
+            "color designed_binder, complex",
+        ]
+    )
 
-    if pdb_fetch_name:
+    if pdb_fetch_name and not hotspot_pml:
         script_lines.extend(
             [
                 f"fetch {pdb_fetch_name}",
@@ -738,7 +763,7 @@ def launch_boltzgen_binder(
                 f"load {target_dest.name}, target",
                 "hide everything, target",
                 "show cartoon, target",
-                "color lightgrey, target",
+                "color gray80, target",
                 "set cartoon_transparency, 0.45, target",
             ]
         )
@@ -748,13 +773,13 @@ def launch_boltzgen_binder(
         script_lines.extend(
             [
                 f"select target_chains_complex, complex and ({chain_expr})",
-                "color lightgrey, target_chains_complex",
+                "color gray80, target_chains_complex",
                 "set cartoon_transparency, 0.45, target_chains_complex",
                 "group target_chains, target_chains_complex",
             ]
         )
 
-    if expression_regions:
+    if expression_regions and not hotspot_pml:
         vendor_clean = str(vendor_label).replace("\n", " ").replace('"', "") if vendor_label else None
         script_lines.extend(
             [
@@ -787,13 +812,21 @@ def launch_boltzgen_binder(
         if vendor_clean:
             script_lines.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_clean}\"")
 
+    if target_obj == "target":
+        script_lines.append("align complex, target")
+
     if selection:
+        ep_token = _sanitize_design_token(epitope_label or "epitope")
+        if ep_token[0].isdigit():
+            ep_token = f"epitope_{ep_token}"
+        sel_name = f"{ep_token}_sel"
         script_lines.extend(
             [
-                f"select epitope, {selection_obj} and ({selection})",
-                "color hotpink, epitope",
-                "show sticks, epitope",
-                "set stick_radius, 0.2, epitope",
+                f"select {sel_name}, {selection_obj} and ({selection})",
+                f"color hotpink, {sel_name}",
+                f"show sticks, {sel_name}",
+                f"set stick_radius, 0.2, {sel_name}",
+                f"group {ep_token}, {sel_name}",
             ]
         )
 

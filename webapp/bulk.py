@@ -1595,6 +1595,7 @@ def _plots_dir(timestamp: str) -> Path:
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
 _DIVERSITY_CACHE_VERSION = 2
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
+_BINDER_CACHE_VERSION = 2
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
@@ -1641,6 +1642,8 @@ def _load_binder_cache(out_dir: Path, csv_path: Path) -> Optional[dict]:
         return None
     if not isinstance(data, dict):
         return None
+    if int(data.get("cache_version") or 0) != _BINDER_CACHE_VERSION:
+        return None
     if data.get("csv_name") != csv_path.name:
         return None
     try:
@@ -1666,6 +1669,7 @@ def _write_binder_cache(out_dir: Path, csv_path: Path, rows: Sequence[BoltzgenBi
     except OSError:
         return
     payload = {
+        "cache_version": _BINDER_CACHE_VERSION,
         "csv_name": csv_path.name,
         "csv_mtime": stat.st_mtime,
         "csv_size": stat.st_size,
@@ -1712,7 +1716,10 @@ def _get_cached_binder_rows(
             for row in rows
             if (
                 (not pdb_filter or pdb_filter in str(row.get("pdb_id") or "").strip().upper())
-                and (not ep_filter or ep_filter in str(row.get("epitope") or "").strip().lower())
+                and (
+                    not ep_filter
+                    or ep_filter in str(row.get("epitope_id") or row.get("epitope") or "").strip().lower()
+                )
             )
         ]
 
@@ -3377,6 +3384,11 @@ def _load_binder_rows_from_csv(
                 cfg_entries = _discover_boltzgen_configs(pdb_id)
                 config_cache[pdb_id] = _binder_config_map(cfg_entries)
             cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+            epitope_id = cfg_meta.get("epitope_id")
+            if not epitope_id and epitope:
+                ep_norm = str(epitope).strip()
+                if re.match(r"^epitope_\\d+$", ep_norm, flags=re.IGNORECASE):
+                    epitope_id = ep_norm
             binding_label = cfg_meta.get("binding_label")
             include_label = cfg_meta.get("include_label")
             hotspot_dist = None
@@ -3403,6 +3415,7 @@ def _load_binder_rows_from_csv(
                 BoltzgenBinderRow(
                     pdb_id=pdb_id,
                     epitope=epitope,
+                    epitope_id=epitope_id,
                     rank=rank_val,
                     iptm=iptm_val,
                     rmsd=rmsd_val,
