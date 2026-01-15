@@ -346,6 +346,11 @@ class BoltzgenTargetConfig(BaseModel):
     target_job_status: Optional[str] = None
     antigen_url: Optional[str] = None
     has_prep: Optional[bool] = None
+    antigen_expressed_range: Optional[str] = None
+    antigen_expressed_length: Optional[int] = None
+    allowed_epitope_range: Optional[str] = None
+    allowed_epitope_length: Optional[int] = None
+    epitope_count: Optional[int] = None
 
 
 class BoltzgenConfigListResponse(BaseModel):

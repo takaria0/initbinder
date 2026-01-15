@@ -143,8 +143,9 @@
                     <th>#</th>
                     <th>Preset</th>
                     <th>PDB ID</th>
+                    <th>Allowed range</th>
+                    <th>Allowed len</th>
                     <th>Epitope</th>
-                    <th>Binding</th>
                     <th>Designs</th>
                     <th>Commands</th>
                   </tr>
@@ -350,6 +351,18 @@
               <input type="number" id="boltz-run-range-end" placeholder="End" min="1">
             </label>
           </div>
+          <div class="flex-row" style="gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+            <label>Min allowed range length
+              <input type="number" id="boltz-run-range-min-allowed" value="50" min="1">
+            </label>
+            <label>Min epitopes selected
+              <input type="number" id="boltz-run-range-min-epitopes" value="10" min="1" max="32">
+            </label>
+          </div>
+          <p class="help-text" id="boltz-run-range-filter-note" style="margin: 8px 0 0 0;">
+            Filters applied to commands (target.yaml): allowed_epitope_range length &gt;= 50; epitopes selected &gt;= 10.
+          </p>
+          <p class="help-text" id="boltz-run-range-count-note" style="margin: 6px 0 0 0;"></p>
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>

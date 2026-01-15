@@ -1339,6 +1339,79 @@ def _has_pymol_assets(pdb_id: str) -> bool:
     return has_hotspots
 
 
+def _coerce_allowed_range(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        parts = [str(item).strip() for item in raw if str(item).strip()]
+        return ", ".join(parts) if parts else None
+    text = str(raw).strip()
+    return text or None
+
+
+def _allowed_range_length(raw: object) -> Optional[int]:
+    entries: List[str] = []
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, list):
+        entries = [str(item) for item in raw if str(item).strip()]
+    total = 0
+    saw = False
+    for entry in entries:
+        for token in re.split(r"[;,]", str(entry)):
+            token = token.strip()
+            if not token:
+                continue
+            span = token.split(":", 1)[-1].strip()
+            if not span:
+                continue
+            span = span.replace("..", "-").replace("–", "-")
+            if "-" in span:
+                parts = span.split("-", 1)
+                try:
+                    start = int(parts[0])
+                    end = int(parts[1])
+                except Exception:
+                    continue
+                total += abs(end - start) + 1
+                saw = True
+            else:
+                try:
+                    int(span)
+                except Exception:
+                    continue
+                total += 1
+                saw = True
+    return total if saw else None
+
+
+def _extract_expressed_range(data: dict) -> Tuple[Optional[str], Optional[int]]:
+    sequences = data.get("sequences") or {}
+    accession_block = sequences.get("accession") or {}
+    expressed_range = accession_block.get("expressed_range")
+    expressed_seq = accession_block.get("expressed_aa")
+    expressed_length: Optional[int] = None
+    if isinstance(expressed_seq, str) and expressed_seq:
+        expressed_length = len(expressed_seq)
+    elif isinstance(expressed_range, str):
+        match = re.match(r"\s*(\d+)\s*[-–]\s*(\d+)\s*", expressed_range)
+        if match:
+            start = int(match.group(1))
+            end = int(match.group(2))
+            expressed_length = max(0, end - start + 1)
+    expressed_range_text = None
+    if expressed_range is not None:
+        expressed_range_text = str(expressed_range).strip() or None
+    return expressed_range_text, expressed_length
+
+
+def _epitope_count_from_yaml(data: dict) -> Optional[int]:
+    epitopes = data.get("epitopes")
+    if isinstance(epitopes, list):
+        return len(epitopes)
+    return None
+
+
 def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse:
     if not pdb_ids:
         return BoltzgenConfigListResponse(targets=[])
@@ -1347,6 +1420,11 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
     targets: List[BoltzgenTargetConfig] = []
     for pdb in pdb_ids:
         antigen_url = None
+        expressed_range = None
+        expressed_length = None
+        allowed_range = None
+        allowed_length = None
+        epitope_count = None
         try:
             cfg = load_config()
             target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb.upper() / "target.yaml"
@@ -1355,8 +1433,18 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 antigen_url = (
                     str(data.get("antigen_catalog_url") or data.get("antigen_url") or "").strip() or None
                 )
+                allowed_raw = data.get("allowed_epitope_range") or data.get("allowed_range")
+                allowed_range = _coerce_allowed_range(allowed_raw)
+                allowed_length = _allowed_range_length(allowed_raw)
+                expressed_range, expressed_length = _extract_expressed_range(data)
+                epitope_count = _epitope_count_from_yaml(data)
         except Exception:
             antigen_url = None
+            expressed_range = None
+            expressed_length = None
+            allowed_range = None
+            allowed_length = None
+            epitope_count = None
         has_prep = _has_pymol_assets(pdb)
         configs = _discover_boltzgen_configs(pdb)
         if not configs:
@@ -1366,6 +1454,11 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                     configs=[],
                     antigen_url=antigen_url,
                     has_prep=has_prep,
+                    antigen_expressed_range=expressed_range,
+                    antigen_expressed_length=expressed_length,
+                    allowed_epitope_range=allowed_range,
+                    allowed_epitope_length=allowed_length,
+                    epitope_count=epitope_count,
                 )
             )
             continue
@@ -1399,6 +1492,11 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 target_job_status=_job_status_for(job_store, target_run.get("job_id")) if target_run else None,
                 antigen_url=antigen_url,
                 has_prep=has_prep,
+                antigen_expressed_range=expressed_range,
+                antigen_expressed_length=expressed_length,
+                allowed_epitope_range=allowed_range,
+                allowed_epitope_length=allowed_length,
+                epitope_count=epitope_count,
             )
         )
     return BoltzgenConfigListResponse(targets=targets)

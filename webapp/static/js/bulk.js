@@ -111,6 +111,10 @@ const el = {
   boltzRunRangeModal: document.querySelector('#boltz-run-range-modal'),
   boltzRunRangeStart: document.querySelector('#boltz-run-range-start'),
   boltzRunRangeEnd: document.querySelector('#boltz-run-range-end'),
+  boltzRunRangeMinAllowed: document.querySelector('#boltz-run-range-min-allowed'),
+  boltzRunRangeMinEpitopes: document.querySelector('#boltz-run-range-min-epitopes'),
+  boltzRunRangeFilterNote: document.querySelector('#boltz-run-range-filter-note'),
+  boltzRunRangeCountNote: document.querySelector('#boltz-run-range-count-note'),
   boltzRunRangeConfirm: document.querySelector('#boltz-run-range-confirm'),
   boltzRunRangeCancel: document.querySelector('#boltz-run-range-cancel'),
   boltzRunRangeClose: document.querySelector('#boltz-run-range-close'),
@@ -534,10 +538,6 @@ function toggleModal(modalEl, isOpen) {
       document.body.classList.remove('modal-open');
     }
   }
-}
-
-function bindingTextFromConfig(cfg = {}) {
-  return cfg.binding_label || cfg.include_label || '—';
 }
 
 function epitopeLabel(cfg = {}, fallbackIndex = null) {
@@ -1523,6 +1523,114 @@ function getBoltzRowRange(startEl, endEl, targets, label) {
   return { start, end, slice: targets.slice(start - 1, end) };
 }
 
+function getRunCommandFilters() {
+  const allowedRaw = Number(el.boltzRunRangeMinAllowed?.value || 0);
+  const epitopesRaw = Number(el.boltzRunRangeMinEpitopes?.value || 0);
+  const minAllowedLength = Number.isFinite(allowedRaw) && allowedRaw > 0 ? Math.round(allowedRaw) : null;
+  const minEpitopes = Number.isFinite(epitopesRaw) && epitopesRaw > 0 ? Math.round(epitopesRaw) : null;
+  return { minAllowedLength, minEpitopes };
+}
+
+function getTargetEpitopeCount(target) {
+  const direct = asNumber(target?.epitope_count);
+  if (direct !== null) return direct;
+  const configs = Array.isArray(target?.configs) ? target.configs : [];
+  return configs.length;
+}
+
+function targetPassesRunFilters(target, filters) {
+  if (!filters) return true;
+  if (filters.minAllowedLength) {
+    const allowed = asNumber(target?.allowed_epitope_length);
+    if (allowed === null || allowed < filters.minAllowedLength) return false;
+  }
+  if (filters.minEpitopes) {
+    const count = getTargetEpitopeCount(target);
+    if (!Number.isFinite(count) || count < filters.minEpitopes) return false;
+  }
+  return true;
+}
+
+function applyRunCommandFilters(targets, filters) {
+  const pass = [];
+  const fail = [];
+  (targets || []).forEach((target) => {
+    if (targetPassesRunFilters(target, filters)) {
+      pass.push(target);
+    } else {
+      fail.push(target);
+    }
+  });
+  return { pass, fail };
+}
+
+function runCommandFilterSection(filters, totalCount, passCount) {
+  const lines = [];
+  if (filters?.minAllowedLength) {
+    lines.push(`allowed_epitope_range length >= ${filters.minAllowedLength}`);
+  }
+  if (filters?.minEpitopes) {
+    lines.push(`epitopes selected >= ${filters.minEpitopes}`);
+  }
+  if (!lines.length) return '';
+  const summary = [`# Filter criteria (target.yaml)`, ...lines];
+  if (Number.isFinite(totalCount) && Number.isFinite(passCount)) {
+    summary.push(`targets included: ${passCount} of ${totalCount}`);
+  }
+  return summary.join('\n');
+}
+
+function updateRunCommandFilterNote() {
+  if (!el.boltzRunRangeFilterNote) return;
+  const filters = getRunCommandFilters();
+  const parts = [];
+  if (filters.minAllowedLength) {
+    parts.push(`allowed_epitope_range length >= ${filters.minAllowedLength}`);
+  }
+  if (filters.minEpitopes) {
+    parts.push(`epitopes selected >= ${filters.minEpitopes}`);
+  }
+  el.boltzRunRangeFilterNote.textContent = parts.length
+    ? `Filters applied to commands (target.yaml): ${parts.join('; ')}.`
+    : 'No filters applied to manual commands.';
+  updateRunCommandCountNote(filters);
+}
+
+function previewRunCommandRange(targets) {
+  const startRaw = Number(el.boltzRunRangeStart?.value || 0);
+  const endRaw = Number(el.boltzRunRangeEnd?.value || 0);
+  if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || startRaw <= 0 || endRaw <= 0) {
+    return null;
+  }
+  const start = Math.min(startRaw, endRaw);
+  const end = Math.max(startRaw, endRaw);
+  if (!targets.length || start < 1 || end > targets.length) return null;
+  const slice = targets.slice(start - 1, end);
+  return { start, end, slice };
+}
+
+function updateRunCommandCountNote(filters) {
+  if (!el.boltzRunRangeCountNote) return;
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    el.boltzRunRangeCountNote.textContent = 'Load BoltzGen configs to preview retained targets.';
+    return;
+  }
+  const range = previewRunCommandRange(targets);
+  if (!range) {
+    el.boltzRunRangeCountNote.textContent = 'Enter a valid row range to preview retained targets.';
+    return;
+  }
+  const { pass } = applyRunCommandFilters(range.slice, filters);
+  el.boltzRunRangeCountNote.textContent = `Retained targets: ${pass.length} of ${range.slice.length} (rows ${range.start}-${range.end}).`;
+}
+
+function prependRunCommandFilters(text, filters, totalCount, passCount) {
+  const section = runCommandFilterSection(filters, totalCount, passCount);
+  if (!section) return text;
+  return `${section}\n\n${text || ''}`.trim();
+}
+
 async function submitPipelineRerunRangeModal(triggerBtn = null) {
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
@@ -1549,6 +1657,13 @@ async function submitPipelineRerunRangeModal(triggerBtn = null) {
 
 function openRunCommandRangeModal() {
   if (!el.boltzRunRangeModal) return;
+  if (el.boltzRunRangeMinAllowed && !el.boltzRunRangeMinAllowed.value) {
+    el.boltzRunRangeMinAllowed.value = '50';
+  }
+  if (el.boltzRunRangeMinEpitopes && !el.boltzRunRangeMinEpitopes.value) {
+    el.boltzRunRangeMinEpitopes.value = '10';
+  }
+  updateRunCommandFilterNote();
   toggleModal(el.boltzRunRangeModal, true);
 }
 
@@ -1595,14 +1710,24 @@ async function showRunCommandRange() {
     showAlert('No targets found for that row range.');
     return;
   }
+  const filters = getRunCommandFilters();
+  const { pass } = applyRunCommandFilters(slice, filters);
+  const filteredSlice = pass;
   if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
-  if (el.boltzRunTitle) el.boltzRunTitle.textContent = `Manual run · rows ${start}-${end}`;
+  if (el.boltzRunTitle) {
+    const countLabel = filteredSlice.length !== slice.length
+      ? ` (${filteredSlice.length}/${slice.length})`
+      : '';
+    el.boltzRunTitle.textContent = `Manual run · rows ${start}-${end}${countLabel}`;
+  }
   toggleModal(el.boltzRunModal, true);
   if (!state.clusterStatus) {
     await loadClusterStatus();
   }
-  const text = buildAllRunCommandsText(slice);
-  renderRunCommandBlocks(text);
+  const text = filteredSlice.length
+    ? buildAllRunCommandsText(filteredSlice)
+    : '# Manual BoltzGen submission\nNo targets passed filters.';
+  renderRunCommandBlocks(prependRunCommandFilters(text, filters, slice.length, filteredSlice.length));
   toggleModal(el.boltzRunRangeModal, false);
 }
 
@@ -1688,7 +1813,7 @@ function renderBoltzConfigs() {
   if (!targets.length) {
     const emptyRow = document.createElement('tr');
     const emptyCell = document.createElement('td');
-    emptyCell.colSpan = 7;
+    emptyCell.colSpan = 8;
     emptyCell.className = 'empty-note';
     emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV and click Preview CSV or Reload configs to load.';
     emptyRow.appendChild(emptyCell);
@@ -1707,12 +1832,14 @@ function renderBoltzConfigs() {
     const tr = document.createElement('tr');
     tr.className = `target-row ${isExpanded ? 'expanded' : 'collapsed'}`;
     tr.dataset.pdbId = key;
+    const allowedLength = asNumber(target.allowed_epitope_length);
     const cells = [
       idx + 1,
       target.preset_name || '—',
       target.pdb_id || '',
+      target.allowed_epitope_range || '—',
+      allowedLength === null ? '—' : String(Math.round(allowedLength)),
       'All epitopes',
-      '—',
     ];
     cells.forEach((val, cellIdx) => {
       const td = document.createElement('td');
@@ -1730,15 +1857,6 @@ function renderBoltzConfigs() {
 
     const cmdCell = document.createElement('td');
     cmdCell.className = 'boltz-cmd-cell';
-    const runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.textContent = 'Run';
-    runBtn.dataset.action = 'run-target';
-    runBtn.dataset.pdbId = target.pdb_id || '';
-    runBtn.disabled = true;
-    runBtn.title = 'Not supported yet.';
-    cmdCell.appendChild(runBtn);
-
     const cfgBtn = document.createElement('button');
     cfgBtn.type = 'button';
     cfgBtn.textContent = 'Config';
@@ -1795,13 +1913,14 @@ function renderBoltzConfigs() {
         '',
         '',
         '',
+        '',
+        '',
         epitopeLabel(cfg, cfgIdx + 1),
-        bindingTextFromConfig(cfg),
       ];
       epCells.forEach((val, cellIdx) => {
         const td = document.createElement('td');
         td.textContent = val || '';
-        if (cellIdx === 3) td.style.paddingLeft = '14px';
+        if (cellIdx === 5) td.style.paddingLeft = '14px';
         epRow.appendChild(td);
       });
       const epStatus = document.createElement('td');
@@ -1811,16 +1930,6 @@ function renderBoltzConfigs() {
 
       const epCmd = document.createElement('td');
       epCmd.className = 'boltz-cmd-cell';
-      const epRun = document.createElement('button');
-      epRun.type = 'button';
-      epRun.textContent = 'Run';
-      epRun.dataset.action = 'run-epitope';
-      epRun.dataset.pdbId = target.pdb_id || '';
-      epRun.dataset.configPath = cfg.config_path || '';
-      epRun.disabled = true;
-      epRun.title = 'Not supported yet.';
-      epCmd.appendChild(epRun);
-
       const epCfgBtn = document.createElement('button');
       epCfgBtn.type = 'button';
       epCfgBtn.textContent = 'Config';
@@ -2349,8 +2458,16 @@ async function showRunCommandAll() {
     renderRunCommandBlocks('# No BoltzGen targets detected.');
     return;
   }
-  const text = buildAllRunCommandsText(targets);
-  renderRunCommandBlocks(text);
+  const filters = getRunCommandFilters();
+  const { pass } = applyRunCommandFilters(targets, filters);
+  const filteredTargets = pass;
+  if (el.boltzRunTitle && filteredTargets.length !== targets.length) {
+    el.boltzRunTitle.textContent = `Manual run · all targets (${filteredTargets.length}/${targets.length})`;
+  }
+  const text = filteredTargets.length
+    ? buildAllRunCommandsText(filteredTargets)
+    : '# Manual BoltzGen submission\nNo targets passed filters.';
+  renderRunCommandBlocks(prependRunCommandFilters(text, filters, targets.length, filteredTargets.length));
 }
 
 async function runBoltzTarget(pdbId, triggerEl = null) {
@@ -2987,6 +3104,22 @@ function init() {
   if (el.boltzRunRangeClose) {
     el.boltzRunRangeClose.addEventListener('click', () => toggleModal(el.boltzRunRangeModal, false));
   }
+  if (el.boltzRunRangeStart) {
+    el.boltzRunRangeStart.addEventListener('input', updateRunCommandFilterNote);
+    el.boltzRunRangeStart.addEventListener('change', updateRunCommandFilterNote);
+  }
+  if (el.boltzRunRangeEnd) {
+    el.boltzRunRangeEnd.addEventListener('input', updateRunCommandFilterNote);
+    el.boltzRunRangeEnd.addEventListener('change', updateRunCommandFilterNote);
+  }
+  if (el.boltzRunRangeMinAllowed) {
+    el.boltzRunRangeMinAllowed.addEventListener('input', updateRunCommandFilterNote);
+    el.boltzRunRangeMinAllowed.addEventListener('change', updateRunCommandFilterNote);
+  }
+  if (el.boltzRunRangeMinEpitopes) {
+    el.boltzRunRangeMinEpitopes.addEventListener('input', updateRunCommandFilterNote);
+    el.boltzRunRangeMinEpitopes.addEventListener('change', updateRunCommandFilterNote);
+  }
   if (el.boltzRegenerateRangeConfirm) {
     el.boltzRegenerateRangeConfirm.addEventListener('click', (event) => {
       submitRegenerateRangeModal(event.currentTarget);
@@ -3036,6 +3169,7 @@ function init() {
   });
 
   renderBoltzConfigs();
+  updateRunCommandFilterNote();
   refreshDiversity({ silent: true });
   hydrateSnapshotsFromCache({ silent: true });
 }
