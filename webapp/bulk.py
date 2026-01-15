@@ -53,7 +53,6 @@ from .pymol import PyMolLaunchError, launch_hotspots, render_hotspot_snapshot, r
 from .hotspot_distance import (
     _load_cif_coords as _hs_load_cif_coords,
     _pick_binder_chain_by_seq_biopython as _hs_pick_binder_chain_by_seq,
-    _min_distance as _hs_min_distance,
 )
 try:  # For mapping vendor expression chains to the prepared structure
     from scripts.pymol_utils import _collect_expression_regions  # type: ignore
@@ -195,7 +194,7 @@ def _expand_binding_label(label: Optional[str]) -> Dict[str, List[int]]:
     if not label:
         return {}
     mapping: Dict[str, List[int]] = defaultdict(list)
-    for chunk in re.split(r"[;,]", str(label)):
+    for chunk in re.split(r";|,(?=[A-Za-z0-9]+[:_])", str(label)):
         chunk = chunk.strip()
         if not chunk:
             continue
@@ -244,26 +243,90 @@ def _min_hotspot_distance(
     design_path: Optional[str],
     target_path: Optional[str],
     binder_seq: Optional[str] = None,
+    log: Optional[Callable[[str], None]] = None,
 ) -> Optional[float]:
-    """Compute binder↔epitope CA distance using the shared hotspot_distance helper."""
+    """Compute binder↔epitope center distance using the shared hotspot_distance helper."""
+
+    def emit(line: str) -> None:
+        if log:
+            log(line)
+
+    def _bbox_center(coords: List[Tuple[float, float, float]]) -> Optional[Tuple[float, float, float]]:
+        if not coords:
+            return None
+        xs, ys, zs = zip(*coords)
+        return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0, (min(zs) + max(zs)) / 2.0)
+
+    def _min_distance_to_point(
+        coords: List[Tuple[float, float, float]],
+        point: Tuple[float, float, float],
+    ) -> Optional[float]:
+        if not coords:
+            return None
+        px, py, pz = point
+        best = None
+        for ax, ay, az in coords:
+            dx = ax - px
+            dy = ay - py
+            dz = az - pz
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if best is None or dist < best:
+                best = dist
+        return best
+
+    def _format_binding_map(mapping: Dict[str, List[int]]) -> str:
+        parts = []
+        for cid, residues in sorted(mapping.items()):
+            if not residues:
+                continue
+            residue_text = ",".join(str(res) for res in residues)
+            parts.append(f"{cid}:{residue_text}")
+        return "; ".join(parts)
+
+    def _map_chain_by_residue_hits(
+        chain_data: Dict[str, dict],
+        residues: List[int],
+    ) -> Tuple[Optional[str], int]:
+        best_chain = None
+        best_hits = 0
+        best_len = 0
+        for cid, info in chain_data.items():
+            res_map_label = info.get("res_map_label") or {}
+            res_map_auth = info.get("res_map_auth") or {}
+            hits = sum(1 for res in residues if res in res_map_label or res in res_map_auth)
+            if hits == 0:
+                continue
+            seq_len = len(info.get("sequence") or "")
+            if hits > best_hits or (hits == best_hits and seq_len > best_len):
+                best_chain = cid
+                best_hits = hits
+                best_len = seq_len
+        return best_chain, best_hits
 
     label = binding_label or include_label
     if not label or not design_path:
+        emit(f"  skip: missing label or design_path (label={bool(label)}, design_path={bool(design_path)})")
         return None
 
     binding_map = _expand_binding_label(label)
     if not binding_map:
+        emit("  skip: no residues parsed from binding/include label")
         return None
+
+    emit("  chain_id_rule=label_asym_id label_seq_id (auth_asym_id/auth_seq_id fallback)")
 
     design_file = Path(design_path)
     if not design_file.exists():
+        emit(f"  skip: design file missing ({design_file})")
         return None
 
     try:
         design_data = _hs_load_cif_coords(design_file)
     except Exception:
+        emit("  skip: failed to parse design mmCIF")
         return None
     if not design_data:
+        emit("  skip: empty design mmCIF parse")
         return None
 
     target_data: Dict[str, dict] = {}
@@ -275,16 +338,60 @@ def _min_hotspot_distance(
             except Exception:
                 target_data = {}
 
-    def _coords_for_residues(chain_info: dict, residues: List[int]) -> List[Tuple[float, float, float]]:
+    def _coords_for_residues(
+        chain_info: dict,
+        residues: List[int],
+    ) -> Tuple[List[Tuple[float, float, float]], str, int]:
+        res_atoms_label = chain_info.get("res_atoms_label") or {}
+        res_atoms_auth = chain_info.get("res_atoms_auth") or {}
         res_map_label = chain_info.get("res_map_label") or chain_info.get("res_map") or {}
         res_map_auth = chain_info.get("res_map_auth") or {}
-        coords = [res_map_label.get(res) for res in residues if res in res_map_label]
-        if not coords and res_map_auth:
+
+        coords: List[Tuple[float, float, float]] = []
+        found = 0
+        source = "unknown"
+
+        if res_atoms_label:
+            for res in residues:
+                atom_coords = res_atoms_label.get(res)
+                if atom_coords:
+                    coords.extend(atom_coords)
+                    found += 1
+            if coords:
+                return coords, "label_atoms", found
+
+        if res_atoms_auth:
+            for res in residues:
+                atom_coords = res_atoms_auth.get(res)
+                if atom_coords:
+                    coords.extend(atom_coords)
+                    found += 1
+            if coords:
+                return coords, "auth_atoms", found
+
+        if res_map_label:
+            coords = [res_map_label.get(res) for res in residues if res in res_map_label]
+            coords = [c for c in coords if c is not None]
+            found = len(coords)
+            if coords:
+                return coords, "label_ca", found
+
+        if res_map_auth:
             coords = [res_map_auth.get(res) for res in residues if res in res_map_auth]
-        return [c for c in coords if c is not None]
+            coords = [c for c in coords if c is not None]
+            found = len(coords)
+            if coords:
+                return coords, "auth_ca", found
+
+        return [], source, 0
 
     antigen_chain_ids: set[str] = set()
     hotspot_coords: List[Tuple[float, float, float]] = []
+    hotspot_found = 0
+    hotspot_source = None
+
+    emit(f"  label_source={'binding' if binding_label else 'include'} label={label}")
+    emit(f"  epitope_residues={_format_binding_map(binding_map)}")
 
     for chain_id, residues in binding_map.items():
         if not residues:
@@ -298,45 +405,105 @@ def _min_hotspot_distance(
                 if match_id:
                     chain_info = design_data.get(match_id)
                     chain_id = match_id  # map to design chain ID
+                    emit(f"  mapped target chain to design chain: {match_id}")
 
         if chain_info is None:
-            continue
+            if design_data:
+                emit(f"  available_design_chains={','.join(sorted(design_data.keys()))}")
+            if target_data:
+                emit(f"  available_target_chains={','.join(sorted(target_data.keys()))}")
+            match_id, hit_count = _map_chain_by_residue_hits(design_data, residues)
+            if match_id:
+                emit(f"  mapped by residue hits: {chain_id} -> {match_id} (hits={hit_count})")
+                chain_info = design_data.get(match_id)
+                chain_id = match_id
+            else:
+                emit(f"  missing chain in design/target data: {chain_id}")
+                continue
 
-        coords = _coords_for_residues(chain_info, residues)
+        coords, source, found = _coords_for_residues(chain_info, residues)
         if coords:
             hotspot_coords.extend(coords)
+            hotspot_found += found
+            if hotspot_source is None:
+                hotspot_source = source
             antigen_chain_ids.add(chain_id)
 
     if not hotspot_coords:
+        emit("  skip: no epitope coordinates found")
         return None
 
+    center = _bbox_center(hotspot_coords)
+    if center is None:
+        emit("  skip: failed to compute epitope bbox center")
+        return None
+
+    emit(f"  epitope_center=({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})")
+    if hotspot_source:
+        emit(f"  epitope_coords_source={hotspot_source} residue_found={hotspot_found}")
+    if antigen_chain_ids:
+        emit(f"  epitope_chain_ids={','.join(sorted(antigen_chain_ids))}")
+
     binder_chain_id = None
+    align_info = None
     if binder_seq:
         try:
-            binder_chain_id, _info = _hs_pick_binder_chain_by_seq(
+            binder_chain_id, align_info = _hs_pick_binder_chain_by_seq(
                 design_data, binder_seq, min_identity=0.50
             )
         except Exception:
             binder_chain_id = None
+            align_info = None
 
     binder_coords: List[Tuple[float, float, float]] = []
+    binder_source = "unknown"
     if binder_chain_id and binder_chain_id in design_data:
-        binder_coords.extend(design_data[binder_chain_id].get("coords") or [])
+        chain_info = design_data[binder_chain_id]
+        binder_coords.extend(chain_info.get("coords_all") or chain_info.get("coords") or [])
+        binder_source = "all_atoms" if chain_info.get("coords_all") else "ca_atoms"
     else:
         for cid, info in design_data.items():
             if cid in antigen_chain_ids:
                 continue
-            binder_coords.extend(info.get("coords") or [])
+            coords = info.get("coords_all") or info.get("coords") or []
+            if coords:
+                binder_coords.extend(coords)
+        if binder_coords:
+            binder_source = "fallback_chains"
 
     if not binder_coords and design_data:
         # Fallback: if antigen chains could not be excluded, use all chains.
         for info in design_data.values():
-            binder_coords.extend(info.get("coords") or [])
+            binder_coords.extend(info.get("coords_all") or info.get("coords") or [])
+        if binder_coords:
+            binder_source = "fallback_all"
 
     if not binder_coords:
+        emit("  skip: no binder coordinates found")
         return None
 
-    return _hs_min_distance(binder_coords, hotspot_coords)
+    if binder_seq:
+        emit(f"  binder_seq_len={len(str(binder_seq).strip())}")
+        emit(f"  binder_seq={str(binder_seq).strip()}")
+    else:
+        emit("  binder_seq=NA")
+    if binder_chain_id:
+        emit(f"  binder_chain_id={binder_chain_id} binder_coords_source={binder_source} coord_count={len(binder_coords)}")
+    else:
+        emit(f"  binder_chain_id=NA binder_coords_source={binder_source} coord_count={len(binder_coords)}")
+
+    if align_info:
+        score = align_info.get("score")
+        identity = align_info.get("identity")
+        emit(f"  alignment_score={score} identity={identity}")
+        emit(
+            "  alignment_lengths="
+            f"{align_info.get('binder_len')}→{align_info.get('chain_len')} scoring={align_info.get('scoring')}"
+        )
+
+    dist = _min_distance_to_point(binder_coords, center)
+    emit(f"  binder_to_center_min_distance={dist:.3f} Å" if dist is not None else "  binder_to_center_min_distance=NA")
+    return dist
 
 
 def _read_mmcif_chain_label_seq_range(mmcif_path: Path) -> Dict[str, Tuple[int, int]]:
@@ -978,6 +1145,55 @@ def _epitope_labels_from_target(target_dir: Path) -> Dict[int, dict]:
     return labels
 
 
+def _epitope_index_from_label(epitope_id: Optional[str], epitope_name: Optional[str]) -> Optional[int]:
+    for raw in (epitope_id, epitope_name):
+        if not raw:
+            continue
+        match = re.search(r"(\d+)", str(raw))
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+    return None
+
+
+def _fallback_label_from_target(pdb_id: str, epitope_id: Optional[str], epitope_name: Optional[str]) -> Optional[str]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+    labels = _epitope_labels_from_target(target_dir)
+    idx = _epitope_index_from_label(epitope_id, epitope_name)
+    if idx is None:
+        return None
+    entry = labels.get(idx) or {}
+    residues = entry.get("residues") or []
+    tokens: List[str] = []
+    for item in residues:
+        if isinstance(item, str):
+            token = item.strip()
+            if token:
+                tokens.append(token)
+            continue
+        if isinstance(item, dict):
+            chain_id = str(item.get("chain") or item.get("id") or "").strip()
+            res_index = item.get("res_index") or item.get("residues")
+            if isinstance(res_index, list):
+                for res in res_index:
+                    if not res:
+                        continue
+                    if chain_id:
+                        tokens.append(f"{chain_id}:{res}")
+                    else:
+                        tokens.append(str(res))
+            elif res_index:
+                if chain_id:
+                    tokens.append(f"{chain_id}:{res_index}")
+                else:
+                    tokens.append(str(res_index))
+    return ";".join(tokens) if tokens else None
+
+
 def _binding_label_from_entries(entries: Iterable[dict], key: str) -> List[str]:
     tokens: List[str] = []
     for entry in entries:
@@ -1595,7 +1811,7 @@ def _plots_dir(timestamp: str) -> Path:
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
 _DIVERSITY_CACHE_VERSION = 2
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
-_BINDER_CACHE_VERSION = 2
+_BINDER_CACHE_VERSION = 3
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
@@ -1762,6 +1978,59 @@ def _get_cached_binder_rows(
     start = (page_val - 1) * page_size_val
     end = start + page_size_val
     page_rows = [BoltzgenBinderRow(**row) for row in rows[start:end]]
+
+    if page_rows:
+        log_path = out_dir / "boltzgen_hotspot_distance.log"
+        handle = log_path.open("a", encoding="utf-8")
+
+        def log(line: str) -> None:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            handle.write(f"{timestamp} {line}\n")
+            handle.flush()
+
+        try:
+            log(
+                "[hotspot-distance] request "
+                f"page={page_val} page_size={page_size_val} "
+                f"filter_pdb={filter_pdb or ''} filter_epitope={filter_epitope or ''} order_by={order_by or ''}"
+            )
+            for row in page_rows:
+                if row.hotspot_dist is not None:
+                    continue
+                log(
+                    "[hotspot-distance] row "
+                    f"pdb_id={row.pdb_id} epitope={row.epitope_id or row.epitope or ''} rank={row.rank}"
+                )
+                log(
+                    "  "
+                    f"design_path={row.design_path or 'NA'} "
+                    f"target_path={row.target_path or 'NA'} "
+                    f"config_path={row.config_path or 'NA'} "
+                    f"binding_label={row.binding_label or 'NA'} "
+                    f"include_label={row.include_label or 'NA'} "
+                    f"binder_seq_len={len(row.binder_seq) if row.binder_seq else 'NA'}"
+                )
+                binding_label = row.binding_label
+                include_label = row.include_label
+                if not binding_label and not include_label:
+                    fallback = _fallback_label_from_target(row.pdb_id, row.epitope_id, row.epitope)
+                    if fallback:
+                        include_label = fallback
+                        log(f"  fallback_label=target.yaml ({fallback})")
+                    else:
+                        log("  fallback_label=none")
+                row.hotspot_dist = _min_hotspot_distance(
+                    binding_label=binding_label,
+                    include_label=include_label,
+                    design_path=row.design_path,
+                    target_path=row.target_path,
+                    binder_seq=row.binder_seq,
+                    log=log,
+                )
+            log("[hotspot-distance] complete")
+        finally:
+            handle.close()
+
     return page_rows, total
 
 
@@ -3391,24 +3660,25 @@ def _load_binder_rows_from_csv(
                     epitope_id = ep_norm
             binding_label = cfg_meta.get("binding_label")
             include_label = cfg_meta.get("include_label")
+            binder_seq = (
+                raw.get("designed_chain_sequence")
+                or raw.get("designed_sequence")
+                or raw.get("binder_seq")
+                or raw.get("binder_sequence")
+                or raw.get("binder_sequence_aa")
+                or raw.get("aa_seq")
+                or raw.get("sequence_aa")
+                or raw.get("sequence")
+            )
+            binder_seq_clean = str(binder_seq).strip() if binder_seq else None
             hotspot_dist = None
             if compute_hotspot_distance:
-                binder_seq = (
-                    raw.get("designed_chain_sequence")
-                    or raw.get("designed_sequence")
-                    or raw.get("binder_seq")
-                    or raw.get("binder_sequence")
-                    or raw.get("binder_sequence_aa")
-                    or raw.get("aa_seq")
-                    or raw.get("sequence_aa")
-                    or raw.get("sequence")
-                )
                 hotspot_dist = _min_hotspot_distance(
                     binding_label=binding_label,
                     include_label=include_label,
                     design_path=design_path,
                     target_path=target_path,
-                    binder_seq=str(binder_seq).strip() if binder_seq else None,
+                    binder_seq=binder_seq_clean,
                 )
 
             all_rows.append(
@@ -3420,6 +3690,7 @@ def _load_binder_rows_from_csv(
                     iptm=iptm_val,
                     rmsd=rmsd_val,
                     hotspot_dist=hotspot_dist,
+                    binder_seq=binder_seq_clean,
                     design_path=design_path,
                     metrics_path=str(metrics_path) if metrics_path else None,
                     run_label=run_label,

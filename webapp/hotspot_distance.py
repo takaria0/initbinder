@@ -86,6 +86,9 @@ def _load_cif_coords(path: Path) -> Dict[str, dict]:
     res_map_label: Dict[str, Dict[int, Coord]] = {}
     res_map_auth: Dict[str, Dict[int, Coord]] = {}
     coords_list: Dict[str, List[Coord]] = {}
+    coords_all: Dict[str, List[Coord]] = {}
+    res_atoms_label: Dict[str, Dict[int, List[Coord]]] = {}
+    res_atoms_auth: Dict[str, Dict[int, List[Coord]]] = {}
     columns: List[str] = []
     in_loop = False
     atom_loop = False
@@ -144,9 +147,6 @@ def _load_cif_coords(path: Path) -> Dict[str, dict]:
                 if label_seq and comp:
                     chain_seq.setdefault(chain_id, {})[label_seq] = aa_map.get(comp.upper(), "X")
 
-                if atom_id != "CA":
-                    continue
-
                 try:
                     x = float(row.get("_atom_site.Cartn_x", 0.0))
                     y = float(row.get("_atom_site.Cartn_y", 0.0))
@@ -155,6 +155,15 @@ def _load_cif_coords(path: Path) -> Dict[str, dict]:
                     continue
 
                 coord = (x, y, z)
+                coords_all.setdefault(chain_id, []).append(coord)
+                if label_seq:
+                    res_atoms_label.setdefault(chain_id, {}).setdefault(label_seq, []).append(coord)
+                if auth_seq:
+                    res_atoms_auth.setdefault(chain_id, {}).setdefault(auth_seq, []).append(coord)
+
+                if atom_id != "CA":
+                    continue
+
                 if label_seq:
                     res_map_label.setdefault(chain_id, {})[label_seq] = coord
                 if auth_seq:
@@ -173,6 +182,9 @@ def _load_cif_coords(path: Path) -> Dict[str, dict]:
             "res_map_label": res_map_label.get(chain_id, {}),
             "res_map_auth": res_map_auth.get(chain_id, {}),
             "coords": coords_list.get(chain_id, []),
+            "coords_all": coords_all.get(chain_id, []),
+            "res_atoms_label": res_atoms_label.get(chain_id, {}),
+            "res_atoms_auth": res_atoms_auth.get(chain_id, {}),
         }
     return data
 
