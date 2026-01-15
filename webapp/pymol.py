@@ -374,6 +374,12 @@ python end
 
     if not snapshot_path.exists():
         raise PyMolLaunchError(f"Snapshot not produced; check {log_path}")
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\nSnapshot saved at: {snapshot_path}\n")
+    except Exception:
+        pass
+    print(f"[pymol] hotspot snapshot saved → {snapshot_path}")
     return snapshot_path
 
 

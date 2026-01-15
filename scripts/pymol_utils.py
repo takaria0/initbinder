@@ -437,13 +437,13 @@ def _append_auth_tokens(
                 mapped = mapping.get((chain, pos))
                 if mapped:
                     aa, apos = mapped
-                    token = f"{aa}{apos}"
+                    token = f"{aa}:{apos}"
                 elif strict_auth:
                     if dropped is not None:
                         dropped.append(f"{chain}{pos}")
                     continue
                 else:
-                    token = f"{chain}{pos}"
+                    token = f"{chain}:{pos}"
                 if token not in seen:
                     out.append(token)
                     seen.add(token)
@@ -459,13 +459,13 @@ def _append_auth_tokens(
                 continue
             mapped = mapping.get((chain, pos))
             if mapped:
-                token = f"{mapped[0]}{mapped[1]}"
+                token = f"{mapped[0]}:{mapped[1]}"
             elif strict_auth:
                 if dropped is not None:
                     dropped.append(text)
                 continue
             else:
-                token = f"{chain}{pos}"
+                token = f"{chain}:{pos}"
             if token not in seen:
                 out.append(token)
                 seen.add(token)

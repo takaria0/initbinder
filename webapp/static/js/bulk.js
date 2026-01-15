@@ -2596,6 +2596,8 @@ async function startBulkRun(options = {}) {
     triggerEl = null,
     llmDelaySeconds = null,
     decideScopeAttempts = null,
+    launchPymolOverride = null,
+    renderSnapshotsOverride = null,
   } = options;
   const csvText = el.bulkCsvInput?.value || '';
   if (!csvText.trim()) {
@@ -2614,11 +2616,18 @@ async function startBulkRun(options = {}) {
     if (raw < 0) return 0;
     return raw;
   })();
+  const launchPymol = typeof launchPymolOverride === 'boolean'
+    ? launchPymolOverride
+    : (el.bulkLaunchPymol ? el.bulkLaunchPymol.checked : true);
+  const renderSnapshots = typeof renderSnapshotsOverride === 'boolean'
+    ? renderSnapshotsOverride
+    : launchPymol;
   const payload = {
     csv_text: csvText,
     num_epitopes: numEpitopes,
     decide_scope_prompt: (el.bulkEpitopePrompt?.value || '').trim() || null,
-    launch_pymol: el.bulkLaunchPymol ? el.bulkLaunchPymol.checked : true,
+    launch_pymol: launchPymol,
+    render_pymol_snapshots: renderSnapshots,
     export_insights: el.bulkExportInsights ? el.bulkExportInsights.checked : true,
     export_designs: el.bulkExportDesigns ? el.bulkExportDesigns.checked : true,
     submit_designs: submitDesignsOverride ?? true,
@@ -2912,6 +2921,8 @@ async function handleVisualizeEpitopes() {
     triggerEl: el.bulkVisualizeEpitopes,
     llmDelaySeconds: 5,
     decideScopeAttempts: 3,
+    launchPymolOverride: false,
+    renderSnapshotsOverride: true,
   });
   scrollToSnapshots();
 }

@@ -3545,10 +3545,21 @@ def run_bulk_workflow(
         else:
             log("  Prep already present; skipping init/decide/prep.")
 
-        if request.launch_pymol:
+        render_snapshots = request.render_pymol_snapshots
+        if render_snapshots is None:
+            render_snapshots = request.launch_pymol
+
+        if request.launch_pymol or render_snapshots:
             if status and status.get("has_prep"):
-                try:
-                    bundle_path, launched = launch_hotspots(pdb_id, launch=True)
+                if request.launch_pymol:
+                    try:
+                        bundle_path, launched = launch_hotspots(pdb_id, launch=True)
+                    except PyMolLaunchError as exc:
+                        log(f"  ! PyMOL launch failed: {exc}")
+                    else:
+                        location = str(bundle_path) if bundle_path else "cache"
+                        log(f"  PyMOL {'launched' if launched else 'bundle ready'} @ {location}")
+                if render_snapshots:
                     try:
                         log("  Rendering hotspot snapshot…")
                         snap = render_hotspot_snapshot(pdb_id)
@@ -3565,13 +3576,8 @@ def run_bulk_workflow(
                         job_store.update(job_id, details={"snapshots": list(snapshots)})
                     except Exception as exc:
                         log(f"  ! Snapshot failed: {exc}")
-                except PyMolLaunchError as exc:
-                    log(f"  ! PyMOL launch failed: {exc}")
-                else:
-                    location = str(bundle_path) if bundle_path else "cache"
-                    log(f"  PyMOL {'launched' if launched else 'bundle ready'} @ {location}")
             else:
-                log("  ! Prep not found; skipping PyMOL launch.")
+                log("  ! Prep not found; skipping PyMOL launch/snapshot.")
 
         alignment = None
         alignment_error = None

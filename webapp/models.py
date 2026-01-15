@@ -221,6 +221,7 @@ class BulkRunRequest(BaseModel):
     num_epitopes: Optional[int] = Field(None, ge=1, le=32)
     decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
     launch_pymol: bool = True
+    render_pymol_snapshots: Optional[bool] = None
     export_insights: bool = True
     export_designs: bool = True
     submit_designs: bool = False
