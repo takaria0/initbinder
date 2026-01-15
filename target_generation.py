@@ -106,13 +106,13 @@ except Exception as e:
 
 # OpenAI configuration (optional)
 try:
-    from env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER
+    from env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER, MODEL
 except Exception:
     _OPENAI_API_KEY = None
     _LLM_PROVIDER = None
 OPENAI_API_KEY = _OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
 LLM_PROVIDER = str((_LLM_PROVIDER or os.getenv("LLM_PROVIDER", ""))).strip().lower()
-OPENAI_FLASH_MODEL_NAME = OPENAI_API_KEY
+OPENAI_FLASH_MODEL_NAME = MODEL
 
 # Groq fallback for LLM Flash (vendor parsing)
 try:

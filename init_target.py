@@ -285,19 +285,31 @@ def _extract_chain_details_from_entry(entry: Optional[dict], chainmap: dict[str,
 
 
 _RANGE_NUM_RE = re.compile(r"-?\d+")
+_RANGE_PAIR_RE = re.compile(r"(-?\d+)\s*(?:-|to|\.{2})\s*(-?\d+)", re.IGNORECASE)
 
 
 def _parse_vendor_range(value: str | None) -> Optional[tuple[int, int]]:
     if not value:
         return None
-    nums = _RANGE_NUM_RE.findall(str(value))
-    if not nums:
+    text = str(value).strip()
+    if not text:
         return None
-    try:
-        start = int(nums[0])
-        end = int(nums[1]) if len(nums) > 1 else start
-    except ValueError:
-        return None
+    match = _RANGE_PAIR_RE.search(text)
+    if match:
+        try:
+            start = int(match.group(1))
+            end = int(match.group(2))
+        except ValueError:
+            return None
+    else:
+        nums = _RANGE_NUM_RE.findall(text)
+        if not nums:
+            return None
+        try:
+            start = int(nums[0])
+            end = int(nums[1]) if len(nums) > 1 else start
+        except ValueError:
+            return None
     if end < start:
         start, end = end, start
     return start, end
