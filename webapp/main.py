@@ -9,6 +9,7 @@ import base64
 import datetime
 from pathlib import Path
 import yaml
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
@@ -905,8 +906,18 @@ async def api_bulk_file(name: str) -> FileResponse:
 async def api_boltzgen_diversity(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=200),
+    filter_pdb: Optional[str] = Query(None),
+    filter_epitope: Optional[str] = Query(None),
+    order_by: Optional[str] = Query(None),
 ) -> BoltzgenDiversityResponse:
-    return build_boltzgen_diversity_report(include_binders=True, binder_page=page, binder_page_size=page_size)
+    return build_boltzgen_diversity_report(
+        include_binders=True,
+        binder_page=page,
+        binder_page_size=page_size,
+        binder_filter_pdb=filter_pdb,
+        binder_filter_epitope=filter_epitope,
+        binder_order_by=order_by,
+    )
 
 
 @app.get("/api/bulk/boltzgen/binders", response_model=BoltzgenBinderResponse)
@@ -915,11 +926,21 @@ async def api_boltzgen_binders(
     pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=100),
+    filter_pdb: Optional[str] = Query(None),
+    filter_epitope: Optional[str] = Query(None),
+    order_by: Optional[str] = Query(None),
 ) -> BoltzgenBinderResponse:
     response.headers["Cache-Control"] = "no-store"
     print(f"Received request for BoltzGen binders: pdb_ids={pdb_ids}, page={page}, page_size={page_size}")
     ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
-    return list_boltzgen_binders(ids, page=page, page_size=page_size)
+    return list_boltzgen_binders(
+        ids,
+        page=page,
+        page_size=page_size,
+        filter_pdb=filter_pdb,
+        filter_epitope=filter_epitope,
+        order_by=order_by,
+    )
 
 
 @app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)

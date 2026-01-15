@@ -25,6 +25,7 @@ const state = {
   boltzDesignCounts: {},
   bulkPreviewTimer: null,
   bulkPreviewSig: null,
+  binderFilterTimer: null,
 };
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
@@ -292,6 +293,22 @@ function scheduleBulkPreview() {
     state.bulkPreviewSig = sig;
     previewBulkCsv({ silent: true });
   }, 650);
+}
+
+function getBinderFilters() {
+  return {
+    pdb: (el.binderFilterPdb?.value || '').trim(),
+    epitope: (el.binderFilterEpitope?.value || '').trim(),
+    orderBy: (el.binderOrderBy?.value || '').trim(),
+  };
+}
+
+function scheduleBinderRefresh({ silent = true } = {}) {
+  if (state.binderFilterTimer) clearTimeout(state.binderFilterTimer);
+  state.binderFilterTimer = setTimeout(() => {
+    state.binderPage = 1;
+    refreshDiversity({ silent, page: 1 });
+  }, 300);
 }
 
 function renderHistogram(container, values = [], { bins = 8, label = 'values' } = {}) {
@@ -961,6 +978,10 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
     const nextPage = page ?? state.binderPage ?? 1;
     params.append('page', String(nextPage));
     params.append('page_size', String(state.binderPageSize || 100));
+    const filters = getBinderFilters();
+    if (filters.pdb) params.append('filter_pdb', filters.pdb);
+    if (filters.epitope) params.append('filter_epitope', filters.epitope);
+    if (filters.orderBy) params.append('order_by', filters.orderBy);
     const res = await fetch(`/api/bulk/boltzgen/diversity?${params.toString()}`);
     if (!res.ok) throw new Error('Unable to load diversity report');
     const data = await res.json();
@@ -1058,53 +1079,7 @@ function renderBinderRows(rows = []) {
   if (!el.binderTable || !el.binderPanel) return;
   const tbody = el.binderTable;
   tbody.innerHTML = '';
-  const pdbFilter = (el.binderFilterPdb?.value || '').trim().toUpperCase();
-  const epFilter = (el.binderFilterEpitope?.value || '').trim().toLowerCase();
-  const orderBy = (el.binderOrderBy?.value || '').trim().toLowerCase();
-
-  const filtered = rows.filter((row) => {
-    const pdb = (row.pdb_id || '').toUpperCase();
-    const ep = (row.epitope || '').toLowerCase();
-    if (pdbFilter && !pdb.includes(pdbFilter)) return false;
-    if (epFilter && !ep.includes(epFilter)) return false;
-    return true;
-  });
-
-  const sorted = [...filtered];
-  const numeric = (val) => {
-    const num = Number(val);
-    return Number.isFinite(num) ? num : null;
-  };
-  if (orderBy === 'iptm') {
-    sorted.sort((a, b) => (numeric(b.iptm) ?? -Infinity) - (numeric(a.iptm) ?? -Infinity));
-  } else if (orderBy === 'rmsd') {
-    sorted.sort((a, b) => {
-      const av = numeric(a.rmsd);
-      const bv = numeric(b.rmsd);
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
-      return av - bv;
-    });
-  } else if (orderBy === 'rank') {
-    sorted.sort((a, b) => {
-      const av = numeric(a.rank);
-      const bv = numeric(b.rank);
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
-      return av - bv;
-    });
-  } else if (orderBy === 'hotspot') {
-    sorted.sort((a, b) => {
-      const av = numeric(a.hotspot_dist);
-      const bv = numeric(b.hotspot_dist);
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
-      return av - bv;
-    });
-  }
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
 
   const noteRow = () => {
     const tr = document.createElement('tr');
@@ -1116,10 +1091,10 @@ function renderBinderRows(rows = []) {
     return tr;
   };
 
-  if (!sorted.length) {
+  if (!list.length) {
     tbody.appendChild(noteRow());
   } else {
-    sorted.forEach((row, idx) => {
+    list.forEach((row, idx) => {
       const tr = document.createElement('tr');
       const values = [
         row.pdb_id || '—',
@@ -1165,7 +1140,7 @@ function renderBinderRows(rows = []) {
 
   if (el.binderSummary) {
     const msg = state.binderMessage || '';
-    const summaryText = msg || `Showing ${sorted.length} of ${state.binderTotal || rows.length} binders`;
+    const summaryText = msg || `Showing ${list.length} of ${state.binderTotal || rows.length} binders`;
     el.binderSummary.textContent = summaryText;
     el.binderSummary.hidden = false;
   }
@@ -1221,6 +1196,10 @@ async function loadBinderTable({ page = 1, silent = false, force = false } = {})
   params.append('pdb_ids', ids.join(','));
   params.append('page', String(page));
   params.append('page_size', String(state.binderPageSize || 100));
+  const filters = getBinderFilters();
+  if (filters.pdb) params.append('filter_pdb', filters.pdb);
+  if (filters.epitope) params.append('filter_epitope', filters.epitope);
+  if (filters.orderBy) params.append('order_by', filters.orderBy);
   if (force) params.append('_ts', String(Date.now()));
   try {
     if (el.binderRefresh) el.binderRefresh.disabled = true;
@@ -2993,12 +2972,20 @@ function init() {
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
-  [el.binderFilterPdb, el.binderFilterEpitope, el.binderOrderBy].forEach((input) => {
-    if (input) {
-      input.addEventListener('input', () => renderBinderRows(state.binderRows || []));
-      input.addEventListener('change', () => renderBinderRows(state.binderRows || []));
-    }
-  });
+  if (el.binderFilterPdb) {
+    el.binderFilterPdb.addEventListener('input', () => scheduleBinderRefresh({ silent: true }));
+    el.binderFilterPdb.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
+  }
+  if (el.binderFilterEpitope) {
+    el.binderFilterEpitope.addEventListener('input', () => scheduleBinderRefresh({ silent: true }));
+    el.binderFilterEpitope.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
+  }
+  if (el.binderOrderBy) {
+    el.binderOrderBy.addEventListener('change', () => {
+      state.binderPage = 1;
+      refreshDiversity({ silent: true, page: 1 });
+    });
+  }
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));

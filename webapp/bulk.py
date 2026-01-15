@@ -1683,6 +1683,9 @@ def _get_cached_binder_rows(
     csv_path: Path,
     *,
     ids: Optional[List[str]] = None,
+    filter_pdb: Optional[str] = None,
+    filter_epitope: Optional[str] = None,
+    order_by: Optional[str] = None,
     page: int = 1,
     page_size: int = 100,
     out_dir: Optional[Path] = None,
@@ -1700,6 +1703,51 @@ def _get_cached_binder_rows(
     if ids:
         wanted = {p.strip().upper() for p in ids if p and str(p).strip()}
         rows = [row for row in rows if str(row.get("pdb_id") or "").strip().upper() in wanted]
+
+    pdb_filter = str(filter_pdb or "").strip().upper()
+    ep_filter = str(filter_epitope or "").strip().lower()
+    if pdb_filter or ep_filter:
+        rows = [
+            row
+            for row in rows
+            if (
+                (not pdb_filter or pdb_filter in str(row.get("pdb_id") or "").strip().upper())
+                and (not ep_filter or ep_filter in str(row.get("epitope") or "").strip().lower())
+            )
+        ]
+
+    order_key = str(order_by or "").strip().lower()
+    if order_key:
+        def _num(val: object) -> Optional[float]:
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                return None
+            return num if math.isfinite(num) else None
+
+        if order_key == "iptm":
+            rows = sorted(
+                rows,
+                key=lambda row: (0 if _num(row.get("iptm")) is not None else 1, -(_num(row.get("iptm")) or 0.0)),
+            )
+        elif order_key == "rmsd":
+            rows = sorted(
+                rows,
+                key=lambda row: (0 if _num(row.get("rmsd")) is not None else 1, _num(row.get("rmsd")) or 0.0),
+            )
+        elif order_key == "rank":
+            rows = sorted(
+                rows,
+                key=lambda row: (0 if _num(row.get("rank")) is not None else 1, _num(row.get("rank")) or 0.0),
+            )
+        elif order_key == "hotspot":
+            rows = sorted(
+                rows,
+                key=lambda row: (
+                    0 if _num(row.get("hotspot_dist")) is not None else 1,
+                    _num(row.get("hotspot_dist")) or 0.0,
+                ),
+            )
 
     total = len(rows)
     page_val = max(1, int(page))
@@ -1750,6 +1798,9 @@ def _response_from_diversity_cache(
     include_binders: bool,
     binder_page: int,
     binder_page_size: int,
+    binder_filter_pdb: Optional[str] = None,
+    binder_filter_epitope: Optional[str] = None,
+    binder_order_by: Optional[str] = None,
 ) -> Optional[BoltzgenDiversityResponse]:
     csv_name = cache.get("csv_name") or None
     csv_path = out_dir / csv_name if csv_name else None
@@ -1778,13 +1829,18 @@ def _response_from_diversity_cache(
         binder_rows, binder_total = _get_cached_binder_rows(
             csv_path,
             ids=binder_ids,
+            filter_pdb=binder_filter_pdb,
+            filter_epitope=binder_filter_epitope,
+            order_by=binder_order_by,
             page=page_val,
             page_size=page_size_val,
             out_dir=out_dir,
         )
-        binder_msg = (
-            f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
-        )
+        filters_active = bool((binder_filter_pdb or "").strip() or (binder_filter_epitope or "").strip())
+        if binder_total:
+            binder_msg = f"Showing {len(binder_rows)} of {binder_total} binders"
+        else:
+            binder_msg = "No binders match current filters." if filters_active else "No BoltzGen binders found."
 
     return BoltzgenDiversityResponse(
         csv_name=csv_name,
@@ -2377,6 +2433,9 @@ def build_boltzgen_diversity_report(
     include_binders: bool = False,
     binder_page: int = 1,
     binder_page_size: int = 100,
+    binder_filter_pdb: Optional[str] = None,
+    binder_filter_epitope: Optional[str] = None,
+    binder_order_by: Optional[str] = None,
 ) -> BoltzgenDiversityResponse:
     """Aggregate BoltzGen metrics and render diversity plots."""
 
@@ -2401,6 +2460,9 @@ def build_boltzgen_diversity_report(
                 include_binders=include_binders,
                 binder_page=binder_page,
                 binder_page_size=binder_page_size,
+                binder_filter_pdb=binder_filter_pdb,
+                binder_filter_epitope=binder_filter_epitope,
+                binder_order_by=binder_order_by,
             )
             if cached:
                 return cached
@@ -2688,13 +2750,18 @@ def build_boltzgen_diversity_report(
         binder_rows, binder_total = _get_cached_binder_rows(
             csv_path,
             ids=binder_ids,
+            filter_pdb=binder_filter_pdb,
+            filter_epitope=binder_filter_epitope,
+            order_by=binder_order_by,
             page=page_val,
             page_size=page_size_val,
             out_dir=out_dir,
         )
-        binder_msg = (
-            f"Showing {len(binder_rows)} of {binder_total} binders" if binder_total else "No BoltzGen binders found."
-        )
+        filters_active = bool((binder_filter_pdb or "").strip() or (binder_filter_epitope or "").strip())
+        if binder_total:
+            binder_msg = f"Showing {len(binder_rows)} of {binder_total} binders"
+        else:
+            binder_msg = "No binders match current filters." if filters_active else "No BoltzGen binders found."
 
     plot_entries: List[BoltzgenDiversityPlot] = list(epitope_plot_entries)
     try:
@@ -3355,7 +3422,13 @@ def _load_binder_rows_from_csv(
 
 
 def list_boltzgen_binders(
-    pdb_ids: List[str], *, page: int = 1, page_size: int = 50
+    pdb_ids: List[str],
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    filter_pdb: Optional[str] = None,
+    filter_epitope: Optional[str] = None,
+    order_by: Optional[str] = None,
 ) -> BoltzgenBinderResponse:
     ids = [p.strip().upper() for p in pdb_ids if p and str(p).strip()]
     if not ids:
@@ -3382,14 +3455,21 @@ def list_boltzgen_binders(
     page_rows, total_rows = _get_cached_binder_rows(
         csv_path,
         ids=ids,
+        filter_pdb=filter_pdb,
+        filter_epitope=filter_epitope,
+        order_by=order_by,
         page=page,
         page_size=page_size,
         out_dir=_output_dir(),
     )
 
     message = report.message
+    filters_active = bool((filter_pdb or "").strip() or (filter_epitope or "").strip())
     if total_rows == 0:
-        message = report.message or "No BoltzGen metrics detected for the requested targets."
+        if filters_active:
+            message = "No binders match current filters."
+        else:
+            message = report.message or "No BoltzGen metrics detected for the requested targets."
     else:
         message = f"Showing {len(page_rows)} of {total_rows} binders"
 
