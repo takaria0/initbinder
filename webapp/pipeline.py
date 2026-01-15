@@ -378,7 +378,7 @@ def init_decide_prep(
             except Exception as exc:
                 if attempt >= attempts:
                     raise
-                wait_next = max(70.0, cooldown)
+                wait_next = max(5.0, cooldown)
                 job_store.append_log(
                     job_id,
                     f"[decide-scope] attempt {attempt} failed ({exc}); waiting {wait_next:.0f}s before retry",

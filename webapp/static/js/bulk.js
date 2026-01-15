@@ -27,7 +27,7 @@ const state = {
   bulkPreviewSig: null,
 };
 
-const PIPELINE_RERUN_DELAY_MS = 70000;
+const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
 
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
@@ -1452,13 +1452,14 @@ async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}
       if (!id) continue;
       const row = findBulkRowForPdb(id);
       const fallback = row ? null : findAccessionsFromInput(id);
+      const antigenUrl = (item?.antigen_url || row?.antigen_url || '').trim() || null;
       const payload = {
         pdb_id: id,
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
         design_count: designCount,
-        antigen_url: item?.antigen_url || null,
+        antigen_url: antigenUrl,
         target_accession: row?.accession || fallback?.accession || null,
         target_vendor_range: row?.vendor_range || fallback?.vendor_range || null,
       };
@@ -1598,7 +1599,6 @@ async function showRunCommandRange() {
 async function submitPipelineRerun(triggerBtn = null) {
   const bulkIds = el.pipelineRerunModal?.dataset?.bulkIds;
   const pdbId = el.pipelineRerunModal?.dataset?.pdbId;
-  const antigenUrl = el.pipelineRerunModal?.dataset?.antigenUrl || null;
   const expectedRaw = el.pipelineRerunExpected?.value;
   const attemptsRaw = el.pipelineRerunAttempts?.value;
   const expected = expectedRaw ? Number(expectedRaw) || null : null;
@@ -1613,6 +1613,7 @@ async function submitPipelineRerun(triggerBtn = null) {
     } else if (pdbId) {
       const row = findBulkRowForPdb(pdbId);
       const fallback = row ? null : findAccessionsFromInput(pdbId);
+      const antigenUrl = (el.pipelineRerunModal?.dataset?.antigenUrl || row?.antigen_url || '').trim() || null;
       const payload = {
         pdb_id: pdbId,
         force,
@@ -2909,7 +2910,7 @@ async function handleVisualizeEpitopes() {
   await startBulkRun({
     submitDesignsOverride: false,
     triggerEl: el.bulkVisualizeEpitopes,
-    llmDelaySeconds: 70,
+    llmDelaySeconds: 5,
     decideScopeAttempts: 3,
   });
   scrollToSnapshots();
