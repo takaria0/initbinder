@@ -54,6 +54,18 @@ Tip: You can also include the biotin TSV in --avoid_tsv if desired:
     ... --avoid_tsv \
     /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
     /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_biotin.tsv
+    
+    
+    
+# latest run 2026-01-17:
+python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation.py \
+  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/Webscraper/sino_biotinylated_unique.tsv \
+  --max_targets 1000 \
+  --species human \
+  --prefer_tags biotin \
+  --no_browser_popup \
+  --out_prefix sino_biotinylated_unique
+
 """
 
 from __future__ import annotations
@@ -92,7 +104,7 @@ try:
     genai.configure(api_key=GOOGLE_API_KEY)
     LLM_PRO_MODEL_NAME = "gemini-2.5-pro"
     LLM_FLASH_MODEL_NAME = "gemini-2.5-flash-lite"
-    SLEEP_PER_TARGET_SEC = 60
+    SLEEP_PER_TARGET_SEC = 1
     MAX_BODY_CHARS_PER_PAGE = 10_000
     MAX_BODY_TOTAL_CHARS = 1_000_000
     print(f"[info] Google GenAI configured with models: PRO={LLM_PRO_MODEL_NAME}, FLASH={LLM_FLASH_MODEL_NAME}")
@@ -414,13 +426,21 @@ def _vendor_page_cache_path(url: str) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p / f"{h}.html"
 
-def fetch_product_html(url: str, timeout: int = 45) -> Optional[str]:
-    if not url: 
-        return None
+def fetch_product_html(url: str, timeout: int = 45) -> Tuple[Optional[str], Optional[str]]:
+    if not url:
+        return None, None
     out_path = _vendor_page_cache_path(url)
+    meta_path = out_path.with_suffix(".meta.json")
     if out_path.exists():
+        final_url = None
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                final_url = meta.get("final_url") or None
+            except Exception:
+                final_url = None
         log_debug(f"[fetch] cache hit: {url} -> {out_path}")
-        return str(out_path)
+        return str(out_path), final_url
     try:
         with sync_playwright() as pw:
             log_debug(f"[fetch] launching Playwright (headless={BROWSER_HEADLESS})")
@@ -428,13 +448,34 @@ def fetch_product_html(url: str, timeout: int = 45) -> Optional[str]:
             page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             html = page.content()
+            final_url = page.url
             browser.close()
         out_path.write_text(html, encoding="utf-8", errors="ignore")
+        meta_path.write_text(
+            json.dumps(
+                {"original_url": url, "final_url": final_url, "fetched_at": datetime.now().isoformat()},
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        if final_url and final_url != url:
+            alt_path = _vendor_page_cache_path(final_url)
+            alt_meta = alt_path.with_suffix(".meta.json")
+            if not alt_path.exists():
+                alt_path.write_text(html, encoding="utf-8", errors="ignore")
+            if not alt_meta.exists():
+                alt_meta.write_text(
+                    json.dumps(
+                        {"original_url": url, "final_url": final_url, "fetched_at": datetime.now().isoformat()},
+                        ensure_ascii=True,
+                    ),
+                    encoding="utf-8",
+                )
         log_debug(f"[fetch] saved: {url} -> {out_path}")
-        return str(out_path)
+        return str(out_path), final_url
     except Exception as e:
         log_info(f"[warn] Playwright failed to fetch {url}: {e}")
-        return None
+        return None, None
 
 # -------------- JSON Utils --------------
 import ast
@@ -733,10 +774,13 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
         if not opt.url:
             opt.llm_analysis = LLMAnalysisResult(error="Missing URL")
             continue
-        html_path = fetch_product_html(opt.url)
+        html_path, final_url = fetch_product_html(opt.url)
         if not html_path:
             opt.llm_analysis = LLMAnalysisResult(error="Failed to fetch HTML")
             continue
+        if final_url and final_url != opt.url:
+            log_info(f"[info] Resolved product URL for {opt.catalog}: {final_url}")
+            opt.url = final_url
         opt.page_html_cache = html_path
         html_content = Path(html_path).read_text(encoding="utf-8", errors="ignore")
         body = _extract_body_text(html_content, max_chars=MAX_BODY_CHARS_PER_PAGE)
@@ -915,7 +959,63 @@ def _taxonomy_id_for_species(species: str) -> Optional[str]:
     return None
 
 
+def _sanitize_uniprot_term(term: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9\s\-]", " ", term or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _expand_term_variants(term: str) -> List[str]:
+    """Generate safe UniProt query variants from a noisy label."""
+    if not term:
+        return []
+    cleaned = re.sub(r"\([^)]*\)", " ", term)
+    parts = re.split(r"[\/|,;]+", cleaned)
+    pieces: List[str] = []
+    for part in parts:
+        pieces.extend(re.split(r"\s+", part.strip()))
+
+    tokens: List[str] = []
+    for p in pieces:
+        if not p:
+            continue
+        s = re.sub(r"[^A-Za-z0-9\-]", "", p)
+        if s:
+            tokens.append(s)
+
+    greek_map = {"alpha": "A", "beta": "B", "gamma": "G", "delta": "D", "epsilon": "E"}
+    combos: List[str] = []
+    for i, tok in enumerate(tokens):
+        key = tok.lower()
+        if key in greek_map and i > 0:
+            prev = tokens[i - 1]
+            if re.search(r"\d", prev):
+                combos.append(f"{prev}{greek_map[key]}")
+
+    raw = combos + tokens
+    out: List[str] = []
+    seen: Set[str] = set()
+    for cand in raw:
+        if not cand:
+            continue
+        for v in ([cand, cand.upper()] if cand.upper() != cand else [cand]):
+            k = v.upper()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(v)
+
+    whole = _sanitize_uniprot_term(cleaned)
+    if whole:
+        k = whole.upper()
+        if k not in seen:
+            out.append(whole)
+    return out
+
+
 def _candidate_query_templates(term: str) -> List[str]:
+    term = _sanitize_uniprot_term(term)
+    if not term:
+        return []
     basics = [
         f'gene:"{term}"',
         f'accession:"{term}"',
@@ -1229,34 +1329,46 @@ def build_candidate(
     antigen_options_override: Optional[List[AntigenOption]] = None,
 ) -> Optional[Candidate]:
     tax_id = _taxonomy_id_for_species(species)
-    base_queries = _candidate_query_templates(term)
-    search_queries: List[str] = []
-    if tax_id:
-        for base in base_queries:
-            search_queries.append(f"({base}) AND organism_id:{tax_id}")
-    search_queries.extend(base_queries)
-
     uni_search = None
     used_query = None
-    seen_queries: set[str] = set()
-    for query in search_queries:
-        if query in seen_queries:
+    tried_terms = _expand_term_variants(term)
+    if not tried_terms:
+        tried_terms = [term]
+
+    for term_variant in tried_terms:
+        base_queries = _candidate_query_templates(term_variant)
+        if not base_queries:
             continue
-        seen_queries.add(query)
-        params = {
-            "query": query,
-            "fields": "accession,protein_name,gene_primary,organism_name",
-            "format": "json",
-        }
-        uni_search_data = http_json(UNIPROT_SEARCH, params=params)
-        results = uni_search_data.get("results") or []
-        if results:
-            uni_search = results[0]
-            used_query = query
+        search_queries: List[str] = []
+        if tax_id:
+            for base in base_queries:
+                search_queries.append(f"({base}) AND organism_id:{tax_id}")
+        search_queries.extend(base_queries)
+
+        seen_queries: set[str] = set()
+        for query in search_queries:
+            if query in seen_queries:
+                continue
+            seen_queries.add(query)
+            params = {
+                "query": query,
+                "fields": "accession,protein_name,gene_primary,organism_name",
+                "format": "json",
+            }
+            uni_search_data = http_json(UNIPROT_SEARCH, params=params)
+            results = uni_search_data.get("results") or []
+            if results:
+                uni_search = results[0]
+                used_query = query
+                break
+        if uni_search:
             break
 
     if not uni_search:
-        log_info(f"[warn] UniProt search returned no results for term '{term}' (species={species}).")
+        if len(tried_terms) > 1:
+            log_info(f"[warn] UniProt search returned no results for term '{term}' after variants {tried_terms} (species={species}).")
+        else:
+            log_info(f"[warn] UniProt search returned no results for term '{term}' (species={species}).")
         return None
 
     acc = uni_search["primaryAccession"]
@@ -1429,11 +1541,15 @@ def run_target_generation(args):
     require_biotin = "biotin" in (args.prefer_tags or "").lower()
     global BROWSER_HEADLESS
     BROWSER_HEADLESS = bool(getattr(args, "no_browser_popup", False))
-    instruction_slug = _slugify(args.instruction, maxlen=32)
+    instruction_label = args.instruction
+    if not instruction_label and getattr(args, "antigen_tsv", None):
+        instruction_label = f"manual_tsv:{Path(args.antigen_tsv).name}"
+    instruction_label = instruction_label or "manual_tsv"
+    instruction_slug = _slugify(instruction_label, maxlen=32)
 
     log_info(textwrap.dedent(f"""
     --- Target Generation (LLM-Enhanced) ---
-    Instruction: {args.instruction}
+    Instruction: {instruction_label}
     Species: {args.species}
     Max Targets: {args.max_targets}
     Prefer Tags: {args.prefer_tags}
@@ -1445,7 +1561,7 @@ def run_target_generation(args):
     """).strip())
 
     # Determine outputs (support appending to grow catalogs across runs)
-    instruction_slug = _slugify(args.instruction, maxlen=32)
+    instruction_slug = _slugify(instruction_label, maxlen=32)
     prefix = args.out_prefix or f"{instruction_slug}_{RUN_TS}"
     out_biotin = CATALOG_DIR / f"{prefix}_biotin.tsv"
     out_all    = CATALOG_DIR / f"{prefix}_all.tsv"
@@ -1621,7 +1737,8 @@ def run_target_generation(args):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="LLM-Enhanced Target Generation for Antibody Design")
-    ap.add_argument("--instruction", required=True, help="Descriptive term or comma-separated gene list")
+    ap.add_argument("--instruction", default=None,
+                    help="Descriptive term or comma-separated gene list (optional if --antigen_tsv is provided)")
     ap.add_argument("--max_targets", type=int, default=10)
     ap.add_argument("--species", default="human")
     ap.add_argument("--prefer_tags", default="biotin")
@@ -1636,4 +1753,6 @@ if __name__ == "__main__":
     ap.add_argument("--out_prefix", type=str, default=None,
                     help="Output file prefix (under targets_catalog/). If omitted, uses instruction+timestamp.")
     a = ap.parse_args()
+    if not a.instruction and not a.antigen_tsv:
+        ap.error("Provide either --instruction or --antigen_tsv.")
     run_target_generation(a)

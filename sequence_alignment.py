@@ -36,7 +36,11 @@ class AlignmentResult:
 def clean_sequence(seq: Optional[str]) -> str:
     if not seq:
         return ""
-    return "".join(ch for ch in seq if ch.isalpha()).upper()
+    cleaned = "".join(ch for ch in seq if ch.isalpha()).upper()
+    if not cleaned:
+        return ""
+    standard = set("ACDEFGHIKLMNPQRSTVWY")
+    return "".join(ch if ch in standard else "X" for ch in cleaned)
 
 
 def normalize_range(rng: Optional[tuple[int, int]]) -> Optional[tuple[int, int]]:
