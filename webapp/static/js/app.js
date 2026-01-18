@@ -1,5 +1,6 @@
 const DEFAULT_TABLE_SORT = { key: 'iptm', dir: 'desc' };
 const DEFAULT_RFDIFF_CROP_RADIUS = 14;
+const DEFAULT_BOLTZGEN_CROP_RADIUS = 14;
 const SCATTER_COLOR_PALETTE = [
   '#2563eb',
   '#f97316',
@@ -95,6 +96,13 @@ const ENGINE_FIELD_BLUEPRINT = [
     visible: true,
     debug_only: true,
   },
+  {
+    field_id: 'boltzgen_crop_radius',
+    label: 'BoltzGen crop radius (Å)',
+    description: 'Crop target around hotspots for BoltzGen configs/specs.',
+    visible: false,
+    debug_only: false,
+  },
 ];
 
 const DEFAULT_ENGINE_OPTIONS = [
@@ -116,6 +124,15 @@ const DEFAULT_ENGINE_OPTIONS = [
           ...field,
           label: 'Total designs',
           description: 'Total BoltzGen designs (single spec; no epitope splitting).',
+          visible: true,
+          debug_only: false,
+        };
+      }
+      if (field.field_id === 'boltzgen_crop_radius') {
+        return {
+          ...field,
+          label: 'BoltzGen crop radius (Å)',
+          description: 'Crop target around hotspots for BoltzGen configs/specs.',
           visible: true,
           debug_only: false,
         };
@@ -410,6 +427,7 @@ const el = {
   designAf3Seed: document.querySelector('#design-af3-seed'),
   designEnableRfdiffCrop: document.querySelector('#design-enable-rfdiff-crop'),
   designBoltzBinding: document.querySelector('#design-boltz-binding'),
+  designBoltzCropRadius: document.querySelector('#design-boltz-crop-radius'),
   designBoltzBindingRow: document.querySelector('#design-boltz-binding-row'),
   refreshResultsBtn: document.querySelector('#refresh-results'),
   resultsMeta: document.querySelector('#results-meta'),
@@ -519,6 +537,7 @@ const DESIGN_FIELD_ELEMENTS = (() => {
     binder_chain_id: { input: el.designBinderChain },
     af3_seed: { input: el.designAf3Seed },
     rfdiff_crop_radius: { input: el.designEnableRfdiffCrop },
+    boltzgen_crop_radius: { input: el.designBoltzCropRadius },
   };
 
   Object.entries(base).forEach(([fieldId, entry]) => {
@@ -2359,6 +2378,10 @@ async function queueDesignRun() {
     payload.rfdiff_crop_radius = el.designEnableRfdiffCrop && el.designEnableRfdiffCrop.checked
       ? DEFAULT_RFDIFF_CROP_RADIUS
       : null;
+  }
+  if (isDesignFieldActive('boltzgen_crop_radius')) {
+    const raw = Number(el.designBoltzCropRadius?.value ?? DEFAULT_BOLTZGEN_CROP_RADIUS);
+    payload.boltzgen_crop_radius = Number.isFinite(raw) && raw > 0 ? raw : null;
   }
   if (state.selectedDesignEngine === 'boltzgen' && el.designBoltzBinding) {
     const binding = el.designBoltzBinding.value.trim();

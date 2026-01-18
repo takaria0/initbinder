@@ -162,8 +162,11 @@ def _find_index(headers: Sequence[str], candidates: Iterable[str]) -> Optional[i
 from typing import Tuple
 
 
-_RES_TOKEN_RE = re.compile(
-    r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_\-]?\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
+_RES_TOKEN_DELIM_RE = re.compile(
+    r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_\-]\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
+)
+_RES_TOKEN_PLAIN_RE = re.compile(
+    r"^\s*(?P<chain>[A-Za-z0-9]+?)\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
 )
 
 
@@ -174,7 +177,9 @@ def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     text = str(token).strip()
     if not text:
         return None
-    m = _RES_TOKEN_RE.match(text)
+    m = _RES_TOKEN_DELIM_RE.match(text)
+    if not m:
+        m = _RES_TOKEN_PLAIN_RE.match(text)
     if not m:
         return None
     chain = (m.group("chain") or "").strip()
@@ -571,7 +576,7 @@ def _shift_residue_tokens(tokens: Sequence[object], structure_path: Path) -> Lis
             lo, hi = ranges[chain]
             if resnum < lo or resnum > hi:
                 continue
-        out.append(f"{chain}{resnum}")
+        out.append(f"{chain}:{resnum}")
 
     seen = set()
     deduped: List[str] = []
@@ -988,6 +993,7 @@ def _write_boltzgen_configs(
     epitopes: List[dict],
     design_counts: List[int],
     log: Callable[[str], None],
+    crop_radius: Optional[float] = None,
 ) -> None:
     """Emit per-epitope BoltzGen specs under targets/{pdb}/configs/."""
     cfg = load_config()
@@ -1027,14 +1033,22 @@ def _write_boltzgen_configs(
         epitope_residues = _shift_residue_tokens(raw_mask, prepared_structure)
         if not hotspot_keys and raw_hotspots:
             # Fallback: use raw hotspots (converted to chain+index tokens) if shifting/validation removed all.
-            hotspot_keys = [_parse_chain_res_token(h)[0] + str(_parse_chain_res_token(h)[1])  # type: ignore
-                            for h in raw_hotspots
-                            if _parse_chain_res_token(h)]
+            hotspot_keys = []
+            for h in raw_hotspots:
+                parsed = _parse_chain_res_token(h)
+                if not parsed:
+                    continue
+                chain, resnum, _icode = parsed
+                hotspot_keys.append(f"{chain}:{resnum}")
             log(f"  [boltzgen-config] warning: using unshifted hotspots for {pdb_id.upper()} · {name}")
         if not epitope_residues and raw_mask:
-            epitope_residues = [_parse_chain_res_token(m)[0] + str(_parse_chain_res_token(m)[1])  # type: ignore
-                                for m in raw_mask
-                                if _parse_chain_res_token(m)]
+            epitope_residues = []
+            for m in raw_mask:
+                parsed = _parse_chain_res_token(m)
+                if not parsed:
+                    continue
+                chain, resnum, _icode = parsed
+                epitope_residues.append(f"{chain}:{resnum}")
 
         try:
             info = engine._write_spec(
@@ -1049,6 +1063,8 @@ def _write_boltzgen_configs(
                 num_designs=count,
                 scaffold_paths=scaffold_paths,
                 binding_override=None,
+                crop_radius=crop_radius,
+                crop_chains=target_chain_ids,
             )
             msg = (
                 f"  [boltzgen-config] {pdb_id.upper()} · {name} -> {spec_path} "
@@ -1056,7 +1072,8 @@ def _write_boltzgen_configs(
             )
             log(msg)
             print(msg)
-            _inject_chain_include(spec_path, target_chain_ids, log)
+            if crop_radius is None or crop_radius <= 0:
+                _inject_chain_include(spec_path, target_chain_ids, log)
         except Exception as exc:  # pragma: no cover - defensive
             msg = f"  [boltzgen-config] failed for {pdb_id.upper()} · {name}: {exc}"
             log(msg)
@@ -1505,6 +1522,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
 def regenerate_boltzgen_configs(
     pdb_ids: List[str],
     design_count: int,
+    crop_radius: Optional[float] = None,
 ) -> BoltzgenConfigRegenerateResponse:
     if not pdb_ids:
         return BoltzgenConfigRegenerateResponse(results=[])
@@ -1561,7 +1579,7 @@ def regenerate_boltzgen_configs(
 
         design_counts = [design_count] * len(epitopes)
         try:
-            _write_boltzgen_configs(pdb_id, epitopes, design_counts, _log)
+            _write_boltzgen_configs(pdb_id, epitopes, design_counts, _log, crop_radius=crop_radius)
         except Exception as exc:  # pragma: no cover - defensive
             results.append(
                 BoltzgenConfigRegenerateResult(
@@ -4186,6 +4204,7 @@ def run_bulk_workflow(
                 run_label=str(entry.get("run_label") or run_label_base),
                 run_assess=design_settings.run_assess,
                 rfdiff_crop_radius=design_settings.rfdiff_crop_radius,
+                boltzgen_crop_radius=design_settings.boltzgen_crop_radius,
                 boltz_binding=entry.get("boltz_binding"),
                 boltz_time_hours=design_settings.boltz_time_hours,
             )
@@ -4214,7 +4233,13 @@ def run_bulk_workflow(
                 design_splits = _distribute_designs(design_settings.total_designs, len(epitopes))
                 if request.export_designs and not request.submit_designs:
                     try:
-                        _write_boltzgen_configs(pdb_id, epitopes, design_splits, log)
+                        _write_boltzgen_configs(
+                            pdb_id,
+                            epitopes,
+                            design_splits,
+                            log,
+                            crop_radius=design_settings.boltzgen_crop_radius,
+                        )
                     except Exception as exc:  # pragma: no cover - defensive
                         log(f"  ! Failed to write BoltzGen configs: {exc}")
                 for ep_idx, ep in enumerate(epitopes, start=1):
@@ -4232,11 +4257,12 @@ def run_bulk_workflow(
                         "temperature": design_settings.temperature,
                         "binder_chain_id": design_settings.binder_chain_id,
                         "af3_seed": design_settings.af3_seed,
-                        "run_assess": design_settings.run_assess,
-                        "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
-                        "run_label": run_label,
-                        "boltz_binding": binding_str,
-                    })
+                    "run_assess": design_settings.run_assess,
+                    "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
+                    "boltzgen_crop_radius": design_settings.boltzgen_crop_radius,
+                    "run_label": run_label,
+                    "boltz_binding": binding_str,
+                })
             else:
                 if request.export_designs and not request.submit_designs:
                     log("  [boltzgen-config] No epitope metadata or binding override present; skipping per-epitope configs.")
@@ -4253,6 +4279,7 @@ def run_bulk_workflow(
                     "af3_seed": design_settings.af3_seed,
                     "run_assess": design_settings.run_assess,
                     "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
+                    "boltzgen_crop_radius": design_settings.boltzgen_crop_radius,
                     "run_label": run_label_base,
                     "boltz_binding": design_settings.boltz_binding,
                 })
@@ -4270,6 +4297,7 @@ def run_bulk_workflow(
                 "af3_seed": design_settings.af3_seed,
                 "run_assess": design_settings.run_assess,
                 "rfdiff_crop_radius": design_settings.rfdiff_crop_radius,
+                "boltzgen_crop_radius": design_settings.boltzgen_crop_radius,
                 "run_label": run_label_base,
                 "boltz_binding": design_settings.boltz_binding,
             })
@@ -4322,6 +4350,7 @@ def run_bulk_workflow(
             "af3_seed",
             "run_assess",
             "rfdiff_crop_radius",
+            "boltzgen_crop_radius",
             "run_label",
             "boltz_binding",
             "boltz_time_hours",
@@ -4456,6 +4485,7 @@ def import_design_configs(
             run_label=run_label,
             run_assess=_parse_bool(row.get("run_assess"), default=True),
             rfdiff_crop_radius=_safe_float(row.get("rfdiff_crop_radius"), 0.0) or None,
+            boltzgen_crop_radius=_safe_float(row.get("boltzgen_crop_radius"), 0.0) or None,
             boltz_binding=_normalize(row.get("boltz_binding")),
         )
         try:

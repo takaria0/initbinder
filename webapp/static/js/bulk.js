@@ -9,6 +9,7 @@ const state = {
   lastJobStatus: null,
   clusterStatus: null,
   boltzLocalRuns: {},
+  boltzLocalRunsBySpec: {},
   expandedTargets: new Set(),
   diversityCsv: null,
   diversityHtml: null,
@@ -94,6 +95,7 @@ const el = {
   boltzSummary: document.querySelector('#boltz-config-summary'),
   boltzDesignCount: document.querySelector('#boltz-design-count'),
   boltzTimeHours: document.querySelector('#boltz-time-hours'),
+  boltzCropRadius: document.querySelector('#boltz-crop-radius'),
   boltzRegenerate: document.querySelector('#boltz-config-regenerate'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
@@ -527,6 +529,12 @@ function getBoltzTimeHours() {
   return Math.min(240, Math.max(1, Math.round(raw)));
 }
 
+function getBoltzCropRadius() {
+  const raw = Number(el.boltzCropRadius?.value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return raw;
+}
+
 function toggleModal(modalEl, isOpen) {
   if (!modalEl) return;
   modalEl.hidden = !isOpen;
@@ -569,6 +577,26 @@ function hasLocalBoltzResults(pdbId) {
 function getBoltzDesignTotal(pdbId) {
   const key = (pdbId || '').toUpperCase();
   return state.boltzLocalRuns?.[key] ?? null;
+}
+
+function getBoltzSpecKey(cfg) {
+  const direct = cfg?.epitope_id;
+  if (direct) return String(direct).trim().toUpperCase();
+  const path = cfg?.config_path ? String(cfg.config_path) : '';
+  if (!path) return null;
+  const parts = path.split('/').filter(Boolean);
+  const hit = parts.find((part) => /epitope/i.test(part));
+  return hit ? hit.toUpperCase() : null;
+}
+
+function getBoltzDesignTotalForSpec(pdbId, cfg) {
+  const key = (pdbId || '').toUpperCase();
+  const specKey = getBoltzSpecKey(cfg);
+  if (!specKey) return null;
+  const specMap = state.boltzLocalRunsBySpec?.[key] || null;
+  if (!specMap) return null;
+  const num = Number(specMap[specKey]);
+  return Number.isFinite(num) ? num : null;
 }
 
 function setActionButtonsDisabled(disabled) {
@@ -1053,6 +1081,7 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
     }
     if (Object.keys(state.boltzDesignCounts || {}).length) {
       state.boltzLocalRuns = { ...state.boltzDesignCounts };
+      state.boltzLocalRunsBySpec = {};
       if (Array.isArray(state.boltzConfigs) && state.boltzConfigs.length) {
         renderBoltzConfigs();
       }
@@ -1925,7 +1954,7 @@ function renderBoltzConfigs() {
       });
       const epStatus = document.createElement('td');
       epStatus.className = 'boltz-status-cell';
-      epStatus.appendChild(buildLocalResultBadge(getBoltzDesignTotal(target.pdb_id)));
+      epStatus.appendChild(buildLocalResultBadge(getBoltzDesignTotalForSpec(target.pdb_id, cfg)));
       epRow.appendChild(epStatus);
 
       const epCmd = document.createElement('td');
@@ -1995,8 +2024,10 @@ async function loadBoltzRunStatuses(pdbIds = []) {
     (pdbIds || []).map((id) => (id || '').toUpperCase()).filter(Boolean),
   ));
   const results = {};
+  const resultsBySpec = {};
   if (!ids.length) {
     state.boltzLocalRuns = results;
+    state.boltzLocalRunsBySpec = resultsBySpec;
     return results;
   }
   const counts = state.boltzDesignCounts || {};
@@ -2006,6 +2037,7 @@ async function loadBoltzRunStatuses(pdbIds = []) {
       results[id] = Number.isFinite(num) ? num : 0;
     });
     state.boltzLocalRuns = results;
+    state.boltzLocalRunsBySpec = resultsBySpec;
     return results;
   }
   await Promise.all(ids.map(async (id) => {
@@ -2014,6 +2046,7 @@ async function loadBoltzRunStatuses(pdbIds = []) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
       const runs = Array.isArray(body.runs) ? body.runs : [];
+      const specCounts = {};
       let totalDesigns = 0;
       let sawCount = false;
       let sawRun = false;
@@ -2021,25 +2054,34 @@ async function loadBoltzRunStatuses(pdbIds = []) {
         sawRun = true;
         const specs = Array.isArray(run.specs) ? run.specs : [];
         specs.forEach((spec) => {
+          const specName = String(spec?.name || '').trim();
           const count = Number(spec?.design_count);
-          if (Number.isFinite(count)) {
-            totalDesigns += count;
-            sawCount = true;
+          if (!Number.isFinite(count)) return;
+          if (specName) {
+            const specKey = specName.toUpperCase();
+            specCounts[specKey] = Number(specCounts[specKey] || 0) + count;
           }
+          totalDesigns += count;
+          sawCount = true;
         });
       });
       if (!sawRun) {
         results[id] = 0;
+        resultsBySpec[id] = {};
       } else if (sawCount) {
         results[id] = totalDesigns;
+        resultsBySpec[id] = specCounts;
       } else {
         results[id] = null;
+        resultsBySpec[id] = {};
       }
     } catch (err) {
       results[id] = null;
+      resultsBySpec[id] = {};
     }
   }));
   state.boltzLocalRuns = results;
+  state.boltzLocalRunsBySpec = resultsBySpec;
   return results;
 }
 
@@ -2103,13 +2145,18 @@ async function regenerateBoltzConfigs(options = {}) {
     return;
   }
   const designCount = getBoltzDesignCount() || 100;
+  const cropRadius = getBoltzCropRadius();
   const activeBtn = triggerBtn || el.boltzRegenerate;
   if (activeBtn) activeBtn.disabled = true;
   try {
     const res = await fetch('/api/bulk/boltzgen/configs/regenerate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pdb_ids: ids, design_count: designCount }),
+      body: JSON.stringify({
+        pdb_ids: ids,
+        design_count: designCount,
+        boltzgen_crop_radius: cropRadius,
+      }),
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -2713,6 +2760,7 @@ function collectDesignSettings() {
     run_assess: true,
     run_label_prefix: (el.bulkRunPrefix?.value || '').trim() || null,
     boltz_time_hours: getBoltzTimeHours(),
+    boltzgen_crop_radius: getBoltzCropRadius(),
   };
   return settings;
 }

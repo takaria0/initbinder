@@ -422,6 +422,43 @@ def _append_auth_tokens(
         text = str(key).strip()
         if not text:
             continue
+        if ":" in text and (".." in text or "," in text):
+            chain_part, rest = text.split(":", 1)
+            chain = chain_part.strip()
+            if not chain:
+                if strict_auth and dropped is not None:
+                    dropped.append(text)
+                continue
+            chunks = [c.strip() for c in rest.split(",") if c.strip()]
+            for chunk in chunks:
+                chunk = chunk.replace("..", "-")
+                if "-" in chunk:
+                    start_str, end_str = chunk.split("-", 1)
+                else:
+                    start_str, end_str = chunk, chunk
+                try:
+                    start = int(start_str.strip())
+                    end = int((end_str or start_str).strip())
+                except Exception:
+                    if strict_auth and dropped is not None:
+                        dropped.append(f"{chain}{chunk}")
+                    continue
+                lo, hi = (start, end) if start <= end else (end, start)
+                for pos in range(lo, hi + 1):
+                    mapped = mapping.get((chain, pos))
+                    if mapped:
+                        aa, apos = mapped
+                        token = f"{aa}:{apos}"
+                    elif strict_auth:
+                        if dropped is not None:
+                            dropped.append(f"{chain}{pos}")
+                        continue
+                    else:
+                        token = f"{chain}:{pos}"
+                    if token not in seen:
+                        out.append(token)
+                        seen.add(token)
+            continue
         m_range = _BUNDLE_RANGE.match(text)
         if m_range:
             chain = m_range.group(1)
@@ -835,6 +872,36 @@ def _write_hotspot_pml(
             parts.append(f"( {obj} and chain {ch} and resi {resi} )")
         return " or ".join(parts)
 
+    def _range_tokens_to_sel(obj: str, tokens: list[str]) -> str:
+        parts: list[str] = []
+        for token in tokens or []:
+            text = str(token).strip()
+            if not text:
+                continue
+            if ":" in text:
+                chain_part, rest = text.split(":", 1)
+                chain = chain_part.strip()
+            else:
+                chain = ""
+                rest = text
+            for chunk in rest.split(","):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                chunk = chunk.replace("..", "-")
+                if "-" in chunk:
+                    start, end = chunk.split("-", 1)
+                    start = start.strip()
+                    end = end.strip() or start
+                    resi_expr = f"{start}-{end}"
+                else:
+                    resi_expr = chunk
+                if chain:
+                    parts.append(f"( {obj} and chain {chain} and resi {resi_expr} )")
+                else:
+                    parts.append(f"( {obj} and resi {resi_expr} )")
+        return " or ".join(parts)
+
     def _select_chains(sel_name: str, obj: str, chains: Optional[Sequence[str]]):
         cleaned: list[str] = []
         for ch in chains or []:
@@ -1019,9 +1086,22 @@ def _write_hotspot_pml(
             pml.append(f"color epi_{epi_key}, epi_mask_{epi_key}\n")
             pml.append(f"group {epi_key}, epi_mask_{epi_key}\n")
 
-        # 各 variant（spheres）
+        # 各 variant（spheres / crop）
+        has_crop = False
         for var, keys in (epitopes.get(epi, {}) or {}).items():
             if var == "mask":
+                continue
+            if var == "crop":
+                sel = _range_tokens_to_sel("target", keys)
+                if not sel:
+                    continue
+                obj = f"epi_crop_{epi_key}"
+                pml.append(f"select {obj}, {sel}\n")
+                pml.append(f"show surface, {obj}\n")
+                pml.append(f"set transparency, 0.7, {obj}\n")
+                pml.append(f"color epi_{epi_key}, {obj}\n")
+                pml.append(f"group {epi_key}, {obj}\n")
+                has_crop = True
                 continue
             if not keys:
                 continue
@@ -1037,7 +1117,10 @@ def _write_hotspot_pml(
             pml.append(f"group {epi_key}, {obj}\n")
 
         label_sel = f"epi_label_{epi_key}"
-        pml.append(f"select {label_sel}, epi_mask_{epi_key} or epi_hot_{epi_key}_*\n")
+        label_expr = f"epi_mask_{epi_key} or epi_hot_{epi_key}_*"
+        if has_crop:
+            label_expr = f"{label_expr} or epi_crop_{epi_key}"
+        pml.append(f"select {label_sel}, {label_expr}\n")
         norm_name = _norm_label(epi)
         label_text = None
         if epitope_index_map and norm_name in epitope_index_map:
@@ -1197,6 +1280,33 @@ def _load_epitope_index_map(pdb_id: str) -> Dict[str, str]:
     return mapping
 
 
+def _load_boltzgen_crop_tokens(config_path: Path) -> List[str]:
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return []
+    entities = data.get("entities") or []
+    tokens: List[str] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        file_block = entity.get("file")
+        if not isinstance(file_block, dict):
+            continue
+        include_entries = file_block.get("include") or []
+        if not isinstance(include_entries, list):
+            continue
+        for entry in include_entries:
+            if not isinstance(entry, dict):
+                continue
+            chain = entry.get("chain") if isinstance(entry.get("chain"), dict) else {}
+            chain_id = str(chain.get("id") or "").strip() if isinstance(chain, dict) else ""
+            res_index = str(chain.get("res_index") or "").strip() if isinstance(chain, dict) else ""
+            if chain_id and res_index:
+                tokens.append(f"{chain_id}:{res_index}")
+    return tokens
+
+
 def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = None) -> Path | None:
     """
     Create a visualisation bundle for the hotspot selections of ``pdb_id``.
@@ -1275,6 +1385,25 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     if not epitopes:
         print(f"[pymol_utils] No epitope masks/hotspots found for {pdb_id_u}; skipping hotspot export")
         return None
+
+    epitope_index_map = _load_epitope_index_map(pdb_id_u)
+    include_crop = False
+    if epitope_names:
+        requested = [str(name).strip() for name in epitope_names if str(name).strip()]
+        include_crop = len(requested) == 1
+    config_dir = target_dir / "configs"
+    if include_crop and config_dir.exists():
+        index_to_norm = {v: k for k, v in epitope_index_map.items()}
+        norm_to_name = {_norm_label(name): name for name in epitopes.keys()}
+        for cfg_path in sorted(config_dir.rglob("boltzgen_config.yaml")):
+            parent = cfg_path.parent.name
+            norm = index_to_norm.get(parent)
+            ep_name = norm_to_name.get(norm) if norm else None
+            if not ep_name:
+                ep_name = parent
+            crop_tokens = _load_boltzgen_crop_tokens(cfg_path)
+            if crop_tokens:
+                epitopes.setdefault(ep_name, {})["crop"] = crop_tokens
 
     whitelist: Optional[set[str]] = None
     if epitope_names:
@@ -1379,7 +1508,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         epitopes = remapped_epitopes or epitopes
         epitopes_mapped = True
 
-    epitope_index_map = _load_epitope_index_map(pdb_id_u)
+    if not epitope_index_map:
+        epitope_index_map = _load_epitope_index_map(pdb_id_u)
     if RFA_PYMOL_MODE.lower() == 'remote':
         success = _send_hotspots_to_remote(
             structure_path,

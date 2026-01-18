@@ -194,6 +194,11 @@ class BulkDesignSettings(BaseModel):
         max_length=500,
         description="Optional BoltzGen binding_types override, e.g. A:142,151,229;B:10..30",
     )
+    boltzgen_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Optional BoltzGen crop radius (Å) around hotspots for res_index.",
+    )
     boltz_time_hours: Optional[int] = Field(
         None,
         ge=1,
@@ -395,6 +400,11 @@ class BoltzgenConfigRunResponse(BaseModel):
 class BoltzgenConfigRegenerateRequest(BaseModel):
     pdb_ids: List[str] = Field(default_factory=list, description="PDB IDs to regenerate configs for")
     design_count: int = Field(100, ge=1, le=50000, description="Designs per epitope to store in configs")
+    boltzgen_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Optional BoltzGen target crop radius (Å) around hotspots for res_index.",
+    )
 
 
 class BoltzgenConfigRegenerateResult(BaseModel):
@@ -457,6 +467,11 @@ class DesignRunRequest(BaseModel):
         description=(
             "Optional crop radius (Å) for RFdiffusion; when omitted the full prepared target is used."
         ),
+    )
+    boltzgen_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Optional crop radius (Å) around hotspots for BoltzGen res_index.",
     )
     boltz_binding: Optional[str] = Field(
         None,

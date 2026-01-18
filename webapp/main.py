@@ -956,7 +956,7 @@ async def api_boltzgen_config_regenerate(
     payload: BoltzgenConfigRegenerateRequest,
 ) -> BoltzgenConfigRegenerateResponse:
     ids = [(p or "").strip().upper() for p in (payload.pdb_ids or []) if (p or "").strip()]
-    return regenerate_boltzgen_configs(ids, payload.design_count)
+    return regenerate_boltzgen_configs(ids, payload.design_count, crop_radius=payload.boltzgen_crop_radius)
 
 
 @app.get("/api/bulk/boltzgen/config", response_model=BoltzgenConfigContent)

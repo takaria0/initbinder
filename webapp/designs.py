@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -846,6 +846,11 @@ class BoltzGenEngine(DesignEngine):
                 visible=False,
                 debug_only=True,
             ),
+            DesignEngineField(
+                field_id="boltzgen_crop_radius",
+                label="BoltzGen crop radius",
+                description="Crop target around hotspots (Å) for BoltzGen configs/specs.",
+            ),
         ],
     )
 
@@ -857,7 +862,13 @@ class BoltzGenEngine(DesignEngine):
     DEFAULT_MEM_GB = 64
     DEFAULT_TIME_H = 12
 
-    _HOTSPOT_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+    _HOTSPOT_RE = re.compile(r"^([A-Za-z0-9]+)(\d+)$")
+    _RES_TOKEN_DELIM_RE = re.compile(
+        r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_\-]\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
+    )
+    _RES_TOKEN_PLAIN_RE = re.compile(
+        r"^\s*(?P<chain>[A-Za-z0-9]+?)\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
+    )
 
     def run(
         self,
@@ -898,6 +909,7 @@ class BoltzGenEngine(DesignEngine):
             run_label=run_label,
             num_designs=total_designs,
             binding_override=request.boltz_binding,
+            crop_radius=request.boltzgen_crop_radius,
         )
         details = {
             "model_engine": self.metadata.engine_id,
@@ -1150,6 +1162,7 @@ class BoltzGenEngine(DesignEngine):
         run_label: str,
         num_designs: int,
         binding_override: Optional[str] = None,
+        crop_radius: Optional[float] = None,
     ) -> List[BoltzGenSpecInfo]:
         target_dir = workspace / "targets" / pdb_id.upper()
         prep_dir = target_dir / "prep"
@@ -1189,6 +1202,7 @@ class BoltzGenEngine(DesignEngine):
                     num_designs=designs_split[idx],
                     scaffold_paths=scaffold_paths,
                     binding_override=None,
+                    crop_radius=crop_radius,
                 )
                 specs.append(info)
             return specs
@@ -1205,6 +1219,7 @@ class BoltzGenEngine(DesignEngine):
             num_designs=num_designs,
             scaffold_paths=scaffold_paths,
             binding_override=binding_override_map,
+            crop_radius=crop_radius,
         )
         return [info]
 
@@ -1282,12 +1297,193 @@ class BoltzGenEngine(DesignEngine):
     def _parse_hotspot_map(self, keys: Iterable[str]) -> Dict[str, List[int]]:
         mapping: Dict[str, List[int]] = defaultdict(list)
         for key in keys:
-            match = self._HOTSPOT_RE.match((key or "").strip())
-            if not match:
+            parsed = self._parse_chain_res_token(key)
+            if not parsed:
                 continue
-            chain, res = match.group(1), int(match.group(2))
+            chain, res = parsed
             mapping[chain].append(res)
         return {chain: sorted(set(vals)) for chain, vals in mapping.items()}
+
+    @staticmethod
+    def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int]]:
+        if token is None:
+            return None
+        text = str(token).strip()
+        if not text:
+            return None
+        match = BoltzGenEngine._RES_TOKEN_DELIM_RE.match(text)
+        if not match:
+            match = BoltzGenEngine._RES_TOKEN_PLAIN_RE.match(text)
+        if not match:
+            return None
+        chain = (match.group("chain") or "").strip()
+        res_s = match.group("resnum")
+        try:
+            resnum = int(res_s)
+        except Exception:
+            return None
+        if not chain:
+            return None
+        return chain, resnum
+
+    @staticmethod
+    def _collect_mmcif_residue_atoms(
+        mmcif_path: Path,
+        allowed_chains: Optional[set[str]] = None,
+    ) -> Dict[Tuple[str, int], List[Tuple[float, float, float]]]:
+        try:
+            from Bio.PDB.MMCIF2Dict import MMCIF2Dict
+        except ImportError:
+            return {}
+        try:
+            mmcif = MMCIF2Dict(str(mmcif_path))
+        except Exception:
+            return {}
+        chains = mmcif.get("_atom_site.label_asym_id") or []
+        seqs = mmcif.get("_atom_site.label_seq_id") or []
+        xs = mmcif.get("_atom_site.Cartn_x") or []
+        ys = mmcif.get("_atom_site.Cartn_y") or []
+        zs = mmcif.get("_atom_site.Cartn_z") or []
+        elems = mmcif.get("_atom_site.type_symbol") or []
+        if isinstance(chains, str):
+            chains = [chains]
+        if isinstance(seqs, str):
+            seqs = [seqs]
+        if isinstance(xs, str):
+            xs = [xs]
+        if isinstance(ys, str):
+            ys = [ys]
+        if isinstance(zs, str):
+            zs = [zs]
+        if isinstance(elems, str):
+            elems = [elems]
+        if not (chains and seqs and xs and ys and zs):
+            return {}
+        if not elems or len(elems) != len(chains):
+            elems = [None] * len(chains)
+        allowed_upper = {c.upper() for c in allowed_chains} if allowed_chains else None
+        out: Dict[Tuple[str, int], List[Tuple[float, float, float]]] = defaultdict(list)
+        for chain, seq, x, y, z, elem in zip(chains, seqs, xs, ys, zs, elems):
+            chain_id = str(chain).strip()
+            if not chain_id:
+                continue
+            if allowed_upper and chain_id.upper() not in allowed_upper:
+                continue
+            seq_txt = str(seq).strip()
+            if seq_txt in {".", "?", ""}:
+                continue
+            try:
+                seq_id = int(float(seq_txt))
+            except Exception:
+                continue
+            elem_txt = (str(elem).strip().upper() if elem is not None else "")
+            if elem_txt.startswith("H") or elem_txt == "D":
+                continue
+            try:
+                coord = (float(x), float(y), float(z))
+            except Exception:
+                continue
+            out[(chain_id, seq_id)].append(coord)
+        return out
+
+    @staticmethod
+    def _collect_pdb_residue_atoms(
+        pdb_path: Path,
+        allowed_chains: Optional[set[str]] = None,
+    ) -> Dict[Tuple[str, int], List[Tuple[float, float, float]]]:
+        try:
+            from Bio.PDB import PDBParser
+        except ImportError:
+            return {}
+        try:
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure("boltz", str(pdb_path))
+        except Exception:
+            return {}
+        allowed_upper = {c.upper() for c in allowed_chains} if allowed_chains else None
+        out: Dict[Tuple[str, int], List[Tuple[float, float, float]]] = defaultdict(list)
+        try:
+            model = structure[0]
+        except Exception:
+            return {}
+        for chain in model:
+            chain_id = str(chain.id).strip()
+            if not chain_id:
+                continue
+            if allowed_upper and chain_id.upper() not in allowed_upper:
+                continue
+            for residue in chain:
+                if residue.id[0] != " ":
+                    continue
+                resnum = residue.id[1]
+                coords: List[Tuple[float, float, float]] = []
+                for atom in residue.get_atoms():
+                    elem = str(getattr(atom, "element", "")).strip().upper()
+                    if elem.startswith("H") or elem == "D":
+                        continue
+                    try:
+                        coord = atom.coord
+                        coords.append((float(coord[0]), float(coord[1]), float(coord[2])))
+                    except Exception:
+                        continue
+                if coords:
+                    out[(chain_id, int(resnum))].extend(coords)
+        return out
+
+    def _crop_res_index_by_hotspots(
+        self,
+        prepared_pdb: Path,
+        hotspot_keys: Iterable[str],
+        radius: float,
+        allowed_chains: Optional[Sequence[str]] = None,
+    ) -> Dict[str, List[int]]:
+        if radius <= 0:
+            return {}
+        allowed = {str(c).strip() for c in (allowed_chains or []) if str(c).strip()}
+        allowed = allowed or None
+        if not prepared_pdb.exists():
+            return {}
+        suffix = prepared_pdb.suffix.lower()
+        if suffix in {".cif", ".mmcif"}:
+            residue_atoms = self._collect_mmcif_residue_atoms(prepared_pdb, allowed_chains=allowed)
+        else:
+            residue_atoms = self._collect_pdb_residue_atoms(prepared_pdb, allowed_chains=allowed)
+        if not residue_atoms:
+            return {}
+
+        hotspot_coords: List[Tuple[float, float, float]] = []
+        for key in hotspot_keys or []:
+            parsed = self._parse_chain_res_token(key)
+            if not parsed:
+                continue
+            chain, resnum = parsed
+            coords = residue_atoms.get((chain, resnum))
+            if coords:
+                hotspot_coords.extend(coords)
+        if not hotspot_coords:
+            return {}
+
+        radius2 = float(radius) ** 2
+        selected: set[Tuple[str, int]] = set()
+        for resid, coords in residue_atoms.items():
+            if resid in selected:
+                continue
+            for coord in coords:
+                cx, cy, cz = coord
+                for hx, hy, hz in hotspot_coords:
+                    dx = cx - hx
+                    dy = cy - hy
+                    dz = cz - hz
+                    if (dx * dx + dy * dy + dz * dz) <= radius2:
+                        selected.add(resid)
+                        break
+                if resid in selected:
+                    break
+
+        out: Dict[str, List[int]] = defaultdict(list)
+        for chain, resnum in selected:
+            out[chain].append(int(resnum))
+        return {chain: sorted(set(resnums)) for chain, resnums in out.items()}
 
     @staticmethod
     def _format_ranges(numbers: Iterable[int]) -> str:
@@ -1322,10 +1518,23 @@ class BoltzGenEngine(DesignEngine):
         num_designs: int,
         scaffold_paths: Optional[List[str]] = None,
         binding_override: Optional[Dict[str, List[int]]] = None,
+        crop_radius: Optional[float] = None,
+        crop_chains: Optional[Sequence[str]] = None,
     ) -> BoltzGenSpecInfo:
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         hotspot_map = self._parse_hotspot_map(hotspot_keys)
         include_map = self._expand_epitope_residues(epitope_residues)
+        use_res_index = False
+        if crop_radius is not None and crop_radius > 0 and hotspot_keys:
+            crop_map = self._crop_res_index_by_hotspots(
+                prepared_pdb,
+                hotspot_keys,
+                crop_radius,
+                allowed_chains=crop_chains,
+            )
+            if crop_map:
+                include_map = crop_map
+                use_res_index = True
         binding_map = binding_override if binding_override else (hotspot_map if hotspot_map else include_map)
         if binding_override and not include_map:
             include_map = binding_override
@@ -1335,10 +1544,10 @@ class BoltzGenEngine(DesignEngine):
         include_entries: List[Dict[str, Dict[str, str]]] = []
         for chain, residues in sorted(include_map.items()):
             entry = {"chain": {"id": chain}}
-            # Don't specify residues
-            # formatted = self._format_ranges(residues)
-            # if formatted:
-            #     entry["chain"]["res_index"] = formatted
+            if use_res_index:
+                formatted = self._format_ranges(residues)
+                if formatted:
+                    entry["chain"]["res_index"] = formatted
             include_entries.append(entry)
 
         binding_entries: List[Dict[str, Dict[str, str]]] = []
