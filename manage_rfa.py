@@ -414,7 +414,7 @@ from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
 from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
 # from Projects.initbinder.utils.make_rfa_rf2 import make_rfa_rf2_command
 from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
-from assess_rfa_design import assess_rfa_all
+# from assess_rfa_design import assess_rfa_all
 from decide_scope import llm_scope
 from target_generation import run_target_generation
 from utils import (
@@ -1245,19 +1245,19 @@ def main():
         else:
             if args.shard_mod > 1 and not args.merge_only and args.shard_idx is None:
                 raise ValueError("--shard_idx is required when --shard_mod > 1 (unless using --merge_only)")
-            assess_rfa_all(
-                args.pdb,
-                binder_chain_id=args.binder_chain_id,
-                seed=args.seed,
-                sample_idx=args.sample_idx,
-                run_label=args.run_label,
-                skip_pml=args.skip_pml,
-                skip_seq=args.skip_seq,
-                include_keyword=include_kw,
-                shard_mod=max(1, args.shard_mod),
-                shard_idx=args.shard_idx,
-                merge_only=args.merge_only,
-            )
+            # assess_rfa_all(
+            #     args.pdb,
+            #     binder_chain_id=args.binder_chain_id,
+            #     seed=args.seed,
+            #     sample_idx=args.sample_idx,
+            #     run_label=args.run_label,
+            #     skip_pml=args.skip_pml,
+            #     skip_seq=args.skip_seq,
+            #     include_keyword=include_kw,
+            #     shard_mod=max(1, args.shard_mod),
+            #     shard_idx=args.shard_idx,
+            #     merge_only=args.merge_only,
+            # )
 
     elif args.cmd == "report-scope":
         pass
