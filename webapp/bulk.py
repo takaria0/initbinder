@@ -1997,6 +1997,78 @@ def _write_binder_cache(out_dir: Path, csv_path: Path, rows: Sequence[BoltzgenBi
         print(f"[boltzgen-binders] warn: failed to write cache manifest: {exc}")
 
 
+def _populate_hotspot_distances(
+    rows: List[dict],
+    *,
+    out_dir: Path,
+    filter_pdb: Optional[str] = None,
+    filter_epitope: Optional[str] = None,
+    order_by: Optional[str] = None,
+) -> bool:
+    def _num(val: object) -> Optional[float]:
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            return None
+        return num if math.isfinite(num) else None
+
+    pending = [row for row in rows if _num(row.get("hotspot_dist")) is None]
+    if not pending:
+        return False
+
+    log_path = out_dir / "boltzgen_hotspot_distance.log"
+    handle = log_path.open("a", encoding="utf-8")
+
+    def log(line: str) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        handle.write(f"{timestamp} {line}\n")
+        handle.flush()
+
+    try:
+        log(
+            "[hotspot-distance] request "
+            f"page=all page_size={len(rows)} "
+            f"filter_pdb={filter_pdb or ''} filter_epitope={filter_epitope or ''} order_by={order_by or ''}"
+        )
+        for row in pending:
+            log(
+                "[hotspot-distance] row "
+                f"pdb_id={row.get('pdb_id')} epitope={row.get('epitope_id') or row.get('epitope') or ''} "
+                f"rank={row.get('rank')}"
+            )
+            log(
+                "  "
+                f"design_path={row.get('design_path') or 'NA'} "
+                f"target_path={row.get('target_path') or 'NA'} "
+                f"config_path={row.get('config_path') or 'NA'} "
+                f"binding_label={row.get('binding_label') or 'NA'} "
+                f"include_label={row.get('include_label') or 'NA'} "
+                f"binder_seq_len={len(row.get('binder_seq')) if row.get('binder_seq') else 'NA'}"
+            )
+            binding_label = row.get("binding_label")
+            include_label = row.get("include_label")
+            if not binding_label and not include_label:
+                fallback = _fallback_label_from_target(row.get("pdb_id"), row.get("epitope_id"), row.get("epitope"))
+                if fallback:
+                    include_label = fallback
+                    log(f"  fallback_label=target.yaml ({fallback})")
+                else:
+                    log("  fallback_label=none")
+            row["hotspot_dist"] = _min_hotspot_distance(
+                binding_label=binding_label,
+                include_label=include_label,
+                design_path=row.get("design_path"),
+                target_path=row.get("target_path"),
+                binder_seq=row.get("binder_seq"),
+                log=log,
+            )
+        log("[hotspot-distance] complete")
+    finally:
+        handle.close()
+
+    return True
+
+
 def _get_cached_binder_rows(
     csv_path: Path,
     *,
@@ -2011,12 +2083,16 @@ def _get_cached_binder_rows(
     out_dir = out_dir or _output_dir()
     cache = _load_binder_cache(out_dir, csv_path)
     rows: List[dict]
+    order_key = str(order_by or "").strip().lower()
+    want_hotspot_sort = order_key == "hotspot"
     if cache:
         rows = [row for row in cache.get("rows") if isinstance(row, dict)]
     else:
-        all_rows = _load_binder_rows_from_csv(csv_path, ids=None, compute_hotspot_distance=False)
+        all_rows = _load_binder_rows_from_csv(csv_path, ids=None, compute_hotspot_distance=want_hotspot_sort)
         _write_binder_cache(out_dir, csv_path, all_rows)
         rows = [row.dict() for row in all_rows]
+
+    rows_all = rows
 
     if ids:
         wanted = {p.strip().upper() for p in ids if p and str(p).strip()}
@@ -2037,7 +2113,24 @@ def _get_cached_binder_rows(
             )
         ]
 
-    order_key = str(order_by or "").strip().lower()
+    if want_hotspot_sort:
+        updated = _populate_hotspot_distances(
+            rows,
+            out_dir=out_dir,
+            filter_pdb=filter_pdb,
+            filter_epitope=filter_epitope,
+            order_by=order_by,
+        )
+        if updated:
+            try:
+                _write_binder_cache(
+                    out_dir,
+                    csv_path,
+                    [BoltzgenBinderRow(**row) for row in rows_all],
+                )
+            except Exception:
+                pass
+
     if order_key:
         def _num(val: object) -> Optional[float]:
             try:
