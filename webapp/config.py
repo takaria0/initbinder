@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +14,30 @@ import yaml
 
 CONFIG_ENV_VAR = "INITBINDER_UI_CONFIG"
 DEFAULT_CONFIG_PATH = Path.cwd() / "cfg" / "webapp.yaml"
+DEFAULT_LOCAL_CONFIG_PATH = Path.cwd() / "cfg" / "webapp.local.yaml"
+
+_ENV_VAR_RE = re.compile(r"\$(\w+)|\${([^}]+)}")
+
+
+def _expand_env_vars(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1) or match.group(2)
+        if var and var in os.environ:
+            return os.environ[var]
+        return match.group(0)
+
+    expanded = _ENV_VAR_RE.sub(_replace, text)
+    return os.path.expanduser(expanded)
+
+
+def _expand_env_in_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _expand_env_in_value(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_in_value(val) for val in value]
+    if isinstance(value, str):
+        return _expand_env_vars(value)
+    return value
 
 
 @dataclass(slots=True)
@@ -166,7 +191,7 @@ def _load_yaml_config(path: Path) -> Dict[str, Any]:
     data = yaml.safe_load(path.read_text()) or {}
     if not isinstance(data, dict):
         raise ValueError(f"Config file {path} must contain a mapping at the top level")
-    return data
+    return _expand_env_in_value(data)
 
 
 def _config_from_dict(data: Dict[str, Any]) -> WebAppConfig:
@@ -195,14 +220,26 @@ def load_config() -> WebAppConfig:
     }
 
     cfg_path_env = os.getenv(CONFIG_ENV_VAR)
-    cfg_path = Path(cfg_path_env).expanduser() if cfg_path_env else DEFAULT_CONFIG_PATH
+    cfg_paths = [Path(cfg_path_env).expanduser()] if cfg_path_env else [DEFAULT_CONFIG_PATH, DEFAULT_LOCAL_CONFIG_PATH]
 
-    merged = _deep_update(default, _load_yaml_config(cfg_path))
+    merged = default
+    for path in cfg_paths:
+        merged = _deep_update(merged, _load_yaml_config(path))
 
     # Environment variable overrides (simple string based)
     env_overrides: Dict[str, Any] = {}
     if root := os.getenv("INITBINDER_PROJECT_ROOT"):
         env_overrides.setdefault("paths", {})["project_root"] = root
+    if workspace_root := os.getenv("INITBINDER_WORKSPACE_ROOT"):
+        env_overrides.setdefault("paths", {})["workspace_root"] = workspace_root
+    if targets_dir := os.getenv("INITBINDER_TARGETS_DIR"):
+        env_overrides.setdefault("paths", {})["targets_dir"] = targets_dir
+    if cache_dir := os.getenv("INITBINDER_CACHE_DIR"):
+        env_overrides.setdefault("paths", {})["cache_dir"] = cache_dir
+    if static_dir := os.getenv("INITBINDER_STATIC_DIR"):
+        env_overrides.setdefault("paths", {})["static_dir"] = static_dir
+    if antigen_map := os.getenv("INITBINDER_ANTIGEN_CATEGORY_MAP"):
+        env_overrides.setdefault("paths", {})["antigen_category_map"] = antigen_map
     if remote_root := os.getenv("INITBINDER_REMOTE_ROOT"):
         env_overrides.setdefault("cluster", {})["remote_root"] = remote_root
     if host := os.getenv("INITBINDER_CLUSTER_HOST"):
@@ -239,6 +276,8 @@ def load_config() -> WebAppConfig:
         }
     if conda_activate := os.getenv("INITBINDER_CONDA_ACTIVATE"):
         env_overrides.setdefault("cluster", {})["conda_activate"] = conda_activate
+    if log_dir := os.getenv("INITBINDER_LOG_DIR"):
+        env_overrides["log_dir"] = log_dir
 
     merged = _deep_update(merged, env_overrides)
     return _config_from_dict(merged)
@@ -252,4 +291,5 @@ __all__ = [
     "load_config",
     "CONFIG_ENV_VAR",
     "DEFAULT_CONFIG_PATH",
+    "DEFAULT_LOCAL_CONFIG_PATH",
 ]

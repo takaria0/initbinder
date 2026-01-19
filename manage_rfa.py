@@ -410,10 +410,19 @@ if USE_LLM:
 
 from prep_target import prep_target
 from init_target import init_target
-from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
-from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
+try:
+    from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
+except Exception:
+    make_rfa_rfdiffusion_command = None  # type: ignore
+try:
+    from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
+except Exception:
+    make_rfa_proteinmpnn_command = None  # type: ignore
 # from Projects.initbinder.utils.make_rfa_rf2 import make_rfa_rf2_command
-from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
+try:
+    from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
+except Exception:
+    make_rfa_af3_command = None  # type: ignore
 # from assess_rfa_design import assess_rfa_all
 from decide_scope import llm_scope
 from target_generation import run_target_generation
@@ -455,6 +464,16 @@ def _sbatch(path: Path, extra_env: dict[str,str] = None, dep: str | None = None)
 def _split_even(total: int, n: int) -> List[int]:
     q, r = divmod(total, n)
     return [q + 1 if i < r else q for i in range(n)]
+
+
+def _require_pipeline_tools(*tools: tuple[str, object]) -> None:
+    missing = [name for name, tool in tools if tool is None]
+    if missing:
+        raise RuntimeError(
+            "Missing pipeline tool(s): "
+            + ", ".join(missing)
+            + ". These were archived; restore from archive/ to use RFA pipelines."
+        )
 
 
 def _write_assess_rfa_all_sbatch(
@@ -1148,6 +1167,9 @@ def main():
 
 
     elif args.cmd == "make-rfa-rfdiffusion":
+        _require_pipeline_tools(
+            ("make_rfa_rfdiffusion_command", make_rfa_rfdiffusion_command),
+        )
         arms = [ _parse_arm(s) for s in args.arm ]
         if args.total is not None:
             allocs = _split_even(int(args.total), len(arms))
@@ -1166,11 +1188,17 @@ def main():
             )
 
     elif args.cmd == "make-rfa-proteinmpnn":
+        _require_pipeline_tools(
+            ("make_rfa_proteinmpnn_command", make_rfa_proteinmpnn_command),
+        )
         arms = [ _parse_arm(s) for s in args.arm ]
         for ep, var in arms:
             make_rfa_proteinmpnn_command(args.pdb, ep, args.num_seq, args.temp, hotspot_variant=var)
 
     elif args.cmd == "make-rfa-af3":
+        _require_pipeline_tools(
+            ("make_rfa_af3_command", make_rfa_af3_command),
+        )
         arms = [ _parse_arm(s) for s in args.arm ]
         model_seeds = args.model_seeds or list(range(1, 11))
         for ep, var in arms:
@@ -1263,6 +1291,11 @@ def main():
         pass
 
     elif args.cmd == "pipeline":
+        _require_pipeline_tools(
+            ("make_rfa_rfdiffusion_command", make_rfa_rfdiffusion_command),
+            ("make_rfa_proteinmpnn_command", make_rfa_proteinmpnn_command),
+            ("make_rfa_af3_command", make_rfa_af3_command),
+        )
         arms = [_parse_arm(s) for s in args.arm]
         allocs = _split_even(args.total, len(arms)) if args.total is not None else [args.num_designs]*len(arms)
         model_seeds = args.model_seeds or list(range(1, 11))
@@ -1461,6 +1494,11 @@ def main():
             print(f"[ok] Wrote launcher: {launch}\nRun: bash {launch}")
 
     elif args.cmd == "followup":
+        _require_pipeline_tools(
+            ("make_rfa_rfdiffusion_command", make_rfa_rfdiffusion_command),
+            ("make_rfa_proteinmpnn_command", make_rfa_proteinmpnn_command),
+            ("make_rfa_af3_command", make_rfa_af3_command),
+        )
         tdir = Path("targets")/args.pdb.upper()
         tsv = Path(args.assess_tsv) if args.assess_tsv else _latest_assess_tsv(tdir)
         if not tsv or not tsv.exists():

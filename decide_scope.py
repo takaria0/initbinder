@@ -37,13 +37,14 @@ from utils import (
 )
 from env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
 
-# ====== HF cache (あなたの指定どおり。env.py に HF_ROOT があればそれを優先) ======
+# ====== HF cache (env.py override, then INITBINDER_HF_ROOT, then default) ======
 try:
     from env import HF_ROOT as _HF_ROOT_OVERRIDE
 except Exception:
     _HF_ROOT_OVERRIDE = None
 
-HF_ROOT = Path(_HF_ROOT_OVERRIDE or "/pub/inagakit/.cache/huggingface")
+_HF_ROOT_ENV = os.getenv("INITBINDER_HF_ROOT")
+HF_ROOT = Path(_HF_ROOT_OVERRIDE or _HF_ROOT_ENV or (Path.home() / ".cache" / "huggingface")).expanduser()
 os.environ.setdefault("HF_HOME", str(HF_ROOT / ".hf_home"))
 os.environ.setdefault("HF_HUB_CACHE", str(HF_ROOT / ".hf_home" / "hub"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_ROOT / ".transformers_cache"))

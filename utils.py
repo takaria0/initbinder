@@ -46,12 +46,18 @@ UNIPROT_API = "https://rest.uniprot.org/uniprotkb/{accession}"
 
 # --- HPC & Singularity Configuration ---
 # Absolute path to your RFAntibody singularity image file
-SINGULARITY_IMAGE_PATH = "/pub/inagakit/rfa/rfantibody.sif"
+SINGULARITY_IMAGE_PATH = os.environ.get(
+    "INITBINDER_SINGULARITY_IMAGE",
+    "/pub/inagakit/rfa/rfantibody.sif",
+)
 
 # --- RFAntibody & Framework Paths ---
 # This should be the path to the root of the cloned RFAntibody repository
 # It will be bound to /home inside the container.
-RFANTIBODY_REPO_PATH = "/data/homezvol1/inagakit/Library/RFantibody"
+RFANTIBODY_REPO_PATH = os.environ.get(
+    "INITBINDER_RFANTIBODY_REPO",
+    "/data/homezvol1/inagakit/Library/RFantibody",
+)
 
 # Default Nanobody Framework. Ensure this is an HLT-formatted PDB file.
 # The one from the RFAntibody repo is recommended.
@@ -74,17 +80,28 @@ SLURM_CPU_ACCOUNT = os.environ.get("SLURM_CPU_ACCOUNT", 'ccl_lab')
 
 # --- AlphaFold 3 Configuration (NEW) ---
 # Absolute path to your AlphaFold 3 singularity image
-AF3_SINGULARITY_IMAGE = "/pub/inagakit/af3/alphafold3_40gb.sif"
+AF3_SINGULARITY_IMAGE = os.environ.get(
+    "INITBINDER_AF3_SINGULARITY_IMAGE",
+    "/pub/inagakit/af3/alphafold3_40gb.sif",
+)
 # Path to the directory containing AF3 model parameters
-AF3_MODEL_PARAMS_DIR = "/pub/inagakit/af3/model_params"
+AF3_MODEL_PARAMS_DIR = os.environ.get(
+    "INITBINDER_AF3_MODEL_PARAMS_DIR",
+    "/pub/inagakit/af3/model_params",
+)
 # Path to the directory containing AF3 databases (on SSD if possible)
-AF3_DATABASES_DIR = "/pub/inagakit/af3/databases"
+AF3_DATABASES_DIR = os.environ.get(
+    "INITBINDER_AF3_DATABASES_DIR",
+    "/pub/inagakit/af3/databases",
+)
 
 
 # --- Global Constants ---
 # ROOT = Path(__file__).resolve().parent
-_ROOT_DEFAULT = Path("/pub/inagakit/Projects/initbinder")
-_ROOT_ENV = os.getenv("INITBINDER_ROOT")
+_ROOT_DEFAULT = Path(
+    os.environ.get("INITBINDER_PROJECT_ROOT", str(Path(__file__).resolve().parent))
+)
+_ROOT_ENV = os.getenv("INITBINDER_ROOT") or os.getenv("INITBINDER_PROJECT_ROOT")
 if _ROOT_ENV:
     ROOT = Path(_ROOT_ENV).expanduser()
 else:
@@ -99,7 +116,7 @@ def _resolve_targets_root() -> Path:
     Preference order:
       1. Explicit INITBINDER_TARGET_ROOT environment variable
       2. `<ROOT>/targets` if it exists (works for developer clones)
-      3. `/pub/.../targets` shared repository if present
+      3. `<_ROOT_DEFAULT>/targets` if it exists (shared or alternate root)
       4. Fallback to `<ROOT>/targets` even if it does not yet exist (for creation)
     """
 
@@ -119,8 +136,7 @@ def _resolve_targets_root() -> Path:
     return candidates[0] if candidates else ROOT / "targets"
 
 
-# TARGETS_ROOT = _resolve_targets_root()
-TARGETS_ROOT = Path('/pub/inagakit/Projects/initbinder/targets')
+TARGETS_ROOT = _resolve_targets_root()
 TARGETS_ROOT_LOCAL = ROOT / "targets"
 
 print(f"[info] Running manage_rfa_eco.py from {ROOT}")

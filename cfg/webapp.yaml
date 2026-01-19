@@ -1,11 +1,10 @@
 paths:
-  project_root: /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder
   antigen_category_map: targets_catalog/antigen_category_map.tsv
 cluster:
-  ssh_config_alias: hpc3.rcic.uci.edu
-  remote_root: /data/homezvol1/inagakit/Projects/initbinder    # adjust to your repo path on HPC
-  target_root: /pub/inagakit/Projects/initbinder/  # adjust to your target root path on HPC
-  control_path: /Users/inagakit/.ssh/cm-initbinder-hpc3.rcic.uci.edu  # adjust if needed
+  ssh_config_alias: null
+  remote_root: null
+  target_root: null
+  control_path: null
   control_persist: 600000
   conda_activate: "conda activate takashi"
   rsync_path: rsync
@@ -31,9 +30,4 @@ cluster:
     cache_dir: null
     output_root: null
     extra_run_args: []
-    nanobody_scaffolds:
-      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/7eow.yaml
-      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/7xl0.yaml
-      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8coh.yaml
-      - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/8z8v.yaml
-      # - /pub/inagakit/boltzgen-main/example/nanobody_scaffolds/3eak.yaml
+    nanobody_scaffolds: []
