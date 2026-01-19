@@ -4,7 +4,7 @@ This checklist mirrors the typical flow: Discovery → Init/Scope/Prep → Desig
 
 Assumptions
 - Working dir: /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder
-- `env.py` has `GOOGLE_API_KEY` and HPC paths set in `utils.py`.
+- `cfg/env.py` has `GOOGLE_API_KEY` and HPC paths set in `utils.py`.
 - For vendor pages: Playwright is installed (`pip install playwright && python -m playwright install chromium`).
 
 ## 1) Discovery (local)
@@ -126,4 +126,3 @@ export RFA_PYMOL_REMOTE_PORT=9123
 
 - SLURM jobs run via Singularity containers configured in `utils.py` (RFAntibody and AF3 paths).
 - Avoid running sbatch under an active conda env (scripts handle deactivation where needed).
-

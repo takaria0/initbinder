@@ -404,7 +404,7 @@ import freesasa
 # --- Optional LLM (comment out if not using) ---
 USE_LLM = True
 if USE_LLM:
-    from env import GOOGLE_API_KEY, MODEL
+    from cfg.env import GOOGLE_API_KEY, MODEL
     import google.generativeai as genai  # pip install google-generativeai
     genai.configure(api_key=GOOGLE_API_KEY)
 

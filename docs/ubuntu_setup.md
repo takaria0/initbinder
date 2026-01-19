@@ -58,7 +58,7 @@ pip install google-generativeai playwright bs4 requests pyyaml tenacity httpx fa
 python -m playwright install chromium
 ```
 
-- Ensure `env.py` exports `GOOGLE_API_KEY` for LLM-powered discovery (`target_generation.py`).
+- Ensure `cfg/env.py` exports `GOOGLE_API_KEY` for LLM-powered discovery (`target_generation.py`).
 - `freesasa` installs compiled extensions; if the wheel build fails, install the
   system headers via `sudo apt-get install -y libfreesasa-dev` and retry.
 

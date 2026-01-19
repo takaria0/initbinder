@@ -54,14 +54,19 @@ import yaml
 # We import ROOT and a few helpers from utils to locate files and parse residue keys.
 try:
     from utils import ROOT, parse_key
-    from env import (RFA_LOCAL_PYMOL_DEST, RFA_LOCAL_PYMOL_SSH_OPTS, RFA_PYMOL_MODE,
-                     RFA_PYMOL_REMOTE_HOST, RFA_PYMOL_REMOTE_PORT)
+    from cfg.env import (
+        RFA_LOCAL_PYMOL_DEST,
+        RFA_LOCAL_PYMOL_SSH_OPTS,
+        RFA_PYMOL_MODE,
+        RFA_PYMOL_REMOTE_HOST,
+        RFA_PYMOL_REMOTE_PORT,
+    )
 except Exception:
     # In unit test environments utils may not be importable; the functions will
     # not be available.  Raise a descriptive error when used in that context.
     ROOT = None  # type: ignore
     parse_key = None  # type: ignore
-    # Fallback to os.getenv if env.py is not present
+    # Fallback to os.getenv if cfg/env.py is not present
     RFA_PYMOL_MODE = os.getenv("RFA_PYMOL_MODE", "bundle")
     RFA_PYMOL_REMOTE_HOST = os.getenv("RFA_PYMOL_REMOTE_HOST", "localhost")
     RFA_PYMOL_REMOTE_PORT = int(os.getenv("RFA_PYMOL_REMOTE_PORT", "9123"))

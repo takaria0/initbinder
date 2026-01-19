@@ -98,7 +98,7 @@ USE_LLM = True
 GEMINI_AVAILABLE = False
 BROWSER_HEADLESS = False
 try:
-    from env import GOOGLE_API_KEY
+    from cfg.env import GOOGLE_API_KEY
     import google.generativeai as genai
     from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
     genai.configure(api_key=GOOGLE_API_KEY)
@@ -118,7 +118,7 @@ except Exception as e:
 
 # OpenAI configuration (optional)
 try:
-    from env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER, MODEL
+    from cfg.env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER, MODEL
 except Exception:
     _OPENAI_API_KEY = None
     _LLM_PROVIDER = None
@@ -128,7 +128,7 @@ OPENAI_FLASH_MODEL_NAME = MODEL
 
 # Groq fallback for LLM Flash (vendor parsing)
 try:
-    from env import GROQ_API_KEY as _GROQ_API_KEY
+    from cfg.env import GROQ_API_KEY as _GROQ_API_KEY
 except Exception:
     _GROQ_API_KEY = None
 GROQ_API_KEY = _GROQ_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")

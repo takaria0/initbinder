@@ -35,11 +35,11 @@ from utils import (
     UNIPROT_IDMAPPING_STATUS_API,
     UNIPROT_API,
 )
-from env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
+from cfg.env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
 
-# ====== HF cache (env.py override, then INITBINDER_HF_ROOT, then default) ======
+# ====== HF cache (cfg/env.py override, then INITBINDER_HF_ROOT, then default) ======
 try:
-    from env import HF_ROOT as _HF_ROOT_OVERRIDE
+    from cfg.env import HF_ROOT as _HF_ROOT_OVERRIDE
 except Exception:
     _HF_ROOT_OVERRIDE = None
 
@@ -931,7 +931,7 @@ def llm_scope(
         return
 
     try:
-        import env as _env
+        import cfg.env as _env
         _llm_provider = str(getattr(_env, "LLM_PROVIDER", "gpt-oss-local")).lower()
         _max_new = int(getattr(_env, "MAX_NEW_TOKENS", "8000"))
         _groq_key = GROQ_API_KEY
