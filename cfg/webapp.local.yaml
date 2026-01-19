@@ -27,6 +27,8 @@ cluster:
     cpus: 8
     mem_gb: 64
     time_hours: 12
+    scripts_dir: lib/tools/boltzgen
+    launcher_dir: lib/tools/launchers
     protocol: nanobody-anything
     cache_dir: null
     output_root: null

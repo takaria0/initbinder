@@ -51,6 +51,8 @@ class BoltzGenClusterConfig:
     gpus: str = "A100:1"
     cache_dir: Optional[Path] = None
     output_root: Optional[Path] = None
+    scripts_dir: Optional[Path] = None
+    launcher_dir: Optional[Path] = None
     protocol: Optional[str] = None
     extra_run_args: List[str] = field(default_factory=list)
     nanobody_scaffolds: List[str] = field(default_factory=list)
@@ -60,6 +62,10 @@ class BoltzGenClusterConfig:
             self.cache_dir = Path(self.cache_dir).expanduser()
         if isinstance(self.output_root, str) and self.output_root:
             self.output_root = Path(self.output_root).expanduser()
+        if isinstance(self.scripts_dir, str) and self.scripts_dir:
+            self.scripts_dir = Path(self.scripts_dir).expanduser()
+        if isinstance(self.launcher_dir, str) and self.launcher_dir:
+            self.launcher_dir = Path(self.launcher_dir).expanduser()
         if isinstance(self.time_hours, str) and self.time_hours.strip():
             self.time_hours = int(self.time_hours)
         if isinstance(self.mem_gb, str) and self.mem_gb.strip():

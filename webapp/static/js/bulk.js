@@ -2304,7 +2304,7 @@ function clusterDefaults() {
   const targetBaseRaw = (info.target_root || `${workspaceRoot}/targets`).toString().replace(/\/$/, '');
   const lastSegment = targetBaseRaw.split('/').filter(Boolean).pop() || '';
   const targetRoot = lastSegment.toLowerCase() === 'targets' ? targetBaseRaw : `${targetBaseRaw}/targets`;
-  const toolsRoot = workspaceRoot || '<remote_root>';
+  const toolsRoot = workspaceRoot ? `${workspaceRoot}/lib` : '<remote_root>/lib';
   const localRootRaw = (info.local_root || '').toString().replace(/\/$/, '');
   const localWorkspaceRoot = localRootRaw || '';
   const localTargetsRoot = localWorkspaceRoot
@@ -2370,13 +2370,13 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const verifyLine = `ssh ${sshTarget} "ls ${remoteSpecs.join(' ')}"`;
   const envRoot = remoteRoot || '<remote_root>';
   const envTargetRoot = targetRoot || `${envRoot}/targets`;
-  const pipelinePath = `${remoteRoot || '<remote_root>'}/tools/boltzgen/pipeline.py`;
+  const pipelinePath = `${toolsRoot || '<remote_root>/lib'}/tools/boltzgen/pipeline.py`;
   return [
     `# Manual BoltzGen submission${epitopeName ? ` (${epitopeName})` : ''}`,
     '',
     '# 1) Sync target configs + tools to cluster',
     `rsync -az ${localTarget} ${sshTarget}:${targetRoot}`,
-    `rsync -az tools ${sshTarget}:${toolsRoot || '<remote_root>'}/tools`,
+    `rsync -az lib/tools ${sshTarget}:${toolsRoot || '<remote_root>/lib'}/tools`,
     '',
     '# 2) Verify boltzgen configs exist on cluster',
     verifyLine,
@@ -2410,7 +2410,7 @@ function buildAllRunCommandsText(targets = []) {
   } = clusterDefaults();
   const envRoot = remoteRoot || '<remote_root>';
   const envTargetRoot = targetRoot || `${envRoot}/targets`;
-  const pipelinePath = `${remoteRoot || '<remote_root>'}/tools/boltzgen/pipeline.py`;
+  const pipelinePath = `${toolsRoot || '<remote_root>/lib'}/tools/boltzgen/pipeline.py`;
   const condaLine = condaActivate ? condaActivate : '# conda activate bg';
 
   const designCount = getBoltzDesignCount() || 100;
@@ -2434,7 +2434,7 @@ function buildAllRunCommandsText(targets = []) {
     const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
     lines.push(`rsync -az ${localTarget} ${sshTarget}:${targetRoot}`);
   });
-  lines.push(`rsync -az tools ${sshTarget}:${toolsRoot || '<remote_root>'}/tools`);
+  lines.push(`rsync -az lib/tools ${sshTarget}:${toolsRoot || '<remote_root>/lib'}/tools`);
 
   lines.push('', '# 2) Verify boltzgen configs exist on cluster');
   targets.forEach((t) => {

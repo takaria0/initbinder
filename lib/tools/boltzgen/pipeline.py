@@ -3,28 +3,13 @@ from __future__ import annotations
 
 """Generate and submit BoltzGen design pipeline sbatch scripts.
 
-rsync -az hpc3.rcic.uci.edu:/pub/inagakit/Projects/initbinder/targets/4ZNE/designs/_boltzgen/ /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets/4ZNE/designs/boltzgen/
-
-INITBINDER_ROOT=/pub/inagakit/Projects/initbinder INITBINDER_TARGET_ROOT=/pub/inagakit/Projects/initbinder/targets \
-python /pub/inagakit/Projects/initbinder/tools/boltzgen/pipeline.py pipeline 5WT9 \
-  --run_label boltz_5WT9_20251216_1605 \
-  --num_designs 10 \
-  --output_root /pub/inagakit/Projects/initbinder/targets/5WT9/designs/boltzgen/epitope_1/boltz_5WT9_20251216_1605 \
-  --partition gpu --gpus A30:1 --cpus 8 --mem 64G --time_h 2 \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_1/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_10/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_2/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_3/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_4/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_5/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_6/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_7/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_8/boltzgen_config.yaml \
-  --spec /pub/inagakit/Projects/initbinder/targets/5WT9/configs/epitope_9/boltzgen_config.yaml
-
-  --scripts_dir /pub/inagakit/Projects/initbinder/tools/boltzgen \
-  --launcher_dir /pub/inagakit/Projects/initbinder/tools/launchers
-
+Example:
+  INITBINDER_ROOT=/path/to/initbinder INITBINDER_TARGET_ROOT=/path/to/initbinder/targets \\
+    python /path/to/initbinder/lib/tools/boltzgen/pipeline.py pipeline 5WT9 \\
+      --run_label boltz_5WT9_20251216_1605 \\
+      --num_designs 10 \\
+      --output_root /path/to/initbinder/targets/5WT9/designs/boltzgen/boltz_5WT9_20251216_1605 \\
+      --spec /path/to/initbinder/targets/5WT9/configs/epitope_1/boltzgen_config.yaml
 """
 
 import argparse
@@ -35,15 +20,102 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Any
 
 
-DEFAULT_PARTITION = os.getenv("BOLTZGEN_SLURM_PARTITION", "gpu")
-DEFAULT_ACCOUNT = os.getenv("BOLTZGEN_SLURM_ACCOUNT", "ccl_lab_gpu")
-DEFAULT_GPUS = os.getenv("BOLTZGEN_SLURM_GPUS", "A100:1")
-DEFAULT_CPUS = int(os.getenv("BOLTZGEN_SLURM_CPUS", "8"))
-DEFAULT_MEM = os.getenv("BOLTZGEN_SLURM_MEM", "64G")
-DEFAULT_TIME_H = int(os.getenv("BOLTZGEN_SLURM_TIME_H", "12"))
+def _load_boltzgen_config() -> dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    try:
+        from webapp import config as webcfg
+    except Exception:
+        return {}
+
+    cfg_env = os.getenv(webcfg.CONFIG_ENV_VAR)
+    if cfg_env:
+        cfg_paths = [Path(cfg_env).expanduser()]
+    else:
+        cfg_paths = [repo_root / "cfg" / "webapp.yaml", repo_root / "cfg" / "webapp.local.yaml"]
+
+    merged: dict[str, Any] = {}
+    for path in cfg_paths:
+        merged = webcfg._deep_update(merged, webcfg._load_yaml_config(path))
+
+    cluster = merged.get("cluster", {})
+    if not isinstance(cluster, dict):
+        return {}
+    boltz = cluster.get("boltzgen", {})
+    return boltz if isinstance(boltz, dict) else {}
+
+
+_BOLTZGEN_CFG = _load_boltzgen_config()
+
+
+def _cfg_value(key: str) -> Optional[Any]:
+    if not _BOLTZGEN_CFG:
+        return None
+    value = _BOLTZGEN_CFG.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def _env_or_cfg(env_key: str, cfg_key: str, fallback: Any) -> Any:
+    env_val = os.getenv(env_key)
+    if env_val is not None and str(env_val).strip():
+        return env_val
+    cfg_val = _cfg_value(cfg_key)
+    if cfg_val is not None:
+        return cfg_val
+    return fallback
+
+
+def _env_or_cfg_int(env_key: str, cfg_key: str, fallback: int) -> int:
+    value = _env_or_cfg(env_key, cfg_key, fallback)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _default_mem() -> str:
+    env_val = os.getenv("BOLTZGEN_SLURM_MEM")
+    if env_val is not None and str(env_val).strip():
+        return env_val
+    cfg_val = _cfg_value("mem_gb")
+    if cfg_val is not None:
+        try:
+            return f"{int(cfg_val)}G"
+        except (TypeError, ValueError):
+            return str(cfg_val)
+    return "64G"
+
+
+def _cfg_list(key: str) -> Optional[List[str]]:
+    value = _cfg_value(key)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
+
+
+DEFAULT_PARTITION = _env_or_cfg("BOLTZGEN_SLURM_PARTITION", "partition", "gpu")
+DEFAULT_ACCOUNT = _env_or_cfg("BOLTZGEN_SLURM_ACCOUNT", "account", "ccl_lab_gpu")
+DEFAULT_GPUS = _env_or_cfg("BOLTZGEN_SLURM_GPUS", "gpus", "A100:1")
+DEFAULT_CPUS = _env_or_cfg_int("BOLTZGEN_SLURM_CPUS", "cpus", 8)
+DEFAULT_MEM = _default_mem()
+DEFAULT_TIME_H = _env_or_cfg_int("BOLTZGEN_SLURM_TIME_H", "time_hours", 12)
+DEFAULT_PROTOCOL = _env_or_cfg("BOLTZGEN_PROTOCOL", "protocol", "nanobody-anything")
+DEFAULT_CONDA_ACTIVATE = _env_or_cfg("BOLTZGEN_CONDA_ACTIVATE", "conda_activate", None)
+DEFAULT_CACHE_DIR = _cfg_value("cache_dir")
+DEFAULT_OUTPUT_ROOT = _cfg_value("output_root")
+DEFAULT_SCRIPTS_DIR = _env_or_cfg("BOLTZGEN_SCRIPTS_DIR", "scripts_dir", "lib/tools/boltzgen")
+DEFAULT_LAUNCHER_DIR = _env_or_cfg("BOLTZGEN_LAUNCHER_DIR", "launcher_dir", "lib/tools/launchers")
+DEFAULT_EXTRA_ARGS = _cfg_list("extra_run_args")
 
 
 ROOT = Path(os.getenv("INITBINDER_ROOT", Path.cwd())).expanduser()
@@ -140,13 +212,12 @@ def _write_sbatch_script(
             "eval \"$(conda shell.bash hook)\"",
             "conda deactivate >/dev/null 2>&1 || true",
             "conda deactivate >/dev/null 2>&1 || true",
-            "conda activate bg",
         ]
     )
-    if conda_activate:
-        activate_line = conda_activate.strip()
-        if activate_line:
-            lines.append(activate_line)
+    if conda_activate and str(conda_activate).strip():
+        lines.append(str(conda_activate).strip())
+    else:
+        lines.append("conda activate bg")
     lines.extend(
         [
             'echo "[INFO] Using python: $(which python)"',
@@ -364,34 +435,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pipe.add_argument("--run_label", help="Run label used to group outputs.", default=None)
     p_pipe.add_argument("--num_designs", type=int, default=1000, help="Designs per spec/job.")
-    p_pipe.add_argument("--protocol", default="nanobody-anything", help="BoltzGen protocol to use.")
+    p_pipe.add_argument("--protocol", default=DEFAULT_PROTOCOL, help="BoltzGen protocol to use.")
     p_pipe.add_argument("--budget", type=int, default=None, help="Filtering budget (optional).")
     p_pipe.add_argument(
         "--output_root",
-        default=None,
-        help="Output directory root (default: targets/<pdb>/designs/_boltzgen/<run_label>).",
+        default=DEFAULT_OUTPUT_ROOT,
+        help="Output directory root (default: targets/<pdb>/designs/boltzgen/<run_label>).",
     )
     p_pipe.add_argument(
         "--scripts_dir",
-        default="tools/boltzgen",
-        help="Directory for generated sbatch scripts (default: tools/boltzgen).",
+        default=DEFAULT_SCRIPTS_DIR,
+        help="Directory for generated sbatch scripts (default: lib/tools/boltzgen).",
     )
     p_pipe.add_argument(
         "--launcher_dir",
-        default="tools/launchers",
-        help="Directory for generated launcher scripts (default: tools/launchers).",
+        default=DEFAULT_LAUNCHER_DIR,
+        help="Directory for generated launcher scripts (default: lib/tools/launchers).",
     )
-    p_pipe.add_argument("--conda_activate", default=None, help="Shell command to activate BoltzGen environment.")
+    p_pipe.add_argument(
+        "--conda_activate",
+        default=DEFAULT_CONDA_ACTIVATE,
+        help="Shell command to activate BoltzGen environment.",
+    )
     p_pipe.add_argument("--partition", default=DEFAULT_PARTITION, help="SLURM partition/queue.")
     p_pipe.add_argument("--account", default=DEFAULT_ACCOUNT, help="SLURM account (optional).")
     p_pipe.add_argument("--gpus", default=DEFAULT_GPUS, help="GPU resource string (default: A100:1).")
     p_pipe.add_argument("--cpus", type=int, default=DEFAULT_CPUS, help="CPUs per task (default: 8).")
     p_pipe.add_argument("--mem", default=DEFAULT_MEM, help="Memory request (default: 64G).")
     p_pipe.add_argument("--time_h", type=int, default=DEFAULT_TIME_H, help="Walltime hours (default: 12).")
-    p_pipe.add_argument("--cache_dir", default=None, help="Optional cache directory for HF downloads.")
+    p_pipe.add_argument("--cache_dir", default=DEFAULT_CACHE_DIR, help="Optional cache directory for HF downloads.")
     p_pipe.add_argument(
         "--extra_run_args",
         nargs=argparse.REMAINDER,
+        default=DEFAULT_EXTRA_ARGS,
         help="Additional arguments appended to `boltzgen run`.",
     )
     p_pipe.add_argument("--submit", action="store_true", help="Submit the launcher immediately.")
