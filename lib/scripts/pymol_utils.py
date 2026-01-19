@@ -19,14 +19,7 @@ Usage patterns
 * Assessment stage (assess_rfa_design.py / assess_rfa_all()): call
   ``export_design_bundle(pml_path)`` after writing an individual design
   visualization script.  This copies the referenced structure files into a
-  temporary folder, rewrites the script to load those local copies, and
-  optionally transfers the folder to a user‑specified destination via scp.
-
-For both functions the location of the final bundle on the user machine is
-controlled via the environment variable ``RFA_LOCAL_PYMOL_DEST``.  Set this
-variable to a remote scp target (for example ``user@myhost:/path/to/view``)
-before running the pipeline.  Additional SSH options (e.g. for specifying a
-private key) can be provided via ``RFA_LOCAL_PYMOL_SSH_OPTS``.
+  temporary folder and rewrites the script to load those local copies.
 
 These helpers never assume PyMOL is present on the compute cluster.  They
 solely prepare data and scripts for offline viewing.
@@ -37,9 +30,7 @@ from __future__ import annotations
 import os
 import json
 import re
-import shlex
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -54,18 +45,6 @@ except Exception:
     # not be available.  Raise a descriptive error when used in that context.
     ROOT = None  # type: ignore
     parse_key = None  # type: ignore
-
-RFA_LOCAL_PYMOL_DEST = os.getenv("RFA_LOCAL_PYMOL_DEST")
-RFA_LOCAL_PYMOL_SSH_OPTS = os.getenv("RFA_LOCAL_PYMOL_SSH_OPTS")
-
-try:
-    from cfg.env import RFA_LOCAL_PYMOL_DEST as _RFA_LOCAL_PYMOL_DEST
-    from cfg.env import RFA_LOCAL_PYMOL_SSH_OPTS as _RFA_LOCAL_PYMOL_SSH_OPTS
-    RFA_LOCAL_PYMOL_DEST = _RFA_LOCAL_PYMOL_DEST
-    RFA_LOCAL_PYMOL_SSH_OPTS = _RFA_LOCAL_PYMOL_SSH_OPTS
-except Exception:
-    pass
-
 
 def _keys_to_expr(prefix: str, keys: List[str]) -> str:
     """
@@ -1219,8 +1198,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     Create a visualisation bundle for the hotspot selections of ``pdb_id``.
     The function reads the prepared PDB and the epitope/hotspot JSON files in
     ``targets/<PDB>/prep`` and writes a PyMOL script plus the structure into a
-    temporary directory.  If the environment variable ``RFA_LOCAL_PYMOL_DEST`` is
-    set, the directory is recursively copied to that remote location via scp.
+    temporary directory.
 
     Returns the path to the generated bundle directory, or ``None`` if
     preparation files are missing.
@@ -1497,8 +1475,6 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         supporting_chains=supporting_chain_ids,
         selection_mode=selection_mode,
     )
-    # Optionally copy to remote
-    _maybe_scp_to_local(bundle_dir)
     return bundle_dir
 
 
@@ -1535,8 +1511,7 @@ def export_design_bundle(pml_path: Path) -> Path | None:
     local‑friendly version of the script in a temporary directory alongside
     copies of any referenced structure files.  If the script does not exist or
     cannot be parsed, ``None`` is returned.  Otherwise the path to the
-    directory is returned.  When the environment variable ``RFA_LOCAL_PYMOL_DEST``
-    is set the bundle is transferred via scp.
+    directory is returned.
     """
     pml_path = Path(pml_path)
     if not pml_path.exists():
@@ -1571,53 +1546,7 @@ def export_design_bundle(pml_path: Path) -> Path | None:
     # Write rewritten script
     local_pml = bundle_dir / pml_path.name
     local_pml.write_text(rewrite)
-    # Optionally export
-    _maybe_scp_to_local(bundle_dir)
     return bundle_dir
-
-
-def _maybe_scp_to_local(bundle_dir: Path) -> None:
-    """
-    If the environment variable ``RFA_LOCAL_PYMOL_DEST`` is defined, copy
-    ``bundle_dir`` to the specified location using scp.  Additional SSH
-    options can be provided via ``RFA_LOCAL_PYMOL_SSH_OPTS``.  Errors during
-    copy are caught and reported but do not raise exceptions.
-    """
-    dest = RFA_LOCAL_PYMOL_DEST
-    if not dest:
-        # Nothing to export
-        return
-    # Build scp command
-    scp_opts = RFA_LOCAL_PYMOL_SSH_OPTS
-    opts_list: List[str] = []
-    if scp_opts:
-        try:
-            opts_list = shlex.split(scp_opts)
-        except Exception:
-            print(f"[pymol_utils] Could not parse RFA_LOCAL_PYMOL_SSH_OPTS; ignoring")
-            opts_list = []
-    
-    user = os.getenv('USER', 'your_user')
-    host = os.getenv('SLURM_SUBMIT_HOST')
-    
-    if not host:
-        print("[pymol_utils] Could not determine login node from SLURM_SUBMIT_HOST.")
-        print("              Please set RFA_LOCAL_PYMOL_DEST to a full scp target, e.g., user@hostname:/path")
-        return
-
-    # If dest is just a path, construct the full target
-    if ":" not in dest:
-        dest = f"{user}@{host}:{dest}"
-
-    cmd = ["scp", "-r"] + opts_list + [str(bundle_dir), dest]
-    try:
-        print(f"[pymol_utils] Copying {bundle_dir} to {dest} via scp...")
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print(f"[pymol_utils] Done copying to {dest}")
-    except FileNotFoundError:
-        print("[pymol_utils] scp command not found; cannot transfer bundle")
-    except subprocess.CalledProcessError as e:
-        print(f"[pymol_utils] scp failed: {e.stderr}")
 
 
 def _write_rfdiff_crop_pml(
@@ -1724,7 +1653,6 @@ def export_rfdiff_crop_bundle(
         hotspot_keys=hotspot_keys,
     )
     
-    _maybe_scp_to_local(bundle_dir)
     return bundle_dir
 
 def export_batch_hotspot_bundle(targets: List[Dict]) -> Path | None:
