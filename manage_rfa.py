@@ -1158,7 +1158,7 @@ def main():
             print(f"\n{'='*20} Batch Processing Complete {'='*20}")
             print("Generating consolidated PyMOL visualization bundle for all successful targets...")
             try:
-                from scripts.pymol_utils import export_batch_hotspot_bundle
+                from lib.scripts.pymol_utils import export_batch_hotspot_bundle
                 export_batch_hotspot_bundle(processed_targets_info)
             except Exception as e:
                 print(f"[ERROR] Failed to generate PyMOL bundle: {e}")

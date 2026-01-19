@@ -25,7 +25,7 @@ from .result_collectors import (
 )
 
 try:
-    from scripts.pymol_utils import (
+    from lib.scripts.pymol_utils import (
         export_design_bundle,
         export_hotspot_bundle,
         _collect_expression_regions,
@@ -83,7 +83,7 @@ def _swap_selection_object(selection: str, obj_name: str) -> str:
 
 
 def _gather_expression_regions(pdb_id: str) -> tuple[Optional[str], list[dict[str, str]], set[str]]:
-    """Mirror the vendor expression lookup from scripts/pymol_utils."""
+    """Mirror the vendor expression lookup from lib/scripts/pymol_utils."""
     vendor_label: Optional[str] = None
     regions: list[dict[str, str]] = []
     target_chains: set[str] = set()
@@ -234,7 +234,7 @@ def _resolve_pymol_cli() -> list[str]:
 def _require_pymol_utils() -> None:
     if _PYMOL_UTILS_ERROR is not None or export_design_bundle is None or export_hotspot_bundle is None:
         raise PyMolLaunchError(
-            "scripts.pymol_utils is not available: " + str(_PYMOL_UTILS_ERROR or "unknown reason")
+            "lib.scripts.pymol_utils is not available: " + str(_PYMOL_UTILS_ERROR or "unknown reason")
         )
 
 

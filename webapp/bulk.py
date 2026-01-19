@@ -59,7 +59,7 @@ from .hotspot_distance import (
     _pick_binder_chain_by_seq_biopython as _hs_pick_binder_chain_by_seq,
 )
 try:  # For mapping vendor expression chains to the prepared structure
-    from scripts.pymol_utils import _collect_expression_regions  # type: ignore
+    from lib.scripts.pymol_utils import _collect_expression_regions  # type: ignore
 except Exception:  # pragma: no cover - defensive import
     _collect_expression_regions = None  # type: ignore
 
