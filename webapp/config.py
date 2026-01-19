@@ -121,6 +121,7 @@ class AppPaths:
     targets_dir: Optional[Path] = None
     cache_dir: Optional[Path] = None
     static_dir: Optional[Path] = None
+    antigen_category_map: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if self.workspace_root is None:
@@ -131,6 +132,10 @@ class AppPaths:
             self.cache_dir = self.workspace_root / "cache"
         if self.static_dir is None:
             self.static_dir = self.workspace_root / "webapp" / "static"
+        if isinstance(self.antigen_category_map, str) and self.antigen_category_map:
+            self.antigen_category_map = Path(self.antigen_category_map).expanduser()
+        if isinstance(self.antigen_category_map, Path) and not self.antigen_category_map.is_absolute():
+            self.antigen_category_map = (self.workspace_root / self.antigen_category_map).resolve()
 
 
 @dataclass(slots=True)

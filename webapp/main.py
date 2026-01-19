@@ -30,6 +30,8 @@ from .job_store import JobRecord, JobStatus, get_job_store
 from . import preferences
 from .models import (
     AlignmentResponse,
+    AntigenDiversityRequest,
+    AntigenDiversityResponse,
     AntigenDMSRequest,
     AntigenDMSResponse,
     AssessmentRunRequest,
@@ -96,6 +98,7 @@ from .models import (
 from .designs import list_design_engines
 from .pipeline import get_target_status
 from .bulk import (
+    build_antigen_diversity_report,
     build_boltzgen_diversity_report,
     list_boltzgen_binders,
     list_boltzgen_config_state,
@@ -918,6 +921,14 @@ async def api_boltzgen_diversity(
         binder_filter_epitope=filter_epitope,
         binder_order_by=order_by,
     )
+
+
+@app.post("/api/bulk/boltzgen/antigen-diversity", response_model=AntigenDiversityResponse)
+async def api_boltzgen_antigen_diversity(
+    payload: AntigenDiversityRequest,
+) -> AntigenDiversityResponse:
+    ids = [(p or "").strip().upper() for p in (payload.pdb_ids or []) if (p or "").strip()]
+    return build_antigen_diversity_report(ids)
 
 
 @app.get("/api/bulk/boltzgen/binders", response_model=BoltzgenBinderResponse)

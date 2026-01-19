@@ -98,6 +98,7 @@ const el = {
   boltzCropRadius: document.querySelector('#boltz-crop-radius'),
   boltzRegenerate: document.querySelector('#boltz-config-regenerate'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
+  boltzPlotDiversity: document.querySelector('#boltz-plot-diversity'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunRange: document.querySelector('#boltz-rerun-range'),
   boltzShowRunRange: document.querySelector('#boltz-show-run-range'),
@@ -2181,6 +2182,37 @@ async function regenerateBoltzConfigs(options = {}) {
   }
 }
 
+async function plotBoltzAntigenDiversity() {
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const ids = Array.from(new Set(targets.map((t) => (t?.pdb_id || '').trim().toUpperCase()).filter(Boolean)));
+  if (!ids.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const btn = el.boltzPlotDiversity;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/boltzgen/antigen-diversity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdb_ids: ids }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to plot diversity (${res.status})`);
+    }
+    const body = await res.json();
+    const count = Array.isArray(body.plots) ? body.plots.length : 0;
+    const outDir = body.output_dir ? ` Output dir: ${body.output_dir}` : '';
+    const message = body.message || `Generated ${count} antigen diversity plot${count === 1 ? '' : 's'}.${outDir}`;
+    showAlert(message, false);
+  } catch (err) {
+    showAlert(err.message || 'Failed to plot diversity.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function fetchBoltzConfig(pdbId, configPath) {
   const params = new URLSearchParams();
   params.append('pdb_id', pdbId);
@@ -3127,6 +3159,7 @@ function init() {
   if (el.diversityRefresh) el.diversityRefresh.addEventListener('click', () => refreshDiversity());
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
+  if (el.boltzPlotDiversity) el.boltzPlotDiversity.addEventListener('click', () => plotBoltzAntigenDiversity());
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzRerunRange) {
     el.boltzRerunRange.addEventListener('click', openPipelineRerunRangeModal);

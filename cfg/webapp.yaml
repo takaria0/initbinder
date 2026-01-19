@@ -1,5 +1,6 @@
 paths:
   project_root: /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder
+  antigen_category_map: targets_catalog/antigen_category_map.tsv
 cluster:
   ssh_config_alias: hpc3.rcic.uci.edu
   remote_root: /data/homezvol1/inagakit/Projects/initbinder    # adjust to your repo path on HPC

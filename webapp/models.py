@@ -280,6 +280,22 @@ class BoltzgenDiversityResponse(BaseModel):
     binder_counts: Dict[str, int] = Field(default_factory=dict)
 
 
+class AntigenDiversityPlot(BaseModel):
+    name: str
+    svg_name: str
+    svg_path: str
+
+
+class AntigenDiversityRequest(BaseModel):
+    pdb_ids: List[str] = Field(default_factory=list)
+
+
+class AntigenDiversityResponse(BaseModel):
+    output_dir: Optional[str] = None
+    plots: List[AntigenDiversityPlot] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
 class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None

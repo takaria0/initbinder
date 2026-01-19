@@ -21,12 +21,16 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
+from plot_antigen_diversity import plot_antigen_diversity
+
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .bulk_utils import EpitopeDiversityPlotSpec, build_epitope_diversity_plots
 from .config import load_config
 from .designs import BoltzGenEngine
 from .job_store import JobStatus, JobStore, get_job_store
 from .models import (
+    AntigenDiversityPlot,
+    AntigenDiversityResponse,
     BoltzgenBinderResponse,
     BoltzgenBinderRow,
     BoltzgenConfigContent,
@@ -3791,6 +3795,49 @@ def build_boltzgen_diversity_report(
         "generated_at": timestamp,
     })
     return response
+
+
+def build_antigen_diversity_report(pdb_ids: List[str]) -> AntigenDiversityResponse:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    category_map = cfg.paths.antigen_category_map
+    cache_dir = cfg.paths.cache_dir
+    out_dir = _output_dir()
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    plots, err = plot_antigen_diversity(
+        pdb_ids,
+        targets_dir=targets_dir,
+        out_dir=out_dir,
+        category_map_path=category_map,
+        uniprot_cache_dir=cache_dir,
+        allow_uniprot_fetch=True,
+        timestamp=timestamp,
+        log=print,
+    )
+    if err:
+        return AntigenDiversityResponse(
+            output_dir=str(out_dir),
+            plots=[],
+            message=err,
+        )
+    plot_entries = [
+        AntigenDiversityPlot(
+            name=plot.name,
+            svg_name=plot.svg_path.name,
+            svg_path=str(plot.svg_path),
+        )
+        for plot in plots
+    ]
+    message = None
+    if plot_entries:
+        message = f"Generated {len(plot_entries)} antigen diversity plot(s)."
+    else:
+        message = "No antigen diversity plots generated."
+    return AntigenDiversityResponse(
+        output_dir=str(out_dir),
+        plots=plot_entries,
+        message=message,
+    )
 
 
 def _binder_config_map(entries: List[dict]) -> Dict[str, dict]:
