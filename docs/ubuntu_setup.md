@@ -70,8 +70,6 @@ pip install -r requirements-webapp.txt
 ```
 
 Optional extras:
-- `pip install pymol-remote` on both local and remote machines when using
-  `RFA_PYMOL_MODE=remote`.
 - `pip install uvloop` to accelerate the ASGI server.
 
 ## 5. Environment configuration

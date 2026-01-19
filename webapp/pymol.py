@@ -272,8 +272,6 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | Non
     ep_filter = [epitope_name] if epitope_name else None
     bundle = export_hotspot_bundle(pdb_id, ep_filter)
     if bundle is None:
-        if os.getenv("RFA_PYMOL_MODE", "bundle").lower() == "remote":
-            return None, launch
         raise PyMolLaunchError("Unable to generate hotspot bundle; ensure prep-target has been run")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     dest = _cache_dir("pymol_hotspots") / f"{pdb_id.upper()}_{timestamp}"

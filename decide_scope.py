@@ -37,19 +37,6 @@ from utils import (
 )
 from cfg.env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
 
-# ====== HF cache (cfg/env.py override, then INITBINDER_HF_ROOT, then default) ======
-try:
-    from cfg.env import HF_ROOT as _HF_ROOT_OVERRIDE
-except Exception:
-    _HF_ROOT_OVERRIDE = None
-
-_HF_ROOT_ENV = os.getenv("INITBINDER_HF_ROOT")
-HF_ROOT = Path(_HF_ROOT_OVERRIDE or _HF_ROOT_ENV or (Path.home() / ".cache" / "huggingface")).expanduser()
-os.environ.setdefault("HF_HOME", str(HF_ROOT / ".hf_home"))
-os.environ.setdefault("HF_HUB_CACHE", str(HF_ROOT / ".hf_home" / "hub"))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_ROOT / ".transformers_cache"))
-print(f"[info] Using HF cache dir: {HF_ROOT}")
-
 # =============================================================================
 # Helpers for entry.json (RCSB) and chain mapping
 # =============================================================================
