@@ -27,6 +27,9 @@ const state = {
   bulkPreviewTimer: null,
   bulkPreviewSig: null,
   binderFilterTimer: null,
+  rfaConfigs: {},
+  configContext: null,
+  runContext: null,
 };
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
@@ -142,6 +145,7 @@ const el = {
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
+  boltzConfigEngine: document.querySelector('#bulk-config-engine'),
   boltzConfigClose: document.querySelector('#boltz-config-close'),
   boltzLogModal: document.querySelector('#boltz-log-modal'),
   boltzLogTitle: document.querySelector('#boltz-log-title'),
@@ -150,6 +154,7 @@ const el = {
   boltzRunModal: document.querySelector('#boltz-run-modal'),
   boltzRunTitle: document.querySelector('#boltz-run-title'),
   boltzRunBody: document.querySelector('#boltz-run-body'),
+  boltzRunEngine: document.querySelector('#bulk-run-engine'),
   boltzRunClose: document.querySelector('#boltz-run-close'),
   pipelineRerunModal: document.querySelector('#pipeline-rerun-modal'),
   pipelineRerunTitle: document.querySelector('#pipeline-rerun-title'),
@@ -1741,6 +1746,8 @@ async function submitRegenerateRangeModal(triggerBtn = null) {
 }
 
 async function showRunCommandRange() {
+  state.runContext = null;
+  if (el.boltzRunEngine) el.boltzRunEngine.value = 'boltzgen';
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
     showAlert('No BoltzGen configs loaded.');
@@ -1980,6 +1987,7 @@ function renderBoltzConfigs() {
       epCfgBtn.dataset.action = 'show-config-epitope';
       epCfgBtn.dataset.pdbId = target.pdb_id || '';
       epCfgBtn.dataset.configPath = cfg.config_path || '';
+      epCfgBtn.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
       epCmd.appendChild(epCfgBtn);
 
       const epDebug = document.createElement('button');
@@ -2247,6 +2255,114 @@ async function fetchTargetYaml(pdbId) {
   return res.json();
 }
 
+function getConfigEngine() {
+  const value = (el.boltzConfigEngine?.value || 'boltzgen').trim().toLowerCase();
+  return value || 'boltzgen';
+}
+
+function getRunEngine() {
+  const value = (el.boltzRunEngine?.value || 'boltzgen').trim().toLowerCase();
+  return value || 'boltzgen';
+}
+
+function sanitizeRfaEpitopeName(name) {
+  return String(name || '').trim().replace(/[ /]+/g, '_');
+}
+
+async function fetchRfaConfigs(pdbId, options = {}) {
+  const { force = false } = options;
+  const key = (pdbId || '').toUpperCase();
+  if (!key) return null;
+  if (!force && state.rfaConfigs && state.rfaConfigs[key]) {
+    return state.rfaConfigs[key];
+  }
+  const params = new URLSearchParams();
+  params.append('pdb_ids', key);
+  const res = await fetch(`/api/bulk/rfa/configs?${params.toString()}`);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Unable to load RFA configs (${res.status})`);
+  }
+  const payload = await res.json();
+  const targets = Array.isArray(payload.targets) ? payload.targets : [];
+  const target = targets.find((item) => (item?.pdb_id || '').toUpperCase() === key) || {
+    pdb_id: key,
+    scripts: [],
+  };
+  if (!state.rfaConfigs) state.rfaConfigs = {};
+  state.rfaConfigs[key] = target;
+  return target;
+}
+
+async function fetchRfaScript(pdbId, scriptPath) {
+  const params = new URLSearchParams();
+  params.append('pdb_id', pdbId);
+  params.append('script_path', scriptPath);
+  const res = await fetch(`/api/bulk/rfa/config?${params.toString()}`);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Unable to load script (${res.status})`);
+  }
+  return res.json();
+}
+
+async function showRfaConfig(pdbId, epitopeName = null) {
+  if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
+  try {
+    const target = await fetchRfaConfigs(pdbId, { force: true });
+    const scripts = Array.isArray(target?.scripts) ? target.scripts : [];
+    const epKey = epitopeName ? sanitizeRfaEpitopeName(epitopeName) : '';
+    const filtered = epKey
+      ? scripts.filter((script) => script.stage !== 'launcher' && script.epitope === epKey)
+      : scripts;
+    if (!filtered.length) {
+      el.boltzConfigTitle.textContent = epKey
+        ? `RFA pipeline scripts · ${pdbId} · ${epitopeName}`
+        : `RFA pipeline scripts · ${pdbId}`;
+      el.boltzConfigBody.textContent = 'No RFA pipeline scripts found.';
+      toggleModal(el.boltzConfigModal, true);
+      return;
+    }
+    const texts = [];
+    for (const script of filtered) {
+      try {
+        const content = await fetchRfaScript(pdbId, script.path);
+        const label = script.stage ? `${script.stage}` : 'script';
+        texts.push(`# ${label} · ${content.script_name}\n${content.script_text || ''}`);
+      } catch (err) {
+        const label = script.name || script.path || 'script';
+        texts.push(`# ${label}\nError loading script: ${err.message || err}`);
+      }
+    }
+    el.boltzConfigTitle.textContent = epKey
+      ? `RFA pipeline scripts · ${pdbId} · ${epitopeName}`
+      : `RFA pipeline scripts · ${pdbId}`;
+    el.boltzConfigBody.textContent = texts.join('\n\n');
+    toggleModal(el.boltzConfigModal, true);
+  } catch (err) {
+    showAlert(err.message || String(err));
+  }
+}
+
+async function renderConfigModal() {
+  const ctx = state.configContext;
+  if (!ctx || !ctx.pdbId) return;
+  const engine = getConfigEngine();
+  if (engine === 'rfantibody') {
+    await showRfaConfig(ctx.pdbId, ctx.epitopeName || null);
+  } else {
+    await showBoltzConfig(ctx.pdbId, ctx.configPath || null);
+  }
+}
+
+function setConfigContext(pdbId, configPath = null, epitopeName = null) {
+  state.configContext = {
+    pdbId: pdbId || '',
+    configPath: configPath || null,
+    epitopeName: epitopeName || null,
+  };
+}
+
 async function showBoltzConfig(pdbId, configPath = null) {
   if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
   try {
@@ -2279,6 +2395,7 @@ async function showBoltzConfig(pdbId, configPath = null) {
 async function showTargetYaml(pdbId) {
   if (!el.boltzConfigBody || !el.boltzConfigTitle) return;
   try {
+    state.configContext = null;
     const payload = await fetchTargetYaml(pdbId);
     el.boltzConfigTitle.textContent = `target.yaml · ${payload.pdb_id || pdbId}`;
     el.boltzConfigBody.textContent = payload.yaml_text || 'No target.yaml content found.';
@@ -2512,7 +2629,7 @@ function buildAllRunCommandsText(targets = []) {
   return lines.filter(Boolean).join('\n');
 }
 
-async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
+async function showBoltzRunCommand(pdbId, configPath = null, epitopeName = null) {
   if (!pdbId) {
     showAlert('Missing PDB ID for manual command.');
     return;
@@ -2538,7 +2655,68 @@ async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
   renderRunCommandBlocks(text);
 }
 
+async function showRfaRunCommand(pdbId) {
+  if (!pdbId) {
+    showAlert('Missing PDB ID for manual command.');
+    return;
+  }
+  if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing RFA pipeline commands...';
+  if (el.boltzRunTitle) el.boltzRunTitle.textContent = `RFA pipeline · ${pdbId}`;
+  toggleModal(el.boltzRunModal, true);
+  if (!state.clusterStatus) {
+    await loadClusterStatus();
+  }
+  try {
+    const target = await fetchRfaConfigs(pdbId, { force: true });
+    const launcherPath = target?.launcher_path || '';
+    if (!launcherPath) {
+      renderRunCommandBlocks('# No RFA pipeline launcher found. Use Rebuild configs to generate scripts.');
+      return;
+    }
+    const { remoteRoot, sshTarget } = clusterDefaults();
+    const remoteLauncher = remoteRoot
+      ? `${remoteRoot.replace(/\/$/, '')}/${launcherPath}`.replace(/\/+/g, '/')
+      : launcherPath;
+    const lines = [
+      '# Run locally from the project root',
+      `bash ${launcherPath}`,
+      '',
+      '# Run on cluster',
+      `ssh ${sshTarget} "bash ${remoteLauncher}"`,
+    ];
+    renderRunCommandBlocks(lines.join('\n'));
+  } catch (err) {
+    showAlert(err.message || String(err));
+  }
+}
+
+async function renderRunCommandModal() {
+  const ctx = state.runContext;
+  if (!ctx || !ctx.pdbId) return;
+  const engine = getRunEngine();
+  if (engine === 'rfantibody') {
+    await showRfaRunCommand(ctx.pdbId);
+  } else {
+    await showBoltzRunCommand(ctx.pdbId, ctx.configPath || null, ctx.epitopeName || null);
+  }
+}
+
+function setRunContext(pdbId, configPath = null, epitopeName = null) {
+  state.runContext = {
+    pdbId: pdbId || '',
+    configPath: configPath || null,
+    epitopeName: epitopeName || null,
+  };
+}
+
+async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
+  setRunContext(pdbId, configPath, epitopeName);
+  await renderRunCommandModal();
+}
+
 async function showRunCommandAll() {
+  state.runContext = null;
+  if (el.boltzRunEngine) el.boltzRunEngine.value = 'boltzgen';
   if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
   if (el.boltzRunTitle) el.boltzRunTitle.textContent = 'Manual run · all targets';
   toggleModal(el.boltzRunModal, true);
@@ -2668,9 +2846,11 @@ function handleBoltzTableClick(event) {
   } else if (action === 'run-epitope') {
     runBoltzEpitope(pdbId, configPath, btn);
   } else if (action === 'show-config-target') {
-    showBoltzConfig(pdbId, null);
+    setConfigContext(pdbId, null, null);
+    renderConfigModal();
   } else if (action === 'show-config-epitope') {
-    showBoltzConfig(pdbId, configPath);
+    setConfigContext(pdbId, configPath, btn.dataset.epitopeName || null);
+    renderConfigModal();
   } else if (action === 'show-target-yaml') {
     showTargetYaml(pdbId);
   } else if (action === 'show-log') {
@@ -3243,6 +3423,20 @@ function init() {
     el.binderOrderBy.addEventListener('change', () => {
       state.binderPage = 1;
       refreshDiversity({ silent: true, page: 1 });
+    });
+  }
+  if (el.boltzConfigEngine) {
+    el.boltzConfigEngine.addEventListener('change', () => {
+      if (el.boltzConfigModal && !el.boltzConfigModal.hidden) {
+        renderConfigModal();
+      }
+    });
+  }
+  if (el.boltzRunEngine) {
+    el.boltzRunEngine.addEventListener('change', () => {
+      if (el.boltzRunModal && !el.boltzRunModal.hidden) {
+        renderRunCommandModal();
+      }
     });
   }
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));

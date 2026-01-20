@@ -385,6 +385,32 @@ class BoltzgenConfigContent(BaseModel):
     yaml_text: str
 
 
+class RfaPipelineScript(BaseModel):
+    path: str
+    name: str
+    stage: Optional[str] = None
+    epitope: Optional[str] = None
+    variant: Optional[str] = None
+
+
+class RfaPipelineTargetScripts(BaseModel):
+    pdb_id: str
+    scripts: List[RfaPipelineScript] = Field(default_factory=list)
+    launcher_path: Optional[str] = None
+    launcher_name: Optional[str] = None
+
+
+class RfaPipelineConfigListResponse(BaseModel):
+    targets: List[RfaPipelineTargetScripts] = Field(default_factory=list)
+
+
+class RfaPipelineScriptContent(BaseModel):
+    pdb_id: str
+    script_path: str
+    script_name: str
+    script_text: str
+
+
 class TargetYamlContent(BaseModel):
     pdb_id: str
     path: str

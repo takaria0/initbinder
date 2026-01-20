@@ -81,6 +81,16 @@ def _env_or_cfg_int(env_key: str, cfg_key: str, fallback: int) -> int:
         return fallback
 
 
+def _env_or_cfg_optional_int(env_key: str, cfg_key: str) -> Optional[int]:
+    value = _env_or_cfg(env_key, cfg_key, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _default_mem() -> str:
     env_val = os.getenv("BOLTZGEN_SLURM_MEM")
     if env_val is not None and str(env_val).strip():
@@ -116,11 +126,16 @@ DEFAULT_OUTPUT_ROOT = _cfg_value("output_root")
 DEFAULT_SCRIPTS_DIR = _env_or_cfg("BOLTZGEN_SCRIPTS_DIR", "scripts_dir", "lib/tools/boltzgen")
 DEFAULT_LAUNCHER_DIR = _env_or_cfg("BOLTZGEN_LAUNCHER_DIR", "launcher_dir", "lib/tools/launchers")
 DEFAULT_EXTRA_ARGS = _cfg_list("extra_run_args")
+DEFAULT_NUM_DESIGNS = _env_or_cfg_int("BOLTZGEN_NUM_DESIGNS", "default_num_designs", 1000)
+DEFAULT_BUDGET = _env_or_cfg_optional_int("BOLTZGEN_BUDGET", "default_budget")
+DEFAULT_SLURM_LOG_DIR = _env_or_cfg("BOLTZGEN_SLURM_LOG_DIR", "slurm_log_dir", "slurm_logs")
 
 
 ROOT = Path(os.getenv("INITBINDER_ROOT", Path.cwd())).expanduser()
 TARGETS_ROOT = Path(os.getenv("INITBINDER_TARGET_ROOT", ROOT / "targets")).expanduser()
-SLURM_LOG_DIR = ROOT / "slurm_logs"
+SLURM_LOG_DIR = Path(DEFAULT_SLURM_LOG_DIR).expanduser()
+if not SLURM_LOG_DIR.is_absolute():
+    SLURM_LOG_DIR = (ROOT / SLURM_LOG_DIR).resolve()
 ARTIFACT_ROOT = TARGETS_ROOT.parent if TARGETS_ROOT.parent != TARGETS_ROOT else ROOT
 
 
@@ -434,9 +449,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a BoltzGen design specification YAML (relative to INITBINDER_ROOT by default).",
     )
     p_pipe.add_argument("--run_label", help="Run label used to group outputs.", default=None)
-    p_pipe.add_argument("--num_designs", type=int, default=1000, help="Designs per spec/job.")
+    p_pipe.add_argument("--num_designs", type=int, default=DEFAULT_NUM_DESIGNS, help="Designs per spec/job.")
     p_pipe.add_argument("--protocol", default=DEFAULT_PROTOCOL, help="BoltzGen protocol to use.")
-    p_pipe.add_argument("--budget", type=int, default=None, help="Filtering budget (optional).")
+    p_pipe.add_argument("--budget", type=int, default=DEFAULT_BUDGET, help="Filtering budget (optional).")
     p_pipe.add_argument(
         "--output_root",
         default=DEFAULT_OUTPUT_ROOT,

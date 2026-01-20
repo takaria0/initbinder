@@ -199,7 +199,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     stage2_seed_list_str = " ".join(str(s) for s in stage2_seeds)
     stage1_seed_list_str = " ".join(str(s) for s in stage1_seeds)
 
-    prep_pdb_path = tdir / "prep" / "prepared.pdb"
+    prep_pdb_path = tdir / "raw" / f"{pdb_id.upper()}.pdb"
     if not prep_pdb_path.exists():
         raise FileNotFoundError(f"Cannot find prepared target file: {prep_pdb_path}")
 

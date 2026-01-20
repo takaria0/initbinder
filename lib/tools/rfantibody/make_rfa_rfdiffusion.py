@@ -15,6 +15,108 @@ from jsonschema import validate
 from utils import crop_pdb_by_hotspots
 from lib.scripts.pymol_utils import export_rfdiff_crop_bundle
 
+_EPITOPE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_RANGE_TOKEN_RE = re.compile(
+    r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_]\s*(?P<start>-?\d+)\s*(?:[-.]{1,2}\s*(?P<end>-?\d+))?\s*$"
+)
+
+
+def _normalize_epitope_key(value: str) -> str:
+    return _EPITOPE_KEY_RE.sub("", str(value or "").strip().lower())
+
+
+def _default_chain(cfg: dict) -> str:
+    for key in ("chains", "target_chains"):
+        chains = cfg.get(key) or []
+        if isinstance(chains, list) and chains:
+            chain = str(chains[0]).strip()
+            if chain:
+                return chain
+    return ""
+
+
+def _expand_range_token(token: str) -> list[str]:
+    match = _RANGE_TOKEN_RE.match(token)
+    if not match:
+        return [token]
+    chain = match.group("chain")
+    start = int(match.group("start"))
+    end = match.group("end")
+    if end is None:
+        return [f"{chain}:{start}"]
+    end_val = int(end)
+    lo, hi = (start, end_val) if start <= end_val else (end_val, start)
+    return [f"{chain}:{idx}" for idx in range(lo, hi + 1)]
+
+
+def _coerce_hotspot_tokens(items: list, cfg: dict) -> list[str]:
+    tokens: list[str] = []
+    fallback_chain = _default_chain(cfg)
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                tokens.extend(_expand_range_token(text))
+            continue
+        if isinstance(item, int):
+            if fallback_chain:
+                tokens.append(f"{fallback_chain}:{item}")
+            continue
+        if isinstance(item, dict):
+            chain = item.get("chain") or item.get("chain_id") or item.get("id") or fallback_chain
+            residues = (
+                item.get("res_index")
+                or item.get("residue")
+                or item.get("resi")
+                or item.get("residues")
+                or item.get("positions")
+            )
+            if isinstance(residues, list):
+                for res in residues:
+                    if res is None:
+                        continue
+                    if chain:
+                        tokens.extend(_expand_range_token(f"{chain}:{res}"))
+            elif residues is not None:
+                if chain:
+                    tokens.extend(_expand_range_token(f"{chain}:{residues}"))
+            continue
+    return tokens
+
+
+def _extract_hotspots_from_target(cfg: dict, epitope: str, hotspot_variant: str) -> list[str]:
+    epi_key = _normalize_epitope_key(epitope)
+    ep_entry = None
+    for entry in cfg.get("epitopes") or []:
+        if not isinstance(entry, dict):
+            continue
+        for cand in (entry.get("name"), entry.get("display_name")):
+            if cand and _normalize_epitope_key(cand) == epi_key:
+                ep_entry = entry
+                break
+        if ep_entry:
+            break
+    if not ep_entry:
+        return []
+
+    hotspots_by_variant = ep_entry.get("hotspots_by_variant")
+    variant_key = str(hotspot_variant or "").strip().upper()
+    if isinstance(hotspots_by_variant, dict) and variant_key:
+        variant_hotspots = hotspots_by_variant.get(variant_key) or hotspots_by_variant.get(variant_key.lower())
+        if isinstance(variant_hotspots, list) and variant_hotspots:
+            return _coerce_hotspot_tokens(variant_hotspots, cfg)
+
+    hotspots = ep_entry.get("hotspots") or []
+    if isinstance(hotspots, list) and hotspots:
+        return _coerce_hotspot_tokens(hotspots, cfg)
+
+    fallback = ep_entry.get("mask_residues") or ep_entry.get("residues") or []
+    if not isinstance(fallback, list) or not fallback:
+        return []
+    tokens = _coerce_hotspot_tokens(fallback, cfg)
+    max_hotspots = int((cfg.get("hotspot_policy", {}) or {}).get("max_hotspots", 5))
+    return tokens[:max_hotspots] if max_hotspots > 0 else tokens
+
 def make_rfa_rfdiffusion_command(
     pdb_id: str, epitope: str, num_designs: int, designs_per_task: int,
     framework_pdb: str, cdr_h1: str, cdr_h2: str, cdr_h3: str,
@@ -45,22 +147,13 @@ def make_rfa_rfdiffusion_command(
     run_dir = (arm_dir/"rfa_rfdiff"/f"run_{run_tag}") if run_tag else (arm_dir/"rfa_rfdiff")
     _ensure_dir(run_dir)
 
-    # Prefer variant hotspots → generic hotspots → legacy full mask
+    # Read hotspots directly from target.yaml.
     prep_dir = TARGETS_ROOT/pdb_id.upper()/ "prep"
-    hp_var = prep_dir / f"epitope_{name_sanitized}_hotspots{hotspot_variant}.json"
-    hp_def = prep_dir / f"epitope_{name_sanitized}_hotspots.json"
-    mask    = prep_dir / f"epitope_{name_sanitized}.json"
-    if hp_var.exists():
-        hotspots = json.load(open(hp_var))
-    elif hp_def.exists():
-        hotspots = json.load(open(hp_def))
-    else:
-        raw = json.load(open(mask))
-        k = int((yaml.safe_load((TARGETS_ROOT/pdb_id.upper()/'target.yaml').read_text())
-                 .get('hotspot_policy', {}).get('max_hotspots', 5)))
-        hotspots = raw[:k]
+    hotspots = _extract_hotspots_from_target(cfg, epitope, hotspot_variant)
     if not hotspots:
-        raise RuntimeError(f"No hotspots found for epitope '{epitope}' (variant {hotspot_variant}).")
+        raise RuntimeError(
+            f"No hotspots found for epitope '{epitope}' in target.yaml (variant {hotspot_variant})."
+        )
     hotspots_str = ",".join(hotspots)
 
     # Optional: crop target around hotspots

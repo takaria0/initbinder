@@ -411,16 +411,16 @@ if USE_LLM:
 from prep_target import prep_target
 from init_target import init_target
 try:
-    from make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
+    from lib.tools.rfantibody.make_rfa_rfdiffusion import make_rfa_rfdiffusion_command
 except Exception:
     make_rfa_rfdiffusion_command = None  # type: ignore
 try:
-    from make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
+    from lib.tools.rfantibody.make_rfa_proteinmpnn import make_rfa_proteinmpnn_command
 except Exception:
     make_rfa_proteinmpnn_command = None  # type: ignore
 # from Projects.initbinder.utils.make_rfa_rf2 import make_rfa_rf2_command
 try:
-    from make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
+    from lib.tools.rfantibody.make_rfa_af3 import make_rfa_af3_command  # AlphaFold 3 command
 except Exception:
     make_rfa_af3_command = None  # type: ignore
 # from assess_rfa_design import assess_rfa_all

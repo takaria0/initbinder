@@ -246,7 +246,16 @@
       <div class="modal-backdrop" data-close="boltz-config"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3 id="boltz-config-title">BoltzGen config</h3>
+          <div class="flex-row" style="gap: 12px; align-items: center;">
+            <h3 id="boltz-config-title">BoltzGen config</h3>
+            <label class="help-text" style="display:flex; align-items:center; gap:6px; margin:0;">
+              <span>Engine</span>
+              <select id="bulk-config-engine">
+                <option value="boltzgen">BoltzGen</option>
+                <option value="rfantibody">RFA pipeline</option>
+              </select>
+            </label>
+          </div>
           <button type="button" id="boltz-config-close" class="ghost">Close</button>
         </div>
         <pre id="boltz-config-body" class="scrollable"></pre>
@@ -268,7 +277,16 @@
       <div class="modal-backdrop" data-close="boltz-run"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3 id="boltz-run-title">Cluster run steps</h3>
+          <div class="flex-row" style="gap: 12px; align-items: center;">
+            <h3 id="boltz-run-title">Cluster run steps</h3>
+            <label class="help-text" style="display:flex; align-items:center; gap:6px; margin:0;">
+              <span>Engine</span>
+              <select id="bulk-run-engine">
+                <option value="boltzgen">BoltzGen</option>
+                <option value="rfantibody">RFA pipeline</option>
+              </select>
+            </label>
+          </div>
           <button type="button" id="boltz-run-close" class="ghost">Close</button>
         </div>
         <div id="boltz-run-body" class="scrollable">Loading manual run steps…</div>

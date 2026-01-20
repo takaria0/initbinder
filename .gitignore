@@ -13,5 +13,6 @@ cfg/webapp.local.yaml
 exports/
 plots/
 
+tools/
 
 logs/webapp

@@ -79,6 +79,8 @@ from .models import (
     RankingPlot,
     RankingResponse,
     RankingRow,
+    RfaPipelineConfigListResponse,
+    RfaPipelineScriptContent,
     ScatterPoint,
     SequenceSimilarityMatrix,
     TargetCatalogFile,
@@ -104,6 +106,8 @@ from .bulk import (
     list_boltzgen_config_state,
     regenerate_boltzgen_configs,
     load_boltzgen_config_content,
+    list_rfa_pipeline_configs,
+    load_rfa_pipeline_script_content,
     preview_bulk_targets,
 )
 from .pymol import (
@@ -993,6 +997,24 @@ async def api_boltzgen_config_regenerate(
 async def api_boltzgen_config(pdb_id: str, config_path: str) -> BoltzgenConfigContent:
     try:
         return load_boltzgen_config_content(pdb_id, config_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/bulk/rfa/configs", response_model=RfaPipelineConfigListResponse)
+async def api_rfa_pipeline_configs(
+    pdb_ids: str = Query(..., description="Comma-separated PDB IDs to inspect"),
+) -> RfaPipelineConfigListResponse:
+    ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
+    return list_rfa_pipeline_configs(ids)
+
+
+@app.get("/api/bulk/rfa/config", response_model=RfaPipelineScriptContent)
+async def api_rfa_pipeline_config(pdb_id: str, script_path: str) -> RfaPipelineScriptContent:
+    try:
+        return load_rfa_pipeline_script_content(pdb_id, script_path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

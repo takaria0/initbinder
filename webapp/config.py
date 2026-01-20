@@ -56,6 +56,9 @@ class BoltzGenClusterConfig:
     protocol: Optional[str] = None
     extra_run_args: List[str] = field(default_factory=list)
     nanobody_scaffolds: List[str] = field(default_factory=list)
+    default_num_designs: int = 1000
+    default_budget: Optional[int] = None
+    slurm_log_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.cache_dir, str) and self.cache_dir:
@@ -66,12 +69,18 @@ class BoltzGenClusterConfig:
             self.scripts_dir = Path(self.scripts_dir).expanduser()
         if isinstance(self.launcher_dir, str) and self.launcher_dir:
             self.launcher_dir = Path(self.launcher_dir).expanduser()
+        if isinstance(self.slurm_log_dir, str) and self.slurm_log_dir:
+            self.slurm_log_dir = Path(self.slurm_log_dir).expanduser()
         if isinstance(self.time_hours, str) and self.time_hours.strip():
             self.time_hours = int(self.time_hours)
         if isinstance(self.mem_gb, str) and self.mem_gb.strip():
             self.mem_gb = int(self.mem_gb)
         if isinstance(self.cpus, str) and self.cpus.strip():
             self.cpus = int(self.cpus)
+        if isinstance(self.default_num_designs, str) and self.default_num_designs.strip():
+            self.default_num_designs = int(self.default_num_designs)
+        if isinstance(self.default_budget, str) and self.default_budget.strip():
+            self.default_budget = int(self.default_budget)
         if isinstance(self.extra_run_args, str):
             self.extra_run_args = [self.extra_run_args]
         elif isinstance(self.extra_run_args, list):
@@ -84,6 +93,72 @@ class BoltzGenClusterConfig:
             self.nanobody_scaffolds = [str(entry) for entry in self.nanobody_scaffolds if str(entry).strip()]
         else:
             self.nanobody_scaffolds = []
+
+
+@dataclass(slots=True)
+class RfaPipelineConfig:
+    slurm_partition: str = "gpu"
+    slurm_account: str = "ccl_lab_gpu"
+    slurm_gpu_type: str = "A30:1"
+    rfa_repo_path: Optional[Path] = None
+    singularity_image: Optional[Path] = None
+    af3_singularity_image: Optional[Path] = None
+    af3_model_params_dir: Optional[Path] = None
+    af3_databases_dir: Optional[Path] = None
+    framework_pdb: Optional[Path] = None
+    designs_per_task: int = 200
+    mpnn_num_seq: int = 1
+    mpnn_temperature: float = 0.1
+    binder_chain_id: str = "H"
+    cdr_h1: str = "3-8"
+    cdr_h2: str = "3-8"
+    cdr_h3: str = "8-20"
+    model_seeds: List[int] = field(default_factory=list)
+    run_tag: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for attr in (
+            "rfa_repo_path",
+            "singularity_image",
+            "af3_singularity_image",
+            "af3_model_params_dir",
+            "af3_databases_dir",
+            "framework_pdb",
+        ):
+            value = getattr(self, attr)
+            if isinstance(value, str) and value:
+                setattr(self, attr, Path(value).expanduser())
+        for attr in ("designs_per_task", "mpnn_num_seq"):
+            value = getattr(self, attr)
+            if isinstance(value, str) and value.strip():
+                setattr(self, attr, int(value))
+        if isinstance(self.mpnn_temperature, str) and self.mpnn_temperature.strip():
+            self.mpnn_temperature = float(self.mpnn_temperature)
+        if isinstance(self.binder_chain_id, str):
+            cleaned = self.binder_chain_id.strip().upper()
+            self.binder_chain_id = cleaned or "H"
+        if isinstance(self.model_seeds, str):
+            tokens = [tok for tok in re.split(r"[\s,]+", self.model_seeds.strip()) if tok]
+            seeds = []
+            for tok in tokens:
+                try:
+                    seeds.append(int(tok))
+                except ValueError:
+                    continue
+            self.model_seeds = seeds
+        elif isinstance(self.model_seeds, list):
+            seeds = []
+            for entry in self.model_seeds:
+                try:
+                    seeds.append(int(entry))
+                except (TypeError, ValueError):
+                    continue
+            self.model_seeds = seeds
+        else:
+            self.model_seeds = []
+        if isinstance(self.run_tag, str):
+            cleaned = self.run_tag.strip()
+            self.run_tag = cleaned or None
 
 
 @dataclass(slots=True)
@@ -111,6 +186,7 @@ class ClusterConfig:
     debug: bool = False
     enable_remote_assessment_listing: bool = False
     boltzgen: BoltzGenClusterConfig = field(default_factory=BoltzGenClusterConfig)
+    rfantibody: RfaPipelineConfig = field(default_factory=RfaPipelineConfig)
 
     def as_ssh_target(self) -> Optional[str]:
         if self.mock:
@@ -143,6 +219,10 @@ class ClusterConfig:
             }
         if isinstance(self.boltzgen, dict):
             self.boltzgen = BoltzGenClusterConfig(**self.boltzgen)
+        if self.rfantibody is None:
+            self.rfantibody = RfaPipelineConfig()
+        elif isinstance(self.rfantibody, dict):
+            self.rfantibody = RfaPipelineConfig(**self.rfantibody)
 
 
 @dataclass(slots=True)
@@ -294,6 +374,7 @@ __all__ = [
     "ClusterConfig",
     "AppPaths",
     "BoltzGenClusterConfig",
+    "RfaPipelineConfig",
     "load_config",
     "CONFIG_ENV_VAR",
     "DEFAULT_CONFIG_PATH",

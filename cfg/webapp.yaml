@@ -33,3 +33,25 @@ cluster:
     output_root: null
     extra_run_args: []
     nanobody_scaffolds: []
+    default_num_designs: 1000
+    default_budget: null
+    slurm_log_dir: slurm_logs
+  rfantibody:
+    slurm_partition: gpu
+    slurm_account: ccl_lab_gpu
+    slurm_gpu_type: A30:1
+    rfa_repo_path: /data/homezvol1/inagakit/Library/RFantibody
+    singularity_image: /pub/inagakit/rfa/rfantibody.sif
+    af3_singularity_image: /pub/inagakit/af3/alphafold3_40gb.sif
+    af3_model_params_dir: /pub/inagakit/af3/model_params
+    af3_databases_dir: /pub/inagakit/af3/databases
+    framework_pdb: /data/homezvol1/inagakit/Library/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
+    designs_per_task: 200
+    mpnn_num_seq: 1
+    mpnn_temperature: 0.1
+    binder_chain_id: H
+    cdr_h1: "3-8"
+    cdr_h2: "3-8"
+    cdr_h3: "8-20"
+    model_seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    run_tag: null

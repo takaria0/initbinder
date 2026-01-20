@@ -13,6 +13,8 @@ import base64
 import traceback
 import statistics
 import math
+import importlib.util
+from functools import lru_cache
 from difflib import SequenceMatcher
 from collections import defaultdict
 from dataclasses import dataclass
@@ -49,6 +51,10 @@ from .models import (
     BulkPreviewResponse,
     BulkRunRequest,
     DesignRunRequest,
+    RfaPipelineConfigListResponse,
+    RfaPipelineScript,
+    RfaPipelineScriptContent,
+    RfaPipelineTargetScripts,
 )
 from .pipeline import get_target_status, init_decide_prep
 from .preferences import list_presets
@@ -747,6 +753,421 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
     if bundle_eps:
         return bundle_eps
     return _fallback_from_target_yaml()
+
+
+_RFA_EPITOPE_SANITIZE_RE = re.compile(r"[ /]+")
+_RFA_VARIANTS_DEFAULT = ("A", "B", "C")
+_RFA_STAGE_ORDER = {
+    "launcher": 0,
+    "rfdiff": 1,
+    "mpnn": 2,
+    "af3seed": 3,
+    "af3batch": 4,
+}
+_RFA_SCRIPT_PATTERNS = [
+    ("rfdiff", "rfa_rfdiff", "submit_rfa-diff_{pdb}_*.sh",
+     re.compile(r"^submit_rfa-diff_(?P<pdb>[A-Za-z0-9]+)_(?P<ep>.+)_hs(?P<variant>[A-Za-z0-9]+).*\\.sh$")),
+    ("mpnn", "rfa_mpnn", "submit_rfa-mpnn_{pdb}_*.sh",
+     re.compile(r"^submit_rfa-mpnn_(?P<pdb>[A-Za-z0-9]+)_(?P<ep>.+)_hs(?P<variant>[A-Za-z0-9]+).*\\.sh$")),
+    ("af3seed", "rfa_af3", "submit_rfa-af3seed_{pdb}_*.sh",
+     re.compile(r"^submit_rfa-af3seed_(?P<pdb>[A-Za-z0-9]+)_(?P<ep>.+)_hs(?P<variant>[A-Za-z0-9]+).*\\.sh$")),
+    ("af3batch", "rfa_af3", "submit_rfa-af3batch_{pdb}_*.sh",
+     re.compile(r"^submit_rfa-af3batch_(?P<pdb>[A-Za-z0-9]+)_(?P<ep>.+)_hs(?P<variant>[A-Za-z0-9]+).*\\.sh$")),
+]
+
+
+def _sanitize_rfa_epitope_name(name: str) -> str:
+    return _RFA_EPITOPE_SANITIZE_RE.sub("_", (name or "").strip())
+
+
+def _rfa_tools_root() -> Path:
+    cfg = load_config()
+    root = cfg.paths.project_root or Path.cwd()
+    return Path(root).resolve()
+
+
+def _apply_rfa_pipeline_config(rfa_cfg) -> None:
+    updates: Dict[str, str] = {}
+    if getattr(rfa_cfg, "slurm_partition", None):
+        updates["INITBINDER_SLURM_GPU_PARTITION"] = str(rfa_cfg.slurm_partition)
+    if getattr(rfa_cfg, "slurm_account", None):
+        updates["INITBINDER_SLURM_ACCOUNT"] = str(rfa_cfg.slurm_account)
+    if getattr(rfa_cfg, "slurm_gpu_type", None):
+        updates["INITBINDER_SLURM_GPU_TYPE"] = str(rfa_cfg.slurm_gpu_type)
+    if getattr(rfa_cfg, "rfa_repo_path", None):
+        updates["INITBINDER_RFANTIBODY_REPO"] = str(rfa_cfg.rfa_repo_path)
+    if getattr(rfa_cfg, "singularity_image", None):
+        updates["INITBINDER_SINGULARITY_IMAGE"] = str(rfa_cfg.singularity_image)
+    if getattr(rfa_cfg, "af3_singularity_image", None):
+        updates["INITBINDER_AF3_SINGULARITY_IMAGE"] = str(rfa_cfg.af3_singularity_image)
+    if getattr(rfa_cfg, "af3_model_params_dir", None):
+        updates["INITBINDER_AF3_MODEL_PARAMS_DIR"] = str(rfa_cfg.af3_model_params_dir)
+    if getattr(rfa_cfg, "af3_databases_dir", None):
+        updates["INITBINDER_AF3_DATABASES_DIR"] = str(rfa_cfg.af3_databases_dir)
+
+    for key, value in updates.items():
+        os.environ[key] = value
+
+    try:
+        import utils
+
+        if "INITBINDER_SLURM_GPU_PARTITION" in updates:
+            utils.SLURM_GPU_PARTITION = updates["INITBINDER_SLURM_GPU_PARTITION"]
+        if "INITBINDER_SLURM_ACCOUNT" in updates:
+            utils.SLURM_ACCOUNT = updates["INITBINDER_SLURM_ACCOUNT"]
+        if "INITBINDER_SLURM_GPU_TYPE" in updates:
+            utils.SLURM_GPU_TYPE = updates["INITBINDER_SLURM_GPU_TYPE"]
+        if "INITBINDER_RFANTIBODY_REPO" in updates:
+            utils.RFANTIBODY_REPO_PATH = updates["INITBINDER_RFANTIBODY_REPO"]
+            utils.DEFAULT_NANOBODY_FRAMEWORK = os.path.join(
+                utils.RFANTIBODY_REPO_PATH,
+                "scripts/examples/example_inputs/h-NbBCII10.pdb",
+            )
+        if "INITBINDER_SINGULARITY_IMAGE" in updates:
+            utils.SINGULARITY_IMAGE_PATH = updates["INITBINDER_SINGULARITY_IMAGE"]
+        if "INITBINDER_AF3_SINGULARITY_IMAGE" in updates:
+            utils.AF3_SINGULARITY_IMAGE = updates["INITBINDER_AF3_SINGULARITY_IMAGE"]
+        if "INITBINDER_AF3_MODEL_PARAMS_DIR" in updates:
+            utils.AF3_MODEL_PARAMS_DIR = updates["INITBINDER_AF3_MODEL_PARAMS_DIR"]
+        if "INITBINDER_AF3_DATABASES_DIR" in updates:
+            utils.AF3_DATABASES_DIR = updates["INITBINDER_AF3_DATABASES_DIR"]
+    except Exception:
+        return
+
+
+@lru_cache(maxsize=1)
+def _load_rfa_pipeline_tools() -> tuple[object | None, object | None, object | None, str | None]:
+    base = _rfa_tools_root() / "lib" / "tools" / "rfantibody"
+    if not base.exists():
+        return None, None, None, f"Missing RFA pipeline archive at {base}"
+
+    def _load(module_name: str, func_name: str) -> tuple[object | None, str | None]:
+        path = base / f"{module_name}.py"
+        if not path.exists():
+            return None, f"Missing {path}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if not spec or not spec.loader:
+                return None, f"Unable to load {path}"
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            func = getattr(module, func_name, None)
+            if not callable(func):
+                return None, f"Missing {func_name} in {path}"
+            return func, None
+        except Exception as exc:  # pragma: no cover - defensive
+            return None, f"Failed to import {path}: {exc}"
+
+    rfdiff, err = _load("make_rfa_rfdiffusion", "make_rfa_rfdiffusion_command")
+    if err:
+        return None, None, None, err
+    mpnn, err = _load("make_rfa_proteinmpnn", "make_rfa_proteinmpnn_command")
+    if err:
+        return None, None, None, err
+    af3, err = _load("make_rfa_af3", "make_rfa_af3_command")
+    if err:
+        return None, None, None, err
+    return rfdiff, mpnn, af3, None
+
+
+def _rfa_variants_for_epitope(pdb_id: str, epitope_name: str) -> List[str]:
+    cfg = load_config()
+    target_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper()
+    prep_dir = target_dir / "prep"
+    sanitized = _sanitize_rfa_epitope_name(epitope_name)
+    found = []
+    for variant in _RFA_VARIANTS_DEFAULT:
+        path = prep_dir / f"epitope_{sanitized}_hotspots{variant}.json"
+        if path.exists():
+            found.append(variant)
+    return found if found else [str(_RFA_VARIANTS_DEFAULT[0])]
+
+
+def _discover_rfa_pipeline_scripts(pdb_id: str) -> tuple[List[RfaPipelineScript], Path | None]:
+    tools_root = _rfa_tools_root() / "tools"
+    scripts: List[RfaPipelineScript] = []
+    upper = pdb_id.upper()
+
+    for stage, subdir, pattern, regex in _RFA_SCRIPT_PATTERNS:
+        base = tools_root / subdir
+        if not base.exists():
+            continue
+        for path in sorted(base.glob(pattern.format(pdb=upper))):
+            name = path.name
+            epitope = None
+            variant = None
+            match = regex.match(name)
+            if match:
+                epitope = match.group("ep")
+                variant = match.group("variant")
+            try:
+                rel_path = path.relative_to(_rfa_tools_root())
+            except ValueError:
+                rel_path = path
+            scripts.append(
+                RfaPipelineScript(
+                    path=str(rel_path),
+                    name=name,
+                    stage=stage,
+                    epitope=epitope,
+                    variant=variant,
+                )
+            )
+
+    launcher_dir = tools_root / "launchers"
+    launcher_path = None
+    if launcher_dir.exists():
+        launchers = sorted(
+            launcher_dir.glob(f"launch_pipeline_{upper}_*.sh"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+        if launchers:
+            launcher_path = launchers[0]
+            try:
+                rel_path = launcher_path.relative_to(_rfa_tools_root())
+            except ValueError:
+                rel_path = launcher_path
+            scripts.append(
+                RfaPipelineScript(
+                    path=str(rel_path),
+                    name=launcher_path.name,
+                    stage="launcher",
+                )
+            )
+
+    scripts.sort(key=lambda item: (_RFA_STAGE_ORDER.get(item.stage or "", 99), item.name))
+    return scripts, launcher_path
+
+
+def list_rfa_pipeline_configs(pdb_ids: List[str]) -> RfaPipelineConfigListResponse:
+    targets: List[RfaPipelineTargetScripts] = []
+    for pdb_id in pdb_ids:
+        scripts, launcher = _discover_rfa_pipeline_scripts(pdb_id)
+        launcher_path = None
+        launcher_name = None
+        if launcher:
+            try:
+                launcher_rel = launcher.relative_to(_rfa_tools_root())
+            except ValueError:
+                launcher_rel = launcher
+            launcher_path = str(launcher_rel)
+            launcher_name = launcher.name
+        targets.append(
+            RfaPipelineTargetScripts(
+                pdb_id=pdb_id.upper(),
+                scripts=scripts,
+                launcher_path=launcher_path,
+                launcher_name=launcher_name,
+            )
+        )
+    return RfaPipelineConfigListResponse(targets=targets)
+
+
+def load_rfa_pipeline_script_content(pdb_id: str, script_path: str) -> RfaPipelineScriptContent:
+    root = _rfa_tools_root()
+    candidate = Path(script_path)
+    if not candidate.is_absolute():
+        candidate = (root / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    if not str(candidate).startswith(str(root)):
+        raise ValueError("Script path outside project root")
+    if not candidate.exists():
+        raise FileNotFoundError(f"Script not found: {candidate}")
+    if pdb_id and pdb_id.upper() not in candidate.name.upper():
+        raise ValueError("Script does not match requested PDB ID")
+    try:
+        rel_path = candidate.relative_to(root)
+    except ValueError:
+        rel_path = candidate
+    return RfaPipelineScriptContent(
+        pdb_id=pdb_id.upper(),
+        script_path=str(rel_path),
+        script_name=candidate.name,
+        script_text=candidate.read_text(),
+    )
+
+
+def _write_rfa_pipeline_launcher(
+    pdb_id: str,
+    rfd_scripts: Dict[str, dict],
+    mpnn_scripts: Dict[str, dict],
+    af3_scripts: Dict[str, dict],
+    *,
+    designs_per_task: int,
+) -> Path:
+    tools_root = _rfa_tools_root() / "tools" / "launchers"
+    tools_root.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    launch = tools_root / f"launch_pipeline_{pdb_id}_{ts}.sh"
+    lines = ["#!/bin/bash", "set -euo pipefail"]
+
+    first_arm = next(iter(rfd_scripts))
+    first_rfd_name = rfd_scripts[first_arm]["script"].name
+    first_mpnn_name = mpnn_scripts[first_arm]["script"].name
+    first_af3_stage1_name = af3_scripts[first_arm]["script_stage1"].name
+    first_af3_stage2_name = af3_scripts[first_arm]["script_stage2"].name
+    lines.extend([
+        f'echo "[LAUNCH] {first_arm} (with shared AF3 seed)"',
+        f'jid_rfd_0=$(sbatch {rfd_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+        f'echo "[launch] {first_rfd_name} -> ${{jid_rfd_0}}"',
+        'echo "Submitted batch job ${jid_rfd_0}"',
+        f'jid_mpnn_0=$(sbatch --dependency=afterok:${{jid_rfd_0}} {mpnn_scripts[first_arm]["script"]} | awk \'{{print $4}}\')',
+        f'echo "[launch] {first_mpnn_name} -> ${{jid_mpnn_0}}"',
+        'echo "Submitted batch job ${jid_mpnn_0}"',
+        f'jid_seed=$(sbatch --dependency=afterok:${{jid_mpnn_0}} {af3_scripts[first_arm]["script_stage1"]} | awk \'{{print $4}}\')',
+        f'echo "[launch] {first_af3_stage1_name} -> ${{jid_seed}}"',
+        'echo "Submitted batch job ${jid_seed}"',
+        f'DESIGNS_PER_TASK={designs_per_task} jid_af3s2_0=$(sbatch --dependency=afterok:${{jid_mpnn_0}}:${{jid_seed}} {af3_scripts[first_arm]["script_stage2"]} | awk \'{{print $4}}\')',
+        f'echo "[launch] {first_af3_stage2_name} -> ${{jid_af3s2_0}}"',
+        'echo "Submitted batch job ${jid_af3s2_0}"',
+    ])
+
+    for idx, arm_key in enumerate([k for k in rfd_scripts.keys() if k != first_arm], start=1):
+        rfd_name = rfd_scripts[arm_key]["script"].name
+        mpnn_name = mpnn_scripts[arm_key]["script"].name
+        af3_stage2_name = af3_scripts[arm_key]["script_stage2"].name
+        lines.extend([
+            f'echo "[LAUNCH] {arm_key} (reuse shared AF3 seed)"',
+            f'jid_rfd_{idx}=$(sbatch {rfd_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+            f'echo "[launch] {rfd_name} -> ${{jid_rfd_{idx}}}"',
+            f'echo "Submitted batch job ${{jid_rfd_{idx}}}"',
+            f'jid_mpnn_{idx}=$(sbatch --dependency=afterok:${{jid_rfd_{idx}}} {mpnn_scripts[arm_key]["script"]} | awk \'{{print $4}}\')',
+            f'echo "[launch] {mpnn_name} -> ${{jid_mpnn_{idx}}}"',
+            f'echo "Submitted batch job ${{jid_mpnn_{idx}}}"',
+            f'DESIGNS_PER_TASK={designs_per_task} jid_af3s2_{idx}=$(sbatch --dependency=afterok:${{jid_mpnn_{idx}}}:${{jid_seed}} {af3_scripts[arm_key]["script_stage2"]} | awk \'{{print $4}}\')',
+            f'echo "[launch] {af3_stage2_name} -> ${{jid_af3s2_{idx}}}"',
+            f'echo "Submitted batch job ${{jid_af3s2_{idx}}}"',
+        ])
+
+    launch.write_text("\n".join(lines) + "\n")
+    os.chmod(launch, 0o755)
+    return launch
+
+
+def _generate_rfa_pipeline_scripts(
+    pdb_id: str,
+    design_count: int,
+    log: Callable[[str], None],
+) -> tuple[str, str | None]:
+    log(f"[rfa-pipeline] Generating RFA pipeline scripts for target {pdb_id.upper()}")
+    cfg = load_config()
+    rfa_cfg = cfg.cluster.rfantibody
+    _apply_rfa_pipeline_config(rfa_cfg)
+    _load_rfa_pipeline_tools.cache_clear()
+    rfdiff, mpnn, af3, err = _load_rfa_pipeline_tools()
+    if err:
+        log(f"[rfa-pipeline] {err}")
+        return "error", err
+
+    epitopes = _load_epitopes_for_target(pdb_id)
+    if not epitopes:
+        log("[rfa-pipeline] No epitope metadata found; skipping script generation.")
+        return "skipped", "No epitopes found for RFA pipeline scripts"
+
+    arms: List[tuple[str, str]] = []
+    for ep in epitopes:
+        name = (ep.get("name") or ep.get("display_name") or "").strip()
+        if not name:
+            continue
+        for variant in _rfa_variants_for_epitope(pdb_id, name):
+            arms.append((name, variant))
+    if not arms:
+        log("[rfa-pipeline] No arms resolved; skipping script generation.")
+        return "skipped", "No epitope arms detected for RFA pipeline scripts"
+
+    dpt_default = rfa_cfg.designs_per_task or 200
+    num_seq_default = rfa_cfg.mpnn_num_seq or 1
+    temp_default = rfa_cfg.mpnn_temperature if rfa_cfg.mpnn_temperature is not None else 0.1
+
+    designs_per_task = max(1, _safe_int(os.getenv("RFA_PIPELINE_DPT"), dpt_default))
+    num_seq = max(1, _safe_int(os.getenv("RFA_PIPELINE_NUM_SEQ"), num_seq_default))
+    temp = _safe_float(os.getenv("RFA_PIPELINE_TEMP"), temp_default)
+    temp = temp if temp is not None else temp_default
+    binder_chain_id = os.getenv("RFA_BINDER_CHAIN_ID") or rfa_cfg.binder_chain_id or "H"
+    binder_chain_id = binder_chain_id.strip().upper() or "H"
+
+    try:
+        import utils as rfa_utils
+    except Exception:
+        rfa_utils = None
+
+    framework_pdb = os.getenv("RFA_PIPELINE_FRAMEWORK_PDB")
+    if not framework_pdb:
+        if rfa_cfg.framework_pdb:
+            framework_pdb = str(rfa_cfg.framework_pdb)
+        elif rfa_utils is not None:
+            framework_pdb = rfa_utils.DEFAULT_NANOBODY_FRAMEWORK
+        elif rfa_cfg.rfa_repo_path:
+            framework_pdb = os.path.join(
+                str(rfa_cfg.rfa_repo_path),
+                "scripts/examples/example_inputs/h-NbBCII10.pdb",
+            )
+        else:
+            framework_pdb = ""
+
+    cdr_h1 = os.getenv("RFA_PIPELINE_CDR_H1") or rfa_cfg.cdr_h1
+    cdr_h2 = os.getenv("RFA_PIPELINE_CDR_H2") or rfa_cfg.cdr_h2
+    cdr_h3 = os.getenv("RFA_PIPELINE_CDR_H3") or rfa_cfg.cdr_h3
+    run_tag = rfa_cfg.run_tag or os.getenv("RFA_PIPELINE_RUN_TAG") or os.getenv("RUN_TAG") or None
+
+    model_seeds = list(rfa_cfg.model_seeds) if rfa_cfg.model_seeds else None
+    seeds_raw = os.getenv("RFA_PIPELINE_MODEL_SEEDS")
+    if seeds_raw:
+        tokens = [tok for tok in re.split(r"[\s,]+", seeds_raw.strip()) if tok]
+        try:
+            model_seeds = [int(tok) for tok in tokens]
+        except ValueError:
+            model_seeds = None
+
+    rfd_scripts: Dict[str, dict] = {}
+    mpnn_scripts: Dict[str, dict] = {}
+    af3_scripts: Dict[str, dict] = {}
+    for ep, variant in arms:
+        log(f"[rfa-pipeline] {pdb_id.upper()} · {ep}@{variant} -> {design_count} designs")
+        rfd = rfdiff(
+            pdb_id,
+            ep,
+            design_count,
+            designs_per_task,
+            framework_pdb,
+            cdr_h1,
+            cdr_h2,
+            cdr_h3,
+            hotspot_variant=variant,
+            crop_radius=None,
+            crop_pad=4,
+            crop_keep_glycans=False,
+            run_tag=run_tag,
+        )
+        mpn = mpnn(pdb_id, ep, num_seq, temp, hotspot_variant=variant, run_tag=run_tag)
+        af3_out = af3(
+            pdb_id,
+            ep,
+            binder_chain_id=binder_chain_id,
+            seed_idx=0,
+            hotspot_variant=variant,
+            run_tag=run_tag,
+            model_seeds=model_seeds,
+        )
+        arm_key = f"{ep}@{variant}"
+        rfd_scripts[arm_key] = rfd
+        mpnn_scripts[arm_key] = mpn
+        af3_scripts[arm_key] = af3_out
+
+    if not rfd_scripts:
+        return "skipped", "No RFA pipeline scripts generated"
+
+    launcher = _write_rfa_pipeline_launcher(
+        pdb_id.upper(),
+        rfd_scripts,
+        mpnn_scripts,
+        af3_scripts,
+        designs_per_task=designs_per_task,
+    )
+    log(f"[rfa-pipeline] launcher written → {launcher}")
+    return "ok", f"RFA pipeline scripts ready ({launcher.name})"
 
 
 def _format_ranges(numbers: Iterable[int]) -> str:
@@ -1534,16 +1955,19 @@ def regenerate_boltzgen_configs(
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     results: List[BoltzgenConfigRegenerateResult] = []
     seen: set[str] = set()
+    log_lines: List[str] = []
 
+    def _log(line: str) -> None:
+        log_lines.append(line)
+        print(line)
+
+    _log(f"[boltzgen-config] Starting regeneration for {len(pdb_ids)} target{'' if len(pdb_ids) == 1 else 's'}...")
     for raw_id in pdb_ids:
         pdb_id = (raw_id or "").strip().upper()
         if not pdb_id or pdb_id in seen:
             continue
         seen.add(pdb_id)
-        log_lines: List[str] = []
-
-        def _log(line: str) -> None:
-            log_lines.append(line)
+        
 
         prepared_structure = _prepared_structure_path_for_target(pdb_id)
         if not prepared_structure.exists():
@@ -1582,27 +2006,39 @@ def regenerate_boltzgen_configs(
                     _log(f"[boltzgen-config] warn: failed to remove {ep_dir}: {exc}")
 
         design_counts = [design_count] * len(epitopes)
+        
+        _log(f"[rfa-pipeline] Generating RFA pipeline scripts...")
+        rfa_status, rfa_msg = _generate_rfa_pipeline_scripts(pdb_id, design_count, _log)
+        if rfa_status == "ok" and rfa_msg:
+            msg = f"{rfa_msg}"
+        elif rfa_status == "skipped" and rfa_msg:
+            msg = f"RFA pipeline skipped ({rfa_msg})"
+        elif rfa_status == "error":
+            status = "error"
+            msg = f"RFA pipeline failed ({rfa_msg})"
+
+        boltz_error = None
         try:
             _write_boltzgen_configs(pdb_id, epitopes, design_counts, _log, crop_radius=crop_radius)
         except Exception as exc:  # pragma: no cover - defensive
-            results.append(
-                BoltzgenConfigRegenerateResult(
-                    pdb_id=pdb_id,
-                    status="error",
-                    configs_written=0,
-                    message=str(exc),
-                )
-            )
-            continue
+            boltz_error = exc
+            _log(f"[boltzgen-config] error: {exc}")
 
+        _log(f"[boltzgen-config] completed regeneration for {pdb_id}.")
         config_paths = list(config_root.rglob("boltzgen_config.yaml")) if config_root.exists() else []
-        msg = f"Regenerated {len(config_paths)} configs"
-        if removed:
-            msg = f"{msg} (removed {removed} old epitope folder{'' if removed == 1 else 's'})"
+        status = "ok"
+        if boltz_error:
+            status = "error"
+            msg = f"BoltzGen config failed ({boltz_error}); found {len(config_paths)} config file{'' if len(config_paths) == 1 else 's'}"
+        else:
+            msg = f"Regenerated {len(config_paths)} configs"
+            if removed:
+                msg = f"{msg} (removed {removed} old epitope folder{'' if removed == 1 else 's'})"
+
         results.append(
             BoltzgenConfigRegenerateResult(
                 pdb_id=pdb_id,
-                status="ok",
+                status=status,
                 configs_written=len(config_paths),
                 message=msg,
             )
