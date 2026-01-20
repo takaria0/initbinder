@@ -2,8 +2,8 @@ paths:
   antigen_category_map: targets_catalog/antigen_category_map.tsv
 cluster:
   ssh_config_alias: null
-  remote_root: null
-  target_root: null
+  remote_root: /pub/inagakit/Projects/initbinder
+  target_root: /pub/inagakit/Projects/initbinder/targets
   control_path: null
   control_persist: 600000
   conda_activate: "conda activate takashi"
@@ -45,6 +45,7 @@ cluster:
     af3_singularity_image: /pub/inagakit/af3/alphafold3_40gb.sif
     af3_model_params_dir: /pub/inagakit/af3/model_params
     af3_databases_dir: /pub/inagakit/af3/databases
+    af3_run_script: /data/homezvol1/inagakit/Library/alphafold3/run_alphafold.py
     framework_pdb: /data/homezvol1/inagakit/Library/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
     designs_per_task: 200
     mpnn_num_seq: 1

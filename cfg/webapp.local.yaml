@@ -3,8 +3,8 @@ paths:
   antigen_category_map: targets_catalog/antigen_category_map.tsv
 cluster:
   ssh_config_alias: hpc3.rcic.uci.edu
-  remote_root: /data/homezvol1/inagakit/Projects/initbinder
-  target_root: /pub/inagakit/Projects/initbinder/
+  remote_root: /pub/inagakit/Projects/initbinder
+  target_root: /pub/inagakit/Projects/initbinder/targets
   control_path: /Users/inagakit/.ssh/cm-initbinder-hpc3.rcic.uci.edu
   control_persist: 600000
   conda_activate: "conda activate takashi"

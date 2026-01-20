@@ -105,6 +105,7 @@ class RfaPipelineConfig:
     af3_singularity_image: Optional[Path] = None
     af3_model_params_dir: Optional[Path] = None
     af3_databases_dir: Optional[Path] = None
+    af3_run_script: Optional[Path] = None
     framework_pdb: Optional[Path] = None
     designs_per_task: int = 200
     mpnn_num_seq: int = 1
@@ -123,6 +124,7 @@ class RfaPipelineConfig:
             "af3_singularity_image",
             "af3_model_params_dir",
             "af3_databases_dir",
+            "af3_run_script",
             "framework_pdb",
         ):
             value = getattr(self, attr)

@@ -30,6 +30,7 @@ const state = {
   rfaConfigs: {},
   configContext: null,
   runContext: null,
+  runMode: null,
 };
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
@@ -1747,10 +1748,10 @@ async function submitRegenerateRangeModal(triggerBtn = null) {
 
 async function showRunCommandRange() {
   state.runContext = null;
-  if (el.boltzRunEngine) el.boltzRunEngine.value = 'boltzgen';
+  state.runMode = 'range';
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
-    showAlert('No BoltzGen configs loaded.');
+    showAlert('No targets loaded.');
     return;
   }
   const range = getBoltzRowRange(el.boltzRunRangeStart, el.boltzRunRangeEnd, targets, 'command');
@@ -1774,10 +1775,19 @@ async function showRunCommandRange() {
   if (!state.clusterStatus) {
     await loadClusterStatus();
   }
-  const text = filteredSlice.length
-    ? buildAllRunCommandsText(filteredSlice)
-    : '# Manual BoltzGen submission\nNo targets passed filters.';
-  renderRunCommandBlocks(prependRunCommandFilters(text, filters, slice.length, filteredSlice.length));
+  const engine = getRunEngine();
+  if (engine === 'rfantibody') {
+    const entries = await fetchRfaLauncherEntries(filteredSlice);
+    const text = filteredSlice.length
+      ? buildRfaRunCommandsTextForTargets(entries)
+      : '# Manual RFA pipeline submission\nNo targets passed filters.';
+    renderRunCommandBlocks(prependRunCommandFilters(text, filters, slice.length, filteredSlice.length));
+  } else {
+    const text = filteredSlice.length
+      ? buildAllRunCommandsText(filteredSlice)
+      : '# Manual BoltzGen submission\nNo targets passed filters.';
+    renderRunCommandBlocks(prependRunCommandFilters(text, filters, slice.length, filteredSlice.length));
+  }
   toggleModal(el.boltzRunRangeModal, false);
 }
 
@@ -2261,8 +2271,42 @@ function getConfigEngine() {
 }
 
 function getRunEngine() {
-  const value = (el.boltzRunEngine?.value || 'boltzgen').trim().toLowerCase();
-  return value || 'boltzgen';
+  const control = el.boltzRunEngine;
+  if (!control) return 'boltzgen';
+  if (control.tagName === 'SELECT') {
+    const value = (control.value || 'boltzgen').trim().toLowerCase();
+    return value || 'boltzgen';
+  }
+  const active = control.querySelector('button.active');
+  const value = active?.dataset?.engine || control.querySelector('button[data-engine]')?.dataset?.engine || 'boltzgen';
+  return (value || 'boltzgen').trim().toLowerCase();
+}
+
+function setRunEngine(engine) {
+  const control = el.boltzRunEngine;
+  const value = (engine || 'boltzgen').trim().toLowerCase() || 'boltzgen';
+  if (!control) return value;
+  if (control.tagName === 'SELECT') {
+    control.value = value;
+    return value;
+  }
+  const buttons = Array.from(control.querySelectorAll('button[data-engine]'));
+  let matched = false;
+  buttons.forEach((btn) => {
+    const isActive = (btn.dataset.engine || '').trim().toLowerCase() === value;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    if (isActive) matched = true;
+  });
+  if (!matched && buttons.length) {
+    buttons.forEach((btn, idx) => {
+      const isActive = idx === 0;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+    return (buttons[0].dataset.engine || value).trim().toLowerCase();
+  }
+  return value;
 }
 
 function sanitizeRfaEpitopeName(name) {
@@ -2473,10 +2517,18 @@ function outputRootFor(baseRoot, runLabel) {
 function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   const upper = (pdbId || '').toUpperCase();
   const {
-    remoteRoot, targetRoot, toolsRoot, sshTarget, condaActivate, boltz, localTargetsRoot,
+    remoteRoot,
+    targetRoot,
+    toolsRoot,
+    sshTarget,
+    condaActivate,
+    boltz,
+    localTargetsRoot,
+    localWorkspaceRoot,
   } = clusterDefaults();
   const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${upper}`.replace(/\/+/g, '/');
   const localTarget = localTargetsRoot ? `${localTargetsRoot}/${upper}` : `targets/${upper}`;
+  const localTools = localWorkspaceRoot ? `${localWorkspaceRoot}/lib/tools` : 'lib/tools';
   const runLabel = runLabelFor(upper);
   const designCount = getBoltzDesignCount() || 100;
   const timeHours = getBoltzTimeHours() || boltz.time_hours || 12;
@@ -2506,7 +2558,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     '',
     '# 1) Sync target configs + tools to cluster',
     `rsync -az ${localTarget} ${sshTarget}:${targetRoot}`,
-    `rsync -az lib/tools ${sshTarget}:${toolsRoot || '<remote_root>/lib'}/tools`,
+    `rsync -az ${localTools} ${sshTarget}:${toolsRoot || '<remote_root>/lib'}`,
     '',
     '# 2) Verify boltzgen configs exist on cluster',
     verifyLine,
@@ -2534,14 +2586,141 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
   ].filter(Boolean).join('\n');
 }
 
+function buildRfaRunCommandText(pdbId, launcherPath) {
+  const upper = (pdbId || '').toUpperCase();
+  const {
+    remoteRoot, targetRoot, sshTarget, localTargetsRoot, localWorkspaceRoot,
+  } = clusterDefaults();
+  const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${upper}`.replace(/\/+/g, '/');
+  const localTarget = localTargetsRoot ? `${localTargetsRoot}/${upper}` : `targets/${upper}`;
+  const remoteRootClean = remoteRoot ? remoteRoot.replace(/\/$/, '') : '<remote_root>';
+  const remoteLauncher = remoteRoot
+    ? `${remoteRootClean}/${launcherPath}`.replace(/\/+/g, '/')
+    : launcherPath;
+  const localTools = localWorkspaceRoot ? `${localWorkspaceRoot}/tools` : 'tools';
+
+  return [
+    '# Manual RFA pipeline submission',
+    '',
+    '# 1) Sync target + launcher scripts to cluster',
+    `rsync -az ${localTarget} ${sshTarget}:${targetRoot}`,
+    `rsync -az ${localTools} ${sshTarget}:${remoteRootClean}`,
+    '',
+    '# 2) Verify launcher exists',
+    `ssh ${sshTarget} "ls ${remoteLauncher}"`,
+    '',
+    '# 3) Launch pipeline',
+    `ssh ${sshTarget} "cd ${remoteRootClean} && bash ${remoteLauncher}"`,
+    '',
+    '# 4) Monitor',
+    `ssh ${sshTarget} "squeue -u $USER | grep rfa-"`,
+    `ssh ${sshTarget} "ls ${remoteRootClean}/slurm_logs | tail -n 5"`,
+    '',
+    '# 5) Pull results back (optional)',
+    `mkdir -p ${localTarget}/designs/`,
+    `rsync -az ${sshTarget}:${remoteTarget}/designs/ ${localTarget}/designs/`,
+  ].filter(Boolean).join('\n');
+}
+
+function buildRfaRunCommandsTextForTargets(entries = []) {
+  const {
+    remoteRoot, targetRoot, sshTarget, localTargetsRoot, localWorkspaceRoot,
+  } = clusterDefaults();
+  const remoteRootClean = remoteRoot ? remoteRoot.replace(/\/$/, '') : '<remote_root>';
+  const localTools = localWorkspaceRoot ? `${localWorkspaceRoot}/tools` : 'tools';
+
+  const lines = [
+    '# Manual RFA pipeline submission (all targets)',
+    '',
+    '# 1) Sync targets + tools to cluster',
+  ];
+
+  entries.forEach((entry) => {
+    const pdb = (entry?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    lines.push(`rsync -az ${localTarget} ${sshTarget}:${targetRoot}`);
+  });
+  lines.push(`rsync -az ${localTools} ${sshTarget}:${remoteRootClean}`);
+
+  lines.push('', '# 2) Verify launchers exist');
+  entries.forEach((entry) => {
+    const pdb = (entry?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const launcherPath = entry?.launcherPath || '';
+    if (!launcherPath) {
+      lines.push(`# ${pdb}: launcher missing (rebuild configs)`);
+      return;
+    }
+    const remoteLauncher = remoteRoot
+      ? `${remoteRootClean}/${launcherPath}`.replace(/\/+/g, '/')
+      : launcherPath;
+    lines.push(`ssh ${sshTarget} "ls ${remoteLauncher}"`);
+  });
+
+  lines.push('', '# 3) Launch pipelines');
+  entries.forEach((entry) => {
+    const pdb = (entry?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const launcherPath = entry?.launcherPath || '';
+    if (!launcherPath) {
+      lines.push(`# ${pdb}: launcher missing (rebuild configs)`);
+      return;
+    }
+    const remoteLauncher = remoteRoot
+      ? `${remoteRootClean}/${launcherPath}`.replace(/\/+/g, '/')
+      : launcherPath;
+    lines.push(`ssh ${sshTarget} "cd ${remoteRootClean} && bash ${remoteLauncher}"`);
+  });
+
+  lines.push('', '# 4) Monitor');
+  lines.push(`ssh ${sshTarget} "squeue -u $USER | grep rfa-"`);
+  lines.push(`ssh ${sshTarget} "ls ${remoteRootClean}/slurm_logs | tail -n 5"`);
+
+  lines.push('', '# 5) Pull results back (optional)');
+  entries.forEach((entry) => {
+    const pdb = (entry?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    lines.push(`mkdir -p ${localTarget}/designs/`);
+    lines.push(`rsync -az ${sshTarget}:${remoteTarget}/designs/ ${localTarget}/designs/`);
+  });
+
+  return lines.filter(Boolean).join('\n');
+}
+
+async function fetchRfaLauncherEntries(targets = []) {
+  const entries = [];
+  for (const target of targets) {
+    const pdbId = (target?.pdb_id || '').toUpperCase();
+    if (!pdbId) continue;
+    try {
+      const rfaTarget = await fetchRfaConfigs(pdbId, { force: true });
+      entries.push({ pdbId, launcherPath: rfaTarget?.launcher_path || '' });
+    } catch (err) {
+      entries.push({ pdbId, launcherPath: '' });
+    }
+  }
+  return entries;
+}
+
 function buildAllRunCommandsText(targets = []) {
   const {
-    remoteRoot, targetRoot, toolsRoot, sshTarget, condaActivate, boltz, localTargetsRoot,
+    remoteRoot,
+    targetRoot,
+    toolsRoot,
+    sshTarget,
+    condaActivate,
+    boltz,
+    localTargetsRoot,
+    localWorkspaceRoot,
   } = clusterDefaults();
   const envRoot = remoteRoot || '<remote_root>';
   const envTargetRoot = targetRoot || `${envRoot}/targets`;
   const pipelinePath = `${toolsRoot || '<remote_root>/lib'}/tools/boltzgen/pipeline.py`;
   const condaLine = condaActivate ? condaActivate : '# conda activate bg';
+  const localTools = localWorkspaceRoot ? `${localWorkspaceRoot}/lib/tools` : 'lib/tools';
 
   const designCount = getBoltzDesignCount() || 100;
   const timeHours = getBoltzTimeHours() || boltz.time_hours || 12;
@@ -2564,7 +2743,7 @@ function buildAllRunCommandsText(targets = []) {
     const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
     lines.push(`rsync -az ${localTarget} ${sshTarget}:${targetRoot}`);
   });
-  lines.push(`rsync -az lib/tools ${sshTarget}:${toolsRoot || '<remote_root>/lib'}/tools`);
+  lines.push(`rsync -az ${localTools} ${sshTarget}:${toolsRoot || '<remote_root>/lib'}`);
 
   lines.push('', '# 2) Verify boltzgen configs exist on cluster');
   targets.forEach((t) => {
@@ -2673,18 +2852,8 @@ async function showRfaRunCommand(pdbId) {
       renderRunCommandBlocks('# No RFA pipeline launcher found. Use Rebuild configs to generate scripts.');
       return;
     }
-    const { remoteRoot, sshTarget } = clusterDefaults();
-    const remoteLauncher = remoteRoot
-      ? `${remoteRoot.replace(/\/$/, '')}/${launcherPath}`.replace(/\/+/g, '/')
-      : launcherPath;
-    const lines = [
-      '# Run locally from the project root',
-      `bash ${launcherPath}`,
-      '',
-      '# Run on cluster',
-      `ssh ${sshTarget} "bash ${remoteLauncher}"`,
-    ];
-    renderRunCommandBlocks(lines.join('\n'));
+    const text = buildRfaRunCommandText(pdbId, launcherPath);
+    renderRunCommandBlocks(text);
   } catch (err) {
     showAlert(err.message || String(err));
   }
@@ -2692,7 +2861,14 @@ async function showRfaRunCommand(pdbId) {
 
 async function renderRunCommandModal() {
   const ctx = state.runContext;
-  if (!ctx || !ctx.pdbId) return;
+  if (!ctx || !ctx.pdbId) {
+    if (state.runMode === 'range') {
+      await showRunCommandRange();
+    } else {
+      await showRunCommandAll();
+    }
+    return;
+  }
   const engine = getRunEngine();
   if (engine === 'rfantibody') {
     await showRfaRunCommand(ctx.pdbId);
@@ -2707,6 +2883,7 @@ function setRunContext(pdbId, configPath = null, epitopeName = null) {
     configPath: configPath || null,
     epitopeName: epitopeName || null,
   };
+  state.runMode = 'single';
 }
 
 async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
@@ -2714,14 +2891,43 @@ async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
   await renderRunCommandModal();
 }
 
+async function showRfaRunCommandAll() {
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    renderRunCommandBlocks('# No targets detected.');
+    return;
+  }
+  const filters = getRunCommandFilters();
+  const { pass } = applyRunCommandFilters(targets, filters);
+  const filteredTargets = pass;
+  if (el.boltzRunTitle && filteredTargets.length !== targets.length) {
+    el.boltzRunTitle.textContent = `Manual run · all targets (${filteredTargets.length}/${targets.length})`;
+  }
+  if (!filteredTargets.length) {
+    const text = '# Manual RFA pipeline submission\nNo targets passed filters.';
+    renderRunCommandBlocks(prependRunCommandFilters(text, filters, targets.length, filteredTargets.length));
+    return;
+  }
+  const entries = await fetchRfaLauncherEntries(filteredTargets);
+  const text = entries.length
+    ? buildRfaRunCommandsTextForTargets(entries)
+    : '# Manual RFA pipeline submission\nNo targets passed filters.';
+  renderRunCommandBlocks(prependRunCommandFilters(text, filters, targets.length, filteredTargets.length));
+}
+
 async function showRunCommandAll() {
   state.runContext = null;
-  if (el.boltzRunEngine) el.boltzRunEngine.value = 'boltzgen';
+  state.runMode = 'all';
   if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
   if (el.boltzRunTitle) el.boltzRunTitle.textContent = 'Manual run · all targets';
   toggleModal(el.boltzRunModal, true);
   if (!state.clusterStatus) {
     await loadClusterStatus();
+  }
+  const engine = getRunEngine();
+  if (engine === 'rfantibody') {
+    await showRfaRunCommandAll();
+    return;
   }
   const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
   if (!targets.length) {
@@ -3433,11 +3639,22 @@ function init() {
     });
   }
   if (el.boltzRunEngine) {
-    el.boltzRunEngine.addEventListener('change', () => {
-      if (el.boltzRunModal && !el.boltzRunModal.hidden) {
-        renderRunCommandModal();
-      }
-    });
+    if (el.boltzRunEngine.tagName === 'SELECT') {
+      el.boltzRunEngine.addEventListener('change', () => {
+        if (el.boltzRunModal && !el.boltzRunModal.hidden) {
+          renderRunCommandModal();
+        }
+      });
+    } else {
+      el.boltzRunEngine.addEventListener('click', (evt) => {
+        const btn = evt.target?.closest('button[data-engine]');
+        if (!btn) return;
+        setRunEngine(btn.dataset.engine || 'boltzgen');
+        if (el.boltzRunModal && !el.boltzRunModal.hidden) {
+          renderRunCommandModal();
+        }
+      });
+    }
   }
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
@@ -3458,6 +3675,7 @@ function init() {
   });
 
   renderBoltzConfigs();
+  setRunEngine(getRunEngine());
   updateRunCommandFilterNote();
   refreshDiversity({ silent: true });
   hydrateSnapshotsFromCache({ silent: true });

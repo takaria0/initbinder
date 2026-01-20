@@ -16,6 +16,7 @@ from utils import crop_pdb_by_hotspots
 from lib.scripts.pymol_utils import export_rfdiff_crop_bundle
 
 _EPITOPE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_EPITOPE_LABEL_RE = re.compile(r"^epitope[\s_-]*(\d+)$", re.IGNORECASE)
 _RANGE_TOKEN_RE = re.compile(
     r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_]\s*(?P<start>-?\d+)\s*(?:[-.]{1,2}\s*(?P<end>-?\d+))?\s*$"
 )
@@ -23,6 +24,34 @@ _RANGE_TOKEN_RE = re.compile(
 
 def _normalize_epitope_key(value: str) -> str:
     return _EPITOPE_KEY_RE.sub("", str(value or "").strip().lower())
+
+
+def _sanitize_epitope_label(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip())
+    return text.strip("_") or "epitope"
+
+
+def _resolve_epitope_entry(cfg: dict, epitope: str) -> tuple[dict | None, int | None]:
+    epitopes = cfg.get("epitopes") or []
+    if not isinstance(epitopes, list):
+        epitopes = []
+    ep_key = _normalize_epitope_key(epitope)
+    for idx, entry in enumerate(epitopes, start=1):
+        if not isinstance(entry, dict):
+            continue
+        for cand in (entry.get("name"), entry.get("display_name")):
+            if cand and _normalize_epitope_key(cand) == ep_key:
+                return entry, idx
+    match = _EPITOPE_LABEL_RE.match(str(epitope or "").strip())
+    if match:
+        try:
+            idx = int(match.group(1))
+        except ValueError:
+            return None, None
+        if 1 <= idx <= len(epitopes):
+            entry = epitopes[idx - 1]
+            return (entry if isinstance(entry, dict) else None), idx
+    return None, None
 
 
 def _default_chain(cfg: dict) -> str:
@@ -84,18 +113,32 @@ def _coerce_hotspot_tokens(items: list, cfg: dict) -> list[str]:
     return tokens
 
 
-def _extract_hotspots_from_target(cfg: dict, epitope: str, hotspot_variant: str) -> list[str]:
+def _extract_hotspots_from_target(
+    cfg: dict,
+    epitope: str,
+    hotspot_variant: str,
+    *,
+    ep_entry: dict | None = None,
+    ep_index: int | None = None,
+) -> list[str]:
     epi_key = _normalize_epitope_key(epitope)
-    ep_entry = None
-    for entry in cfg.get("epitopes") or []:
-        if not isinstance(entry, dict):
-            continue
-        for cand in (entry.get("name"), entry.get("display_name")):
-            if cand and _normalize_epitope_key(cand) == epi_key:
-                ep_entry = entry
+    if ep_entry is None and ep_index is not None:
+        try:
+            candidate = (cfg.get("epitopes") or [])[ep_index - 1]
+        except Exception:
+            candidate = None
+        if isinstance(candidate, dict):
+            ep_entry = candidate
+    if ep_entry is None:
+        for entry in cfg.get("epitopes") or []:
+            if not isinstance(entry, dict):
+                continue
+            for cand in (entry.get("name"), entry.get("display_name")):
+                if cand and _normalize_epitope_key(cand) == epi_key:
+                    ep_entry = entry
+                    break
+            if ep_entry:
                 break
-        if ep_entry:
-            break
     if not ep_entry:
         return []
 
@@ -141,7 +184,13 @@ def make_rfa_rfdiffusion_command(
 
     num_array_tasks = max(1, math.ceil(num_designs / designs_per_task))
 
-    name_sanitized = epitope.replace(" ", "_").replace("/", "_")
+    ep_entry, ep_index = _resolve_epitope_entry(cfg, epitope)
+    ep_name_for_files = (
+        (ep_entry.get("name") or ep_entry.get("display_name")) if isinstance(ep_entry, dict) else None
+    ) or epitope
+    ep_label = f"epitope_{ep_index}" if ep_index else ep_name_for_files
+    name_sanitized = _sanitize_epitope_label(ep_label)
+    file_sanitized = _sanitize_epitope_label(ep_name_for_files)
     arm_dir = TARGETS_ROOT/pdb_id.upper()/"designs"/name_sanitized/f"hs-{hotspot_variant}"
     run_tag = run_tag or os.environ.get("RUN_TAG") or ""
     run_dir = (arm_dir/"rfa_rfdiff"/f"run_{run_tag}") if run_tag else (arm_dir/"rfa_rfdiff")
@@ -149,7 +198,13 @@ def make_rfa_rfdiffusion_command(
 
     # Read hotspots directly from target.yaml.
     prep_dir = TARGETS_ROOT/pdb_id.upper()/ "prep"
-    hotspots = _extract_hotspots_from_target(cfg, epitope, hotspot_variant)
+    hotspots = _extract_hotspots_from_target(
+        cfg,
+        epitope,
+        hotspot_variant,
+        ep_entry=ep_entry,
+        ep_index=ep_index,
+    )
     if not hotspots:
         raise RuntimeError(
             f"No hotspots found for epitope '{epitope}' in target.yaml (variant {hotspot_variant})."
@@ -166,7 +221,7 @@ def make_rfa_rfdiffusion_command(
             radius_A=float(crop_radius),
             pad=int(crop_pad),
             keep_glycans=bool(crop_keep_glycans),
-            out_path=tdir/"prep"/f"prepared_crop_{name_sanitized}_hs-{hotspot_variant}.pdb",
+            out_path=tdir/"prep"/f"prepared_crop_{file_sanitized}_hs-{hotspot_variant}.pdb",
         )
         target_pdb_for_inference = Path(crop_out["out_pdb"])
         print(f"[ok] Cropped PDB for RFdiffusion: {target_pdb_for_inference.name} "
@@ -174,7 +229,7 @@ def make_rfa_rfdiffusion_command(
 
         # --- PyMOL Visualization Bundle Export ---
         try:
-            mask_path = prep_dir / f"epitope_{name_sanitized}.json"
+            mask_path = prep_dir / f"epitope_{file_sanitized}.json"
             epitope_mask_keys = json.loads(mask_path.read_text()) if mask_path.exists() else []
             
             bundle_dir = export_rfdiff_crop_bundle(

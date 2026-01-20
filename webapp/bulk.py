@@ -804,6 +804,8 @@ def _apply_rfa_pipeline_config(rfa_cfg) -> None:
         updates["INITBINDER_AF3_MODEL_PARAMS_DIR"] = str(rfa_cfg.af3_model_params_dir)
     if getattr(rfa_cfg, "af3_databases_dir", None):
         updates["INITBINDER_AF3_DATABASES_DIR"] = str(rfa_cfg.af3_databases_dir)
+    if getattr(rfa_cfg, "af3_run_script", None):
+        updates["INITBINDER_AF3_RUN_SCRIPT"] = str(rfa_cfg.af3_run_script)
 
     for key, value in updates.items():
         os.environ[key] = value
@@ -831,8 +833,40 @@ def _apply_rfa_pipeline_config(rfa_cfg) -> None:
             utils.AF3_MODEL_PARAMS_DIR = updates["INITBINDER_AF3_MODEL_PARAMS_DIR"]
         if "INITBINDER_AF3_DATABASES_DIR" in updates:
             utils.AF3_DATABASES_DIR = updates["INITBINDER_AF3_DATABASES_DIR"]
+        if "INITBINDER_AF3_RUN_SCRIPT" in updates:
+            utils.AF3_RUN_SCRIPT = updates["INITBINDER_AF3_RUN_SCRIPT"]
     except Exception:
         return
+
+
+def _rewrite_rfa_script_paths(
+    script_path: Path,
+    *,
+    local_root: Path,
+    local_targets: Path,
+    cluster_root: Optional[Path],
+    cluster_targets: Optional[Path],
+) -> None:
+    try:
+        text = script_path.read_text()
+    except OSError:
+        return
+
+    replacements: List[tuple[str, str]] = []
+    if cluster_targets:
+        replacements.append((str(local_targets), str(cluster_targets)))
+    if cluster_root:
+        replacements.append((str(local_root), str(cluster_root)))
+
+    if not replacements:
+        return
+
+    updated = text
+    for src, dst in replacements:
+        updated = updated.replace(src, dst)
+
+    if updated != text:
+        script_path.write_text(updated)
 
 
 @lru_cache(maxsize=1)
@@ -1165,6 +1199,51 @@ def _generate_rfa_pipeline_scripts(
         mpnn_scripts,
         af3_scripts,
         designs_per_task=designs_per_task,
+    )
+    local_root = _rfa_tools_root()
+    local_targets = cfg.paths.targets_dir or (local_root / "targets")
+    cluster_root = cfg.cluster.remote_root or cfg.cluster.target_root
+    cluster_targets = cfg.cluster.target_root
+    if cluster_targets is None and cluster_root is not None:
+        cluster_targets = Path(cluster_root) / "targets"
+
+    for rfd in rfd_scripts.values():
+        _rewrite_rfa_script_paths(
+            rfd["script"],
+            local_root=local_root,
+            local_targets=local_targets,
+            cluster_root=Path(cluster_root) if cluster_root else None,
+            cluster_targets=Path(cluster_targets) if cluster_targets else None,
+        )
+    for mpn in mpnn_scripts.values():
+        _rewrite_rfa_script_paths(
+            mpn["script"],
+            local_root=local_root,
+            local_targets=local_targets,
+            cluster_root=Path(cluster_root) if cluster_root else None,
+            cluster_targets=Path(cluster_targets) if cluster_targets else None,
+        )
+    for af3_out in af3_scripts.values():
+        _rewrite_rfa_script_paths(
+            af3_out["script_stage1"],
+            local_root=local_root,
+            local_targets=local_targets,
+            cluster_root=Path(cluster_root) if cluster_root else None,
+            cluster_targets=Path(cluster_targets) if cluster_targets else None,
+        )
+        _rewrite_rfa_script_paths(
+            af3_out["script_stage2"],
+            local_root=local_root,
+            local_targets=local_targets,
+            cluster_root=Path(cluster_root) if cluster_root else None,
+            cluster_targets=Path(cluster_targets) if cluster_targets else None,
+        )
+    _rewrite_rfa_script_paths(
+        launcher,
+        local_root=local_root,
+        local_targets=local_targets,
+        cluster_root=Path(cluster_root) if cluster_root else None,
+        cluster_targets=Path(cluster_targets) if cluster_targets else None,
     )
     log(f"[rfa-pipeline] launcher written → {launcher}")
     return "ok", f"RFA pipeline scripts ready ({launcher.name})"

@@ -12,6 +12,7 @@ from utils import (
     AF3_DATABASES_DIR,
     AF3_MODEL_PARAMS_DIR,
     AF3_SINGULARITY_IMAGE,
+    AF3_RUN_SCRIPT,
 )
 from jsonschema import validate
 
@@ -31,6 +32,43 @@ AA3_TO_1 = {
 import hashlib
 
 # 既存importのままでOK
+
+# Epitope label helpers
+_EPITOPE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_EPITOPE_LABEL_RE = re.compile(r"^epitope[\s_-]*(\d+)$", re.IGNORECASE)
+
+
+def _normalize_epitope_key(value: str) -> str:
+    return _EPITOPE_KEY_RE.sub("", str(value or "").strip().lower())
+
+
+def _sanitize_epitope_label(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip())
+    return text.strip("_") or "epitope"
+
+
+def _resolve_epitope_entry(cfg: dict, epitope: str) -> tuple[dict | None, int | None]:
+    epitopes = cfg.get("epitopes") or []
+    if not isinstance(epitopes, list):
+        epitopes = []
+    ep_key = _normalize_epitope_key(epitope)
+    for idx, entry in enumerate(epitopes, start=1):
+        if not isinstance(entry, dict):
+            continue
+        for cand in (entry.get("name"), entry.get("display_name")):
+            if cand and _normalize_epitope_key(cand) == ep_key:
+                return entry, idx
+    match = _EPITOPE_LABEL_RE.match(str(epitope or "").strip())
+    if match:
+        try:
+            idx = int(match.group(1))
+        except ValueError:
+            return None, None
+        if 1 <= idx <= len(epitopes):
+            entry = epitopes[idx - 1]
+            return (entry if isinstance(entry, dict) else None), idx
+    return None, None
+
 
 # === NEW: 空sequence除外ヘルパー ===
 def _filter_empty_targets(chain_ids: list[str], seqs: list[str]) -> tuple[list[str], list[str]]:
@@ -179,7 +217,13 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
                          model_seeds: Sequence[int] | None = None):
     binder_chain_id = str(binder_chain_id).strip().upper() or "H"
     tdir = TARGETS_ROOT/pdb_id.upper()
-    name_sanitized = epitope.replace(" ", "_").replace("/", "_")
+    cfg = yaml.safe_load((tdir/"target.yaml").read_text()); validate(cfg, SCHEMA)
+    ep_entry, ep_index = _resolve_epitope_entry(cfg, epitope)
+    ep_name_for_files = (
+        (ep_entry.get("name") or ep_entry.get("display_name")) if isinstance(ep_entry, dict) else None
+    ) or epitope
+    ep_label = f"epitope_{ep_index}" if ep_index else ep_name_for_files
+    name_sanitized = _sanitize_epitope_label(ep_label)
     arm_dir = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
 
     # mpnn_dir = arm_dir/"rfa_mpnn"
@@ -189,8 +233,6 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     mpnn_dir = (arm_dir/"rfa_mpnn"/f"run_{run_tag}") if run_tag else (arm_dir/"rfa_mpnn")
     input_pdbs = sorted(mpnn_dir.glob("*.pdb"))
     
-    cfg = yaml.safe_load((tdir/"target.yaml").read_text()); validate(cfg, SCHEMA)
-
     seeds = list(dict.fromkeys(int(s) for s in (model_seeds or list(range(1, 11)))))
     if not seeds:
         raise ValueError("model_seeds must contain at least one integer seed")
@@ -634,7 +676,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
         --bind "{AF3_MODEL_PARAMS_DIR}":/models \
         --bind "{AF3_DATABASES_DIR}":/databases \
         {AF3_SINGULARITY_IMAGE} \
-        python /data/homezvol1/inagakit/Library/alphafold3/run_alphafold.py \
+        python "{AF3_RUN_SCRIPT}" \
             --json_path=/input/input.json \
             --model_dir=/models \
             --db_dir=/databases \
@@ -779,7 +821,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
               --bind "{AF3_MODEL_PARAMS_DIR}":/models \\
               --bind "{AF3_DATABASES_DIR}":/databases \\
               {AF3_SINGULARITY_IMAGE} \\
-              python /data/homezvol1/inagakit/Library/alphafold3/run_alphafold.py \\
+              python "{AF3_RUN_SCRIPT}" \\
                 --json_path=/input/input.json \\
                 --model_dir=/models \\
                 --db_dir=/databases \\

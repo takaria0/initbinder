@@ -94,6 +94,51 @@ AF3_DATABASES_DIR = os.environ.get(
     "INITBINDER_AF3_DATABASES_DIR",
     "/pub/inagakit/af3/databases",
 )
+AF3_RUN_SCRIPT = os.environ.get(
+    "INITBINDER_AF3_RUN_SCRIPT",
+    "/pub/inagakit/Library/alphafold3/run_alphafold.py",
+)
+
+
+def _load_webapp_config():
+    try:
+        from webapp.config import load_config
+    except Exception:
+        return None
+    try:
+        return load_config()
+    except Exception:
+        return None
+
+
+_WEBAPP_CFG = _load_webapp_config()
+if _WEBAPP_CFG is not None:
+    _RFA_CFG = getattr(_WEBAPP_CFG.cluster, "rfantibody", None)
+    if _RFA_CFG is not None:
+        if not os.environ.get("INITBINDER_SLURM_GPU_PARTITION") and _RFA_CFG.slurm_partition:
+            SLURM_GPU_PARTITION = str(_RFA_CFG.slurm_partition)
+        if not os.environ.get("INITBINDER_SLURM_ACCOUNT") and _RFA_CFG.slurm_account:
+            SLURM_ACCOUNT = str(_RFA_CFG.slurm_account)
+        if not os.environ.get("INITBINDER_SLURM_GPU_TYPE") and _RFA_CFG.slurm_gpu_type:
+            SLURM_GPU_TYPE = str(_RFA_CFG.slurm_gpu_type)
+        if not os.environ.get("INITBINDER_RFANTIBODY_REPO") and _RFA_CFG.rfa_repo_path:
+            RFANTIBODY_REPO_PATH = str(_RFA_CFG.rfa_repo_path)
+            DEFAULT_NANOBODY_FRAMEWORK = os.path.join(
+                RFANTIBODY_REPO_PATH,
+                "scripts/examples/example_inputs/h-NbBCII10.pdb",
+            )
+        if not os.environ.get("INITBINDER_SINGULARITY_IMAGE") and _RFA_CFG.singularity_image:
+            SINGULARITY_IMAGE_PATH = str(_RFA_CFG.singularity_image)
+        if not os.environ.get("INITBINDER_AF3_SINGULARITY_IMAGE") and _RFA_CFG.af3_singularity_image:
+            AF3_SINGULARITY_IMAGE = str(_RFA_CFG.af3_singularity_image)
+        if not os.environ.get("INITBINDER_AF3_MODEL_PARAMS_DIR") and _RFA_CFG.af3_model_params_dir:
+            AF3_MODEL_PARAMS_DIR = str(_RFA_CFG.af3_model_params_dir)
+        if not os.environ.get("INITBINDER_AF3_DATABASES_DIR") and _RFA_CFG.af3_databases_dir:
+            AF3_DATABASES_DIR = str(_RFA_CFG.af3_databases_dir)
+        if not os.environ.get("INITBINDER_AF3_RUN_SCRIPT") and _RFA_CFG.af3_run_script:
+            AF3_RUN_SCRIPT = str(_RFA_CFG.af3_run_script)
+        if _RFA_CFG.framework_pdb:
+            DEFAULT_NANOBODY_FRAMEWORK = str(_RFA_CFG.framework_pdb)
 
 
 # --- Global Constants ---
@@ -122,7 +167,10 @@ def _resolve_targets_root() -> Path:
 
     candidates = []
     if _TARGET_ROOT_ENV:
-        candidates.append(Path(_TARGET_ROOT_ENV).expanduser())
+        env_root = Path(_TARGET_ROOT_ENV).expanduser()
+        if env_root.name.lower() != "targets" and (env_root / "targets").exists():
+            candidates.append(env_root / "targets")
+        candidates.append(env_root)
 
     candidates.append(ROOT / "targets")
     if _ROOT_DEFAULT.exists():

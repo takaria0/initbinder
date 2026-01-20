@@ -279,13 +279,10 @@
         <div class="modal-header">
           <div class="flex-row" style="gap: 12px; align-items: center;">
             <h3 id="boltz-run-title">Cluster run steps</h3>
-            <label class="help-text" style="display:flex; align-items:center; gap:6px; margin:0;">
-              <span>Engine</span>
-              <select id="bulk-run-engine">
-                <option value="boltzgen">BoltzGen</option>
-                <option value="rfantibody">RFA pipeline</option>
-              </select>
-            </label>
+            <div class="alignment-toggle" id="bulk-run-engine" role="tablist" aria-label="Run engine">
+              <button type="button" data-engine="boltzgen" class="active" aria-selected="true">BoltzGen</button>
+              <button type="button" data-engine="rfantibody" aria-selected="false">RFA pipeline</button>
+            </div>
           </div>
           <button type="button" id="boltz-run-close" class="ghost">Close</button>
         </div>

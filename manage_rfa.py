@@ -280,7 +280,7 @@ NR==1{
   gsub(/^[ \t]+|[ \t]+$/,"",v)
   if(v ~ /^[A-Za-z0-9]{4}$/) print toupper(v)
 }
-' /data/homezvol1/inagakit/Projects/initbinder/targets_catalog/checkpoint_blockade.tsv \
+' /pub/inagakit/Projects/initbinder/targets_catalog/checkpoint_blockade.tsv \
 | sort -u \
 | while read P; do
   echo "=== $P ==="
@@ -371,8 +371,8 @@ Notes:
 - Assessment TSV includes 'epitope', 'hotspot_variant', and 'arm' columns for follow-ups.
 =========================================================================================
 
-zip -r /data/homezvol1/inagakit/Projects/initbinder/targets/6M17_snapshot.zip 6M17
-tar -czf /data/homezvol1/inagakit/Projects/initbinder/targets/6M17_snapshot.tar.gz -C ~/.zfs/snapshot/zfs-auto-snap_daily-2025-08-24-1027/Projects/initbinder/targets 6M17
+zip -r /pub/inagakit/Projects/initbinder/targets/6M17_snapshot.zip 6M17
+tar -czf /pub/inagakit/Projects/initbinder/targets/6M17_snapshot.tar.gz -C ~/.zfs/snapshot/zfs-auto-snap_daily-2025-08-24-1027/Projects/initbinder/targets 6M17
 
 """
 
