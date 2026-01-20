@@ -88,6 +88,7 @@ const el = {
   diversitySection: document.querySelector('#diversity-section'),
   diversityGrid: document.querySelector('#diversity-grid'),
   diversityRefresh: document.querySelector('#diversity-refresh'),
+  diversityRebuild: document.querySelector('#diversity-rebuild'),
   diversityDownloadCsv: document.querySelector('#diversity-download-csv'),
   diversityDownloadHtml: document.querySelector('#diversity-download-html'),
   boltzPanel: document.querySelector('#boltz-config-panel'),
@@ -1025,7 +1026,7 @@ async function downloadEpitopeReportHtml() {
   }
 }
 
-async function refreshDiversity({ silent = false, page = null } = {}) {
+async function refreshDiversity({ silent = false, page = null, force = false } = {}) {
   try {
     const params = new URLSearchParams();
     const nextPage = page ?? state.binderPage ?? 1;
@@ -1035,7 +1036,8 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
     if (filters.pdb) params.append('filter_pdb', filters.pdb);
     if (filters.epitope) params.append('filter_epitope', filters.epitope);
     if (filters.orderBy) params.append('order_by', filters.orderBy);
-    const res = await fetch(`/api/bulk/boltzgen/diversity?${params.toString()}`);
+    const baseUrl = force ? '/api/bulk/boltzgen/diversity/refresh' : '/api/bulk/boltzgen/diversity';
+    const res = await fetch(`${baseUrl}?${params.toString()}`, { method: force ? 'POST' : 'GET' });
     if (!res.ok) throw new Error('Unable to load diversity report');
     const data = await res.json();
     state.diversityCsv = data.csv_name || null;
@@ -1089,6 +1091,17 @@ async function refreshDiversity({ silent = false, page = null } = {}) {
     }
   } catch (err) {
     if (!silent) showAlert(err.message || String(err));
+  }
+}
+
+async function forceRefreshDiversity() {
+  const ok = window.confirm('Clear cached diversity plots and rebuild now? This can take a while.');
+  if (!ok) return;
+  if (el.diversityRebuild) el.diversityRebuild.disabled = true;
+  try {
+    await refreshDiversity({ silent: false, force: true });
+  } finally {
+    if (el.diversityRebuild) el.diversityRebuild.disabled = false;
   }
 }
 
@@ -3157,6 +3170,7 @@ function init() {
     el.boltzRegenerate.addEventListener('click', openRegenerateRangeModal);
   }
   if (el.diversityRefresh) el.diversityRefresh.addEventListener('click', () => refreshDiversity());
+  if (el.diversityRebuild) el.diversityRebuild.addEventListener('click', forceRefreshDiversity);
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzPlotDiversity) el.boltzPlotDiversity.addEventListener('click', () => plotBoltzAntigenDiversity());

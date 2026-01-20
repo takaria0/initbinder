@@ -1964,6 +1964,17 @@ def _write_diversity_cache(out_dir: Path, payload: dict) -> None:
         print(f"[boltzgen-diversity] warn: failed to write cache manifest: {exc}")
 
 
+def _clear_diversity_cache(out_dir: Path) -> None:
+    cache_paths = (_diversity_cache_path(out_dir), _binder_cache_path(out_dir))
+    for path in cache_paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            print(f"[boltzgen-diversity] warn: failed to remove cache {path}: {exc}")
+
+
 def _binder_cache_path(out_dir: Path) -> Path:
     return out_dir / _BINDER_CACHE_NAME
 
@@ -2925,6 +2936,7 @@ def build_boltzgen_diversity_report(
     binder_filter_pdb: Optional[str] = None,
     binder_filter_epitope: Optional[str] = None,
     binder_order_by: Optional[str] = None,
+    force_refresh: bool = False,
 ) -> BoltzgenDiversityResponse:
     """Aggregate BoltzGen metrics and render diversity plots."""
 
@@ -2939,22 +2951,26 @@ def build_boltzgen_diversity_report(
 
     out_dir = _output_dir()
     scan_result: Optional[Tuple[float, int]] = None
-    cache = _load_diversity_cache(out_dir)
-    if cache:
-        scan_result = _scan_boltzgen_sources(targets_dir)
-        if _diversity_cache_is_fresh(cache, scan_result[0], scan_result[1]):
-            cached = _response_from_diversity_cache(
-                cache,
-                out_dir,
-                include_binders=include_binders,
-                binder_page=binder_page,
-                binder_page_size=binder_page_size,
-                binder_filter_pdb=binder_filter_pdb,
-                binder_filter_epitope=binder_filter_epitope,
-                binder_order_by=binder_order_by,
-            )
-            if cached:
-                return cached
+    cache = None
+    if force_refresh:
+        _clear_diversity_cache(out_dir)
+    else:
+        cache = _load_diversity_cache(out_dir)
+        if cache:
+            scan_result = _scan_boltzgen_sources(targets_dir)
+            if _diversity_cache_is_fresh(cache, scan_result[0], scan_result[1]):
+                cached = _response_from_diversity_cache(
+                    cache,
+                    out_dir,
+                    include_binders=include_binders,
+                    binder_page=binder_page,
+                    binder_page_size=binder_page_size,
+                    binder_filter_pdb=binder_filter_pdb,
+                    binder_filter_epitope=binder_filter_epitope,
+                    binder_order_by=binder_order_by,
+                )
+                if cached:
+                    return cached
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     epitope_plot_specs: List[EpitopeDiversityPlotSpec] = []
@@ -3485,7 +3501,7 @@ def build_boltzgen_diversity_report(
                         ep_index = int(match.group(1))
                     except (TypeError, ValueError):
                         ep_index = None
-            label = f"#{row_idx}.{ep_index if ep_index is not None else '?'}"
+            label = f"#{pdb_id}.{ep_index if ep_index is not None else '?'}"
             epitope_points.append(
                 (
                     pdb_id,
@@ -3549,7 +3565,7 @@ def build_boltzgen_diversity_report(
             html_sections.insert(
                 0,
                 "<section><h2>1st percentile RMSD vs 99th percentile ipTM (one point per epitope, all targets)</h2>"
-                "<p>Dots labeled as #row.epitope_index from the target order in this report.</p>"
+                "<p>Dots labeled as #PDB_id.epitope_index.</p>"
                 f"<img alt='All targets epitope scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
             )
         except Exception as exc:

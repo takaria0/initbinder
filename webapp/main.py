@@ -923,6 +923,25 @@ async def api_boltzgen_diversity(
     )
 
 
+@app.post("/api/bulk/boltzgen/diversity/refresh", response_model=BoltzgenDiversityResponse)
+async def api_boltzgen_diversity_refresh(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=200),
+    filter_pdb: Optional[str] = Query(None),
+    filter_epitope: Optional[str] = Query(None),
+    order_by: Optional[str] = Query(None),
+) -> BoltzgenDiversityResponse:
+    return build_boltzgen_diversity_report(
+        include_binders=True,
+        binder_page=page,
+        binder_page_size=page_size,
+        binder_filter_pdb=filter_pdb,
+        binder_filter_epitope=filter_epitope,
+        binder_order_by=order_by,
+        force_refresh=True,
+    )
+
+
 @app.post("/api/bulk/boltzgen/antigen-diversity", response_model=AntigenDiversityResponse)
 async def api_boltzgen_antigen_diversity(
     payload: AntigenDiversityRequest,
