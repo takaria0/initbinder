@@ -59,7 +59,7 @@ def make_rfa_proteinmpnn_command(pdb_id: str, epitope: str, num_seq: int, temp: 
     ) or epitope
     ep_label = f"epitope_{ep_index}" if ep_index else ep_name_for_files
     name_sanitized = _sanitize_epitope_label(ep_label)
-    arm_dir   = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
+    arm_dir   = tdir/"designs"/"rfantibody"/name_sanitized/f"hs-{hotspot_variant}"
     # rfdiff_dir = arm_dir/"rfa_rfdiff"
     # mpnn_dir   = arm_dir/"rfa_mpnn"; _ensure_dir(mpnn_dir)
     run_tag = run_tag or os.environ.get("RUN_TAG") or ""

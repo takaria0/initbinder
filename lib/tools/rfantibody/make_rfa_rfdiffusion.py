@@ -17,6 +17,7 @@ from lib.scripts.pymol_utils import export_rfdiff_crop_bundle
 
 _EPITOPE_KEY_RE = re.compile(r"[^a-z0-9]+")
 _EPITOPE_LABEL_RE = re.compile(r"^epitope[\s_-]*(\d+)$", re.IGNORECASE)
+_HOTSPOT_TOKEN_RE = re.compile(r"^\s*([A-Za-z0-9]+)\s*[:_]?(-?\d+)\s*$")
 _RANGE_TOKEN_RE = re.compile(
     r"^\s*(?P<chain>[A-Za-z0-9]+)\s*[:_]\s*(?P<start>-?\d+)\s*(?:[-.]{1,2}\s*(?P<end>-?\d+))?\s*$"
 )
@@ -29,6 +30,17 @@ def _normalize_epitope_key(value: str) -> str:
 def _sanitize_epitope_label(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip())
     return text.strip("_") or "epitope"
+
+
+def _format_hotspot_for_rfdiff(token: str) -> str | None:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    match = _HOTSPOT_TOKEN_RE.match(text)
+    if not match:
+        return None
+    chain, resnum = match.groups()
+    return f"{chain}{int(resnum)}"
 
 
 def _resolve_epitope_entry(cfg: dict, epitope: str) -> tuple[dict | None, int | None]:
@@ -191,7 +203,7 @@ def make_rfa_rfdiffusion_command(
     ep_label = f"epitope_{ep_index}" if ep_index else ep_name_for_files
     name_sanitized = _sanitize_epitope_label(ep_label)
     file_sanitized = _sanitize_epitope_label(ep_name_for_files)
-    arm_dir = TARGETS_ROOT/pdb_id.upper()/"designs"/name_sanitized/f"hs-{hotspot_variant}"
+    arm_dir = TARGETS_ROOT/pdb_id.upper()/"designs"/"rfantibody"/name_sanitized/f"hs-{hotspot_variant}"
     run_tag = run_tag or os.environ.get("RUN_TAG") or ""
     run_dir = (arm_dir/"rfa_rfdiff"/f"run_{run_tag}") if run_tag else (arm_dir/"rfa_rfdiff")
     _ensure_dir(run_dir)
@@ -209,7 +221,13 @@ def make_rfa_rfdiffusion_command(
         raise RuntimeError(
             f"No hotspots found for epitope '{epitope}' in target.yaml (variant {hotspot_variant})."
         )
-    hotspots_str = ",".join(hotspots)
+    hotspots_rfdiff = []
+    for token in hotspots:
+        formatted = _format_hotspot_for_rfdiff(token)
+        if not formatted:
+            raise ValueError(f"Unsupported hotspot token for RFdiffusion: {token!r}")
+        hotspots_rfdiff.append(formatted)
+    hotspots_str = ",".join(hotspots_rfdiff)
 
     # Optional: crop target around hotspots
     target_pdb_for_inference = prep_pdb

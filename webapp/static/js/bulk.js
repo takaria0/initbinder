@@ -2617,8 +2617,8 @@ function buildRfaRunCommandText(pdbId, launcherPath) {
     `ssh ${sshTarget} "ls ${remoteRootClean}/slurm_logs | tail -n 5"`,
     '',
     '# 5) Pull results back (optional)',
-    `mkdir -p ${localTarget}/designs/`,
-    `rsync -az ${sshTarget}:${remoteTarget}/designs/ ${localTarget}/designs/`,
+    `mkdir -p ${localTarget}/designs/rfantibody/`,
+    `rsync -az ${sshTarget}:${remoteTarget}/designs/rfantibody/ ${localTarget}/designs`,
   ].filter(Boolean).join('\n');
 }
 
@@ -2683,8 +2683,8 @@ function buildRfaRunCommandsTextForTargets(entries = []) {
     if (!pdb) return;
     const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
     const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
-    lines.push(`mkdir -p ${localTarget}/designs/`);
-    lines.push(`rsync -az ${sshTarget}:${remoteTarget}/designs/ ${localTarget}/designs/`);
+    lines.push(`mkdir -p ${localTarget}/designs/rfantibody/`);
+    lines.push(`rsync -az ${sshTarget}:${remoteTarget}/designs/rfantibody/ ${localTarget}/designs`);
   });
 
   return lines.filter(Boolean).join('\n');

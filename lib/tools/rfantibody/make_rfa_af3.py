@@ -224,7 +224,7 @@ def make_rfa_af3_command(pdb_id: str, epitope: str, binder_chain_id: str = "H",
     ) or epitope
     ep_label = f"epitope_{ep_index}" if ep_index else ep_name_for_files
     name_sanitized = _sanitize_epitope_label(ep_label)
-    arm_dir = tdir/"designs"/name_sanitized/f"hs-{hotspot_variant}"
+    arm_dir = tdir/"designs"/"rfantibody"/name_sanitized/f"hs-{hotspot_variant}"
 
     # mpnn_dir = arm_dir/"rfa_mpnn"
     # input_pdbs = sorted(mpnn_dir.glob("*.pdb"))
