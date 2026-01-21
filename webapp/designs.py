@@ -398,15 +398,6 @@ class RFAntibodyEngine(DesignEngine):
                 run_label=run_label,
             )
 
-        if request.run_assess:
-            self._schedule_assessment_autosync(
-                cluster,
-                job_store,
-                job_id,
-                pdb_id=request.pdb_id,
-                run_label=run_label,
-            )
-
         job_store.update(
             job_id,
             status=JobStatus.SUCCESS,
@@ -695,116 +686,6 @@ class RFAntibodyEngine(DesignEngine):
             name=f"assess-rescue-{job_id}",
             daemon=True,
         ).start()
-
-    @classmethod
-    def _schedule_assessment_autosync(
-        cls,
-        cluster: ClusterClient,
-        job_store: JobStore,
-        job_id: str,
-        *,
-        pdb_id: str,
-        run_label: str,
-        interval_seconds: int = 120,
-        timeout_minutes: int = 360,
-    ) -> None:
-        """Poll the cluster until assessment outputs are ready, then sync them."""
-
-        run_label = (run_label or "").strip()
-        if not run_label:
-            return
-        if cluster.cfg.mock:
-            job_store.append_log(job_id, "[autosync] Mock cluster; skipping automatic assessment sync.")
-            return
-
-        interval_seconds = max(30, int(interval_seconds))
-        timeout_minutes = max(10, int(timeout_minutes))
-
-        def _poll() -> None:
-            start_ts = time.time()
-            last_message: Optional[str] = None
-            backoff = interval_seconds
-
-            while True:
-                try:
-                    job_store.get(job_id)
-                except KeyError:
-                    return
-
-                try:
-                    entries = cluster.list_remote_assessments(pdb_id)
-                except Exception as exc:  # pragma: no cover - defensive
-                    message = f"[autosync][warn] Unable to list remote assessments: {exc}"
-                    if message != last_message:
-                        job_store.append_log(job_id, message)
-                        last_message = message
-                    time.sleep(min(backoff, 300))
-                    backoff = min(backoff * 2, 300)
-                    continue
-
-                match = None
-                for entry in entries:
-                    label = str(entry.get("run_label") or "").strip()
-                    if label == run_label:
-                        match = entry
-                        break
-
-                if match and match.get("has_rankings"):
-                    job_store.append_log(
-                        job_id,
-                        f"[autosync] Found rankings for run {run_label}; syncing from cluster…",
-                    )
-                    try:
-                        result = cluster.sync_assessments_back(pdb_id, run_label=run_label)
-                    except Exception as exc:  # pragma: no cover - defensive
-                        job_store.append_log(job_id, f"[autosync][error] Sync failed: {exc}")
-                    else:
-                        if result.stdout:
-                            for line in result.stdout.splitlines():
-                                job_store.append_log(job_id, f"[autosync][stdout] {line}")
-                        if result.stderr:
-                            for line in result.stderr.splitlines():
-                                job_store.append_log(job_id, f"[autosync][stderr] {line}")
-                        if result.skipped:
-                            reason = ""
-                            if result.metadata and result.metadata.get("message"):
-                                reason = str(result.metadata["message"]) or ""
-                            elif result.stdout:
-                                reason = result.stdout.strip()
-                            if reason:
-                                job_store.append_log(job_id, f"[autosync] Sync skipped: {reason}")
-                            else:
-                                job_store.append_log(job_id, "[autosync] Sync skipped (no changes).")
-                        else:
-                            job_store.append_log(job_id, "[autosync] Assessment sync complete.")
-                    return
-
-                if match:
-                    message = (
-                        f"[autosync] Assessment run {run_label} detected; waiting for af3_rankings.tsv…"
-                    )
-                else:
-                    message = (
-                        f"[autosync] Waiting for assessment run {run_label} to appear on cluster…"
-                    )
-
-                if message != last_message:
-                    job_store.append_log(job_id, message)
-                    last_message = message
-
-                elapsed_minutes = (time.time() - start_ts) / 60.0
-                if elapsed_minutes >= timeout_minutes:
-                    job_store.append_log(
-                        job_id,
-                        f"[autosync] Gave up waiting for assessment outputs after {timeout_minutes} minutes.",
-                    )
-                    return
-
-                time.sleep(min(backoff, 300))
-                backoff = min(backoff * 2 if match else interval_seconds, 300)
-
-        threading.Thread(target=_poll, name=f"autosync-{job_id}", daemon=True).start()
-
 
 class BoltzGenEngine(DesignEngine):
     """BoltzGen diffusion-based binder design pipeline."""

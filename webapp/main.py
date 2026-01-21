@@ -37,7 +37,6 @@ from .models import (
     AssessmentRunRequest,
     AssessmentRunResponse,
     AssessmentRunSummary,
-    AssessmentSyncResponse,
     BoltzgenBinderPymolRequest,
     BoltzgenBinderPymolResponse,
     BoltzgenBinderResponse,
@@ -129,7 +128,6 @@ from .result_collectors import (
 )
 from .workflows import (
     submit_assessment_run,
-    submit_assessment_sync,
     submit_bulk_design_import,
     submit_bulk_run,
     submit_boltzgen_config_run,
@@ -1777,17 +1775,6 @@ async def api_pymol_gallery_movie(
         log_path=str(result.log_path) if result.log_path else None,
         message="PyMOL gallery movie rendered",
     )
-
-
-@app.post("/api/targets/{pdb_id}/sync", response_model=AssessmentSyncResponse)
-async def api_sync_assessments(pdb_id: str, run_label: str | None = None) -> AssessmentSyncResponse:
-    try:
-        job_id = submit_assessment_sync(pdb_id, run_label=run_label, job_store=store)
-    except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    target = run_label or "all assessments"
-    message = f"Syncing {target} from cluster"
-    return AssessmentSyncResponse(job_id=job_id, message=message, run_label=run_label)
 
 
 @app.post("/api/targets/{pdb_id}/assess", response_model=AssessmentRunResponse)

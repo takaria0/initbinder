@@ -921,7 +921,7 @@ function renderDiversityPlots(items = []) {
     const message = (state.diversityMessage || '').trim();
     empty.textContent =
       message ||
-      'No BoltzGen diversity plots yet. Download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs), then click Refresh.';
+      'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs). For RFAntibody, sync af3_rankings.tsv under targets/<PDB>/designs/rfantibody/_assessments/<run_label>/ (legacy: designs/_assessments), then click Refresh.';
     el.diversityGrid.appendChild(empty);
   }
   state.diversityPlots = list;

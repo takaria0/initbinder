@@ -464,69 +464,6 @@ def submit_assessment_run(request: AssessmentRunRequest, *, job_store: JobStore 
     return job.job_id
 
 
-def submit_assessment_sync(pdb_id: str, run_label: str | None = None,
-                           *, job_store: JobStore | None = None) -> str:
-    store = job_store or get_job_store(load_config().log_dir)
-    label = f"Sync assessments {pdb_id.upper()}"
-    if run_label:
-        label += f" ({run_label})"
-    details = {"pdb_id": pdb_id, "run_label": run_label}
-    job = store.create_job("assessment_sync", label, details=details)
-
-    def _run() -> None:
-        client = ClusterClient(log_hook=lambda line: store.append_log(job.job_id, line))
-        store.update(job.job_id, status=JobStatus.RUNNING, message="Syncing assessments from cluster")
-
-        base_rel = Path("targets") / pdb_id.upper() / "designs"
-        if run_label:
-            rel = base_rel / "_assessments" / run_label
-        else:
-            rel = base_rel
-        local_path = (client.local_root / rel).resolve()
-        remote_root = client.target_root or client.remote_root
-        remote_path = str(Path(remote_root) / rel) if remote_root else None
-
-        try:
-            result = client.sync_assessments_back(pdb_id, run_label=run_label)
-            if result.stdout:
-                for line in result.stdout.splitlines():
-                    store.append_log(job.job_id, line)
-            if result.stderr:
-                for line in result.stderr.splitlines():
-                    store.append_log(job.job_id, line)
-
-            skipped_reason = ""
-            skipped_code = ""
-            if result.metadata:
-                skipped_reason = str(result.metadata.get("message") or "").strip()
-                skipped_code = str(result.metadata.get("code") or "").strip()
-
-            message = "Assessments synced"
-            if result.skipped:
-                message = skipped_reason or "Assessments already synced"
-
-            store.update(
-                job.job_id,
-                status=JobStatus.SUCCESS,
-                message=message,
-                details={
-                    "pdb_id": pdb_id,
-                    "run_label": run_label,
-                    "local_path": str(local_path),
-                    "remote_path": str(remote_path) if remote_path else None,
-                    "skipped": result.skipped,
-                    "skipped_reason": skipped_reason or None,
-                    "skipped_code": skipped_code or None,
-                },
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
-
-    executor = _get_cluster_executor()
-    executor.submit(_run)
-    return job.job_id
-
-
 def submit_bulk_run(request: BulkRunRequest, *, job_store: JobStore | None = None) -> str:
     cfg = load_config()
     store = job_store or get_job_store(cfg.log_dir)
@@ -601,7 +538,6 @@ __all__ = [
     "submit_golden_gate_plan",
     "submit_target_generation",
     "submit_assessment_run",
-    "submit_assessment_sync",
     "submit_bulk_run",
     "submit_bulk_design_import",
     "submit_boltzgen_config_run",

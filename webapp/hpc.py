@@ -394,186 +394,19 @@ class ClusterClient:
         rel = Path("tools")
         result = self.rsync_push(local_dir, rel)
         # Ensure single-file entrypoints stay current on the cluster alongside tools.
-        for name in ("manage_rfa.py", "assess_rfa_design.py"):
+        for name in ("manage_rfa.py",):
             path = (self.local_root / name).resolve()
             if path.exists():
                 try:
                     self.rsync_push(path, Path(name), remote_base=self.remote_root)
                 except Exception as exc:
                     print(f"[cluster] warn: failed to sync {name}: {exc}", flush=True)
-        return result
-
-    def sync_assessments_back(self, pdb_id: str, run_label: Optional[str] = None) -> CommandResult:
-        base_rel = Path("targets") / pdb_id.upper() / "designs"
-        assessments_rel = base_rel / "_assessments"
-        base = self.target_root or self.remote_root
-        remote_base = Path(base) if base else None
-        if not remote_base:
-            raise RuntimeError("Neither target_root nor remote_root configured; cannot sync assessments")
-
-        def _has_rankings(path: Path) -> bool:
-            if not path.exists() or not path.is_dir():
-                return False
-            rankings = path / "af3_rankings.tsv"
-            if rankings.exists():
-                return True
+        assess_path = (self.local_root / "tools" / "assess_rfa_design.py").resolve()
+        if assess_path.exists():
             try:
-                next(path.iterdir())
-            except StopIteration:
-                return False
-            except FileNotFoundError:
-                return False
-            return False
-
-        if run_label:
-            rel = assessments_rel / run_label
-            local_dest = (self.local_root / rel).resolve()
-            if _has_rankings(local_dest):
-                message = f"Assessment {run_label} already synced locally at {local_dest}"
-                self._emit(
-                    f"[cluster] sync_assessments_back skip -> {message}",
-                    always_print=True,
-                )
-                return CommandResult(
-                    0,
-                    message,
-                    "",
-                    skipped=True,
-                    metadata={
-                        "code": "local-present",
-                        "message": message,
-                        "run_label": run_label,
-                        "pdb_id": pdb_id.upper(),
-                        "local_path": str(local_dest),
-                    },
-                )
-
-            remote_has_label: Optional[bool] = None
-            try:
-                remote_entries = self.list_remote_assessments(pdb_id)
-            except Exception:
-                remote_has_label = None
-            else:
-                for entry in remote_entries:
-                    label = str(entry.get("run_label") or "").strip()
-                    if label == run_label:
-                        remote_has_label = True
-                        break
-                else:
-                    remote_has_label = False
-
-            if remote_has_label is False:
-                message = (
-                    f"Assessment {run_label} not found on cluster yet for {pdb_id.upper()}."
-                    " It may still be running."
-                )
-                self._emit(
-                    f"[cluster] sync_assessments_back skip -> {message}",
-                    always_print=True,
-                )
-                return CommandResult(
-                    0,
-                    message,
-                    "",
-                    skipped=True,
-                    metadata={
-                        "code": "remote-missing",
-                        "message": message,
-                        "run_label": run_label,
-                        "pdb_id": pdb_id.upper(),
-                        "remote_path": str(remote_base / rel),
-                    },
-                )
-
-            self._emit(
-                f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
-                always_print=True,
-            )
-            try:
-                result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-            except RuntimeError as exc:
-                message_text = str(exc)
-                if "No such file or directory" in message_text or "change_dir" in message_text:
-                    message = (
-                        f"Assessment {run_label} not found on cluster yet for {pdb_id.upper()}."
-                        " It may still be running."
-                    )
-                    self._emit(
-                        f"[cluster] sync_assessments_back skip -> {message}",
-                        always_print=True,
-                    )
-                    return CommandResult(
-                        0,
-                        message,
-                        "",
-                        skipped=True,
-                        metadata={
-                            "code": "remote-missing",
-                            "message": message,
-                            "run_label": run_label,
-                            "pdb_id": pdb_id.upper(),
-                            "remote_path": str(remote_base / rel),
-                        },
-                    )
-                raise
-            self._emit(
-                f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
-                always_print=True,
-            )
-            return result
-
-        # No run_label provided: determine whether anything is missing locally.
-        local_assessments = (self.local_root / assessments_rel).resolve()
-        existing_labels: set[str] = set()
-        if local_assessments.exists():
-            for child in local_assessments.iterdir():
-                if child.is_dir() and _has_rankings(child):
-                    existing_labels.add(child.name)
-
-        missing_labels: list[str] = []
-        try:
-            remote_entries = self.list_remote_assessments(pdb_id)
-        except Exception as exc:
-            print(f"[cluster] sync_assessments_back warn: unable to list remote assessments: {exc}", flush=True)
-            remote_entries = []
-
-        for entry in remote_entries:
-            label = str(entry.get("run_label") or "").strip()
-            if not label:
-                continue
-            if label not in existing_labels:
-                missing_labels.append(label)
-
-        if remote_entries and not missing_labels:
-            message = f"All assessments already synced for {pdb_id.upper()}"
-            self._emit(
-                f"[cluster] sync_assessments_back skip -> {message}",
-                always_print=True,
-            )
-            return CommandResult(
-                0,
-                message,
-                "",
-                skipped=True,
-                metadata={
-                    "code": "up-to-date",
-                    "message": message,
-                    "pdb_id": pdb_id.upper(),
-                    "local_path": str(local_assessments),
-                },
-            )
-
-        rel = assessments_rel
-        local_dest = (self.local_root / rel).resolve()
-        self._emit(
-            f"[cluster] sync_assessments_back -> remote {remote_base / rel} to local {local_dest}",
-            always_print=True,
-        )
-        result = self.rsync_pull(rel, local_dest, remote_base=remote_base)
-        self._emit(
-            f"[cluster] sync_assessments_back completed with exit {result.exit_code}",
-            always_print=True,
-        )
+                self.rsync_push(assess_path, Path("tools") / assess_path.name, remote_base=self.remote_root)
+            except Exception as exc:
+                print(f"[cluster] warn: failed to sync tools/{assess_path.name}: {exc}", flush=True)
         return result
 
     def sync_boltzgen_results(self, pdb_id: str, run_label: Optional[str] = None) -> CommandResult:
@@ -601,38 +434,63 @@ class ClusterClient:
     def list_remote_assessments(self, pdb_id: str) -> list[dict[str, object]]:
         remote_root = self.target_root or self.remote_root
         if self.cfg.mock:
-            base = (self._mock_root / "targets" / pdb_id.upper() / "designs" / "_assessments").resolve()
-            entries: list[dict[str, object]] = []
-            if not base.exists():
-                return entries
-            for child in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-                if not child.is_dir():
+            base_root = (self._mock_root / "targets" / pdb_id.upper() / "designs").resolve()
+            candidates = [
+                ("rfantibody", base_root / "rfantibody" / "_assessments"),
+                ("legacy", base_root / "_assessments"),
+            ]
+            merged: dict[str, dict[str, object]] = {}
+            for source, base in candidates:
+                if not base.exists():
                     continue
-                stat = child.stat()
-                rankings_path = child / "af3_rankings.tsv"
-                entries.append(
-                    {
+                rel_base = base.relative_to(self._mock_root)
+                for child in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                    if not child.is_dir():
+                        continue
+                    stat = child.stat()
+                    rankings_path = child / "af3_rankings.tsv"
+                    entry = {
                         "run_label": child.name,
                         "updated_at": stat.st_mtime,
                         "has_rankings": rankings_path.exists(),
                         "remote_path": str(child),
+                        "rel": str(rel_base / child.name),
+                        "source": source,
                     }
-                )
+                    current = merged.get(child.name)
+                    if current is None:
+                        merged[child.name] = entry
+                    else:
+                        if entry["has_rankings"] and not current.get("has_rankings"):
+                            merged[child.name] = entry
+                        elif entry["updated_at"] > current.get("updated_at", 0):
+                            merged[child.name] = entry
+            entries = list(merged.values())
+            entries.sort(key=lambda e: float(e.get("updated_at") or 0.0), reverse=True)
             return entries
 
         if remote_root is None:
             raise RuntimeError("Cluster remote_root/target_root not configured; cannot list assessments")
 
-        remote_rel = Path("targets") / pdb_id.upper() / "designs" / "_assessments"
-        remote_path = Path(remote_root) / remote_rel
+        design_rel = Path("targets") / pdb_id.upper() / "designs"
+        remote_root_path = Path(remote_root)
+        remote_rel_legacy = design_rel / "_assessments"
+        remote_rel_rfa = design_rel / "rfantibody" / "_assessments"
+        remote_path_legacy = remote_root_path / remote_rel_legacy
+        remote_path_rfa = remote_root_path / remote_rel_rfa
         script = textwrap.dedent(
             f"""
             python - <<'PY'
 import json
 from pathlib import Path
-base = Path({str(remote_path)!r})
-entries = []
-if base.exists():
+candidates = [
+    ("rfantibody", Path({str(remote_path_rfa)!r}), Path({str(remote_rel_rfa)!r})),
+    ("legacy", Path({str(remote_path_legacy)!r}), Path({str(remote_rel_legacy)!r})),
+]
+merged = {{}}
+for source, base, rel_base in candidates:
+    if not base.exists():
+        continue
     items = sorted(
         (p for p in base.iterdir() if p.is_dir()),
         key=lambda p: p.stat().st_mtime,
@@ -641,12 +499,24 @@ if base.exists():
     for item in items:
         stat = item.stat()
         rankings = item / "af3_rankings.tsv"
-        entries.append({{
+        entry = {{
             "run_label": item.name,
             "updated_at": stat.st_mtime,
             "has_rankings": rankings.exists(),
             "remote_path": str(item),
-        }})
+            "rel": str(rel_base / item.name),
+            "source": source,
+        }}
+        current = merged.get(item.name)
+        if current is None:
+            merged[item.name] = entry
+        else:
+            if entry["has_rankings"] and not current.get("has_rankings"):
+                merged[item.name] = entry
+            elif entry["updated_at"] > current.get("updated_at", 0):
+                merged[item.name] = entry
+entries = list(merged.values())
+entries.sort(key=lambda e: float(e.get("updated_at") or 0.0), reverse=True)
 print(json.dumps(entries))
 PY
             """

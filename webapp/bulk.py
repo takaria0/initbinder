@@ -13,6 +13,8 @@ import base64
 import traceback
 import statistics
 import math
+import sys
+import subprocess
 import importlib.util
 from functools import lru_cache
 from difflib import SequenceMatcher
@@ -2444,7 +2446,7 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
-_DIVERSITY_CACHE_VERSION = 2
+_DIVERSITY_CACHE_VERSION = 3
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
 _BINDER_CACHE_VERSION = 4
 _DIVERSITY_SOURCE_FILES = (
@@ -2452,6 +2454,7 @@ _DIVERSITY_SOURCE_FILES = (
     "epitope_stats.json",
     "boltzgen_config.yaml",
     "target.yaml",
+    "af3_rankings.tsv",
 )
 
 
@@ -2780,7 +2783,7 @@ def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
         return latest_mtime, count
     for root, _, files in os.walk(targets_dir):
         for name in files:
-            if name not in _DIVERSITY_SOURCE_FILES:
+            if name not in _DIVERSITY_SOURCE_FILES and not name.startswith("af3_rankings"):
                 continue
             path = Path(root) / name
             try:
@@ -2791,6 +2794,125 @@ def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
             if mtime > latest_mtime:
                 latest_mtime = mtime
     return latest_mtime, count
+
+
+def _maybe_run_rfa_assessments(
+    targets_dir: Path,
+    *,
+    log: Callable[[str], None] = print,
+) -> None:
+    cfg = load_config()
+    project_root = cfg.paths.project_root or Path.cwd()
+    assess_script = Path(project_root) / "tools" / "assess_rfa_design.py"
+    if not assess_script.exists():
+        log(f"[rfa-assess] missing tool: {assess_script}")
+        return
+    binder_chain = (cfg.cluster.rfantibody.binder_chain_id or "H").strip().upper() or "H"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    for pdb_dir in sorted(targets_dir.iterdir()):
+        if not pdb_dir.is_dir():
+            continue
+        pdb_id = pdb_dir.name.upper()
+        designs_root = pdb_dir / "designs"
+        rfa_root = designs_root / "rfantibody"
+        scan_root = rfa_root if rfa_root.exists() else designs_root
+        if not scan_root.exists():
+            continue
+        try:
+            has_af3 = any(scan_root.rglob("*_model.cif"))
+        except OSError:
+            has_af3 = False
+        if not has_af3:
+            continue
+
+        assess_roots = []
+        for root in (rfa_root / "_assessments", designs_root / "_assessments"):
+            if root.exists():
+                assess_roots.append(root)
+        has_rankings = False
+        for root in assess_roots:
+            if any(root.rglob("af3_rankings.tsv")):
+                has_rankings = True
+                break
+        if has_rankings:
+            continue
+
+        run_label = f"auto_{timestamp}"
+        cmd = [
+            sys.executable,
+            str(assess_script),
+            pdb_id,
+            "--binder_chain",
+            binder_chain,
+            "--run_label",
+            run_label,
+            "--skip_pml",
+            "--skip_seq",
+        ]
+        log(f"[rfa-assess] running {pdb_id} -> {run_label}")
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            log(f"[rfa-assess] failed for {pdb_id} (exit {res.returncode})")
+            if res.stdout.strip():
+                log(res.stdout.strip())
+            if res.stderr.strip():
+                log(res.stderr.strip())
+
+
+def _collect_rfa_scatter_metrics(
+    targets_dir: Path,
+) -> tuple[Dict[str, Dict[str, Dict[str, List[float]]]], Dict[str, str]]:
+    metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(
+        lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
+    )
+    run_labels: Dict[str, str] = {}
+    if not targets_dir.exists():
+        return metrics, run_labels
+
+    for pdb_dir in sorted(targets_dir.iterdir()):
+        if not pdb_dir.is_dir():
+            continue
+        pdb_id = pdb_dir.name.upper()
+        designs_root = pdb_dir / "designs"
+        assess_roots = []
+        rfa_assess = designs_root / "rfantibody" / "_assessments"
+        legacy_assess = designs_root / "_assessments"
+        if rfa_assess.exists():
+            assess_roots.append(rfa_assess)
+        if legacy_assess.exists():
+            assess_roots.append(legacy_assess)
+        if not assess_roots:
+            continue
+        ranking_files = []
+        for root in assess_roots:
+            ranking_files.extend(root.glob("*/af3_rankings.tsv"))
+        ranking_files = sorted(
+            ranking_files,
+            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+        )
+        if not ranking_files:
+            continue
+        latest = ranking_files[-1]
+        run_labels[pdb_id] = latest.parent.name
+        try:
+            with latest.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                for row in reader:
+                    ep_name = (row.get("epitope") or row.get("arm") or "").strip() or "unknown"
+                    iptm_val = _safe_float(row.get("af3_iptm"))
+                    rmsd_val = _safe_float(row.get("rmsd_binder_prepared_frame"))
+                    if iptm_val is None or rmsd_val is None:
+                        continue
+                    metrics[pdb_id][ep_name]["iptm"].append(float(iptm_val))
+                    metrics[pdb_id][ep_name]["rmsd"].append(float(rmsd_val))
+                    metrics[pdb_id][ep_name]["pairs"].append((float(iptm_val), float(rmsd_val)))
+        except Exception as exc:
+            print(f"[rfa-diversity] failed to read {latest}: {exc}")
+            traceback.print_exc()
+            continue
+
+    return metrics, run_labels
 
 
 def _diversity_cache_is_fresh(cache: dict, latest_mtime: float, source_count: int) -> bool:
@@ -3469,6 +3591,7 @@ def build_boltzgen_diversity_report(
     cache = None
     if force_refresh:
         _clear_diversity_cache(out_dir)
+        _maybe_run_rfa_assessments(targets_dir, log=print)
     else:
         cache = _load_diversity_cache(out_dir)
         if cache:
@@ -3503,6 +3626,8 @@ def build_boltzgen_diversity_report(
     metrics: Dict[str, Dict[str, Dict[str, List[object]]]] = defaultdict(
         lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
     )
+    rfa_metrics, rfa_run_labels = _collect_rfa_scatter_metrics(targets_dir)
+    has_rfa_metrics = any(rfa_metrics.values())
     seen_metrics: set[str] = set()
     metrics_files: List[Dict[str, str]] = []
     epitope_residues: Dict[str, Dict[str, str]] = defaultdict(dict)
@@ -3706,7 +3831,7 @@ def build_boltzgen_diversity_report(
                 print(exc)
 
     binder_counts: Dict[str, int] = {}
-    if not aggregate_rows:
+    if not aggregate_rows and not has_rfa_metrics:
         source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
         if metrics_files:
             message = (
@@ -3736,36 +3861,38 @@ def build_boltzgen_diversity_report(
         })
         return response
 
-    for row in aggregate_rows:
-        pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
-        if not pdb_val:
-            continue
-        binder_counts[pdb_val] = binder_counts.get(pdb_val, 0) + 1
+    csv_path: Path | None = None
+    if aggregate_rows:
+        for row in aggregate_rows:
+            pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
+            if not pdb_val:
+                continue
+            binder_counts[pdb_val] = binder_counts.get(pdb_val, 0) + 1
 
-    all_keys: List[str] = []
-    seen_keys: set[str] = set()
-    extra_cols = ["PDB_ID", "epitope_name", "datetime", "source_path"]
-    for col in extra_cols:
-        all_keys.append(col)
-        seen_keys.add(col)
-    for row in aggregate_rows:
-        for key in row.keys():
-            if key not in seen_keys:
-                all_keys.append(key)
-                seen_keys.add(key)
+        all_keys: List[str] = []
+        seen_keys: set[str] = set()
+        extra_cols = ["PDB_ID", "epitope_name", "datetime", "source_path"]
+        for col in extra_cols:
+            all_keys.append(col)
+            seen_keys.add(col)
+        for row in aggregate_rows:
+            for key in row.keys():
+                if key not in seen_keys:
+                    all_keys.append(key)
+                    seen_keys.add(key)
 
-    csv_path = out_dir / f"boltzgen_design_metrics_{timestamp}.csv"
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=all_keys)
-        writer.writeheader()
-        writer.writerows(aggregate_rows)
+        csv_path = out_dir / f"boltzgen_design_metrics_{timestamp}.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=all_keys)
+            writer.writeheader()
+            writer.writerows(aggregate_rows)
 
     page_val = max(1, int(binder_page or 1))
     page_size_val = min(200, max(1, int(binder_page_size or 100)))
     binder_rows: List[BoltzgenBinderRow] = []
     binder_total = 0
     binder_msg: Optional[str] = None
-    if include_binders:
+    if include_binders and csv_path:
         binder_ids = sorted({entry.get("pdb_id", "").strip().upper() for entry in metrics_files if entry.get("pdb_id")})
         binder_rows, binder_total = _get_cached_binder_rows(
             csv_path,
@@ -3794,10 +3921,18 @@ def build_boltzgen_diversity_report(
         print(exc)
         traceback.print_exc()
         source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+        csv_name = csv_path.name if csv_path else None
+        if aggregate_rows and has_rfa_metrics:
+            message = (
+                f"Generated BoltzGen CSV ({len(aggregate_rows)} rows); "
+                f"RFA scatter plots skipped (matplotlib unavailable)."
+            )
+        else:
+            message = "Matplotlib unavailable; generated CSV only." if aggregate_rows else "Matplotlib unavailable."
         response = BoltzgenDiversityResponse(
-            csv_name=csv_path.name,
+            csv_name=csv_name,
             metrics_files=metrics_files,
-            message="Matplotlib unavailable; generated CSV only.",
+            message=message,
             output_dir=str(out_dir),
             plots=plot_entries,
             binder_rows=binder_rows,
@@ -3808,12 +3943,12 @@ def build_boltzgen_diversity_report(
             binder_counts=binder_counts,
         )
         _write_diversity_cache(out_dir, {
-            "csv_name": csv_path.name,
+            "csv_name": csv_name,
             "html_name": None,
             "output_dir": str(out_dir),
             "plots": [plot.dict() for plot in plot_entries],
             "metrics_files": metrics_files,
-            "message": "Matplotlib unavailable; generated CSV only.",
+            "message": message,
             "binder_counts": binder_counts,
             "source_mtime": source_mtime,
             "source_count": source_count,
@@ -3995,6 +4130,78 @@ def build_boltzgen_diversity_report(
                     len(all_rmsd),
                 )
             )
+
+    # RFAntibody scatter plots (af3_rankings.tsv)
+    for pdb_id, ep_data in rfa_metrics.items():
+        ep_names = sorted(ep_data.keys())
+        if not ep_names:
+            continue
+        color_map = {
+            name: mcolors.to_hex(cmap(idx / max(1, len(ep_names)))) for idx, name in enumerate(ep_names)
+        }
+        scatter_pairs = {
+            name: [(x, y) for x, y in (ep_data[name].get("pairs") or []) if x is not None and y is not None]
+            for name in ep_names
+        }
+        design_counts = {name: len(scatter_pairs.get(name) or []) for name in ep_names}
+        if not any(scatter_pairs.values()):
+            continue
+        fig_scatter, ax = plt.subplots(1, 1, figsize=(6, 6))
+        for name in ep_names:
+            pairs = scatter_pairs.get(name) or []
+            if not pairs:
+                continue
+            xs = [float(y) for _, y in pairs]  # RMSD on x-axis
+            ys = [float(x) for x, _ in pairs]  # ipTM on y-axis
+            label = f"{name} (n={design_counts.get(name, 0)})"
+            ax.scatter(xs, ys, s=14, alpha=0.7, color=color_map[name], label=label, edgecolors="none")
+        run_label = rfa_run_labels.get(pdb_id)
+        label_suffix = f" · {run_label}" if run_label else ""
+        ax.set_title(f"{pdb_id} RFAntibody RMSD vs ipTM{label_suffix}", fontsize=11, fontweight="semibold")
+        ax.set_xlabel("RMSD (Å)")
+        ax.set_ylabel("ipTM")
+        ax.set_xlim(left=0.0)
+        ax.set_ylim(0.0, 1.0)
+        _style_scatter(ax)
+        ax.legend(loc="best", fontsize=8, frameon=False)
+        plt.tight_layout()
+
+        scatter_png = out_dir / f"rfantibody_scatter_{pdb_id}_{timestamp}.png"
+        scatter_svg = out_dir / f"rfantibody_scatter_{pdb_id}_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_scatter.savefig(scatter_png, dpi=200)
+            fig_scatter.savefig(scatter_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(f"[rfa-diversity] failed to save scatter plot for {pdb_id}: {scatter_png} / {scatter_svg}")
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_scatter)
+
+        if saved_ok:
+            plot_entries.append(
+                BoltzgenDiversityPlot(
+                    pdb_id=f"{pdb_id} rfantibody scatter",
+                    png_name=scatter_png.name,
+                    png_path=str(scatter_png),
+                    svg_name=scatter_svg.name,
+                    svg_path=str(scatter_svg),
+                    epitope_colors=color_map,
+                )
+            )
+            try:
+                encoded = base64.b64encode(scatter_png.read_bytes()).decode("ascii")
+                html_sections.append(
+                    f"<section><h2>{pdb_id} RFAntibody scatter</h2>"
+                    f"<p>ipTM vs RMSD from af3_rankings.tsv{label_suffix}.</p>"
+                    + f"<img alt='{pdb_id} rfantibody scatter' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+                )
+            except Exception as exc:
+                print(f"[rfa-diversity] failed to embed scatter into HTML: {scatter_png}")
+                print(exc)
+                traceback.print_exc()
 
     top_inserted = 0
     # Scatter across all targets: per-epitope 1st percentile RMSD vs 99th percentile ipTM.
@@ -4271,14 +4478,20 @@ def build_boltzgen_diversity_report(
             traceback.print_exc()
 
     html_path = out_dir / f"boltzgen_diversity_{timestamp}.html"
+    report_title = "Binder diversity"
+    report_summary = (
+        "Aggregated metrics across targets and epitopes from BoltzGen runs."
+        if not has_rfa_metrics
+        else "Aggregated metrics across targets and epitopes from BoltzGen and RFAntibody runs."
+    )
     html_content = "\n".join(
         [
             "<!doctype html>",
-            "<html><head><meta charset='utf-8'><title>BoltzGen binder diversity</title>",
+            f"<html><head><meta charset='utf-8'><title>{report_title}</title>",
             "<style>body{font-family:Inter,system-ui,sans-serif;padding:20px;}h1{margin-top:0;}section{margin-bottom:24px;}img{border:1px solid #e2e8f0;border-radius:8px;padding:6px;background:#f8fafc;}</style>",
             "</head><body>",
-            "<h1>BoltzGen binder diversity</h1>",
-            "<p>Aggregated metrics across targets and epitopes. PNG and SVG files are available alongside this HTML.</p>",
+            f"<h1>{report_title}</h1>",
+            f"<p>{report_summary} PNG and SVG files are available alongside this HTML.</p>",
             "<section><h2>How epitopes and hotspots are selected</h2>",
             "<p><strong>Epitopes</strong> come from the prep pipeline (decide-scope) and are stored under "
             "<code>targets/&lt;PDB&gt;/prep/epitopes_metadata.json</code>. When that metadata is missing, "
@@ -4298,9 +4511,22 @@ def build_boltzgen_diversity_report(
     )
     html_path.write_text(html_content, encoding="utf-8")
     source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
-    message = f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets."
+    rfa_designs = sum(
+        len(ep_vals.get("pairs") or [])
+        for target_vals in rfa_metrics.values()
+        for ep_vals in target_vals.values()
+    )
+    if aggregate_rows and has_rfa_metrics:
+        message = (
+            f"Aggregated {len(aggregate_rows)} BoltzGen designs across {len(metrics)} targets; "
+            f"{rfa_designs} RFA designs across {len(rfa_metrics)} targets."
+        )
+    elif aggregate_rows:
+        message = f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets."
+    else:
+        message = f"Plotted {rfa_designs} RFA designs across {len(rfa_metrics)} targets."
     response = BoltzgenDiversityResponse(
-        csv_name=csv_path.name,
+        csv_name=csv_path.name if csv_path else None,
         output_dir=str(out_dir),
         html_name=html_path.name,
         plots=plot_entries,
@@ -4314,7 +4540,7 @@ def build_boltzgen_diversity_report(
         binder_counts=binder_counts,
     )
     _write_diversity_cache(out_dir, {
-        "csv_name": csv_path.name,
+        "csv_name": csv_path.name if csv_path else None,
         "html_name": html_path.name,
         "output_dir": str(out_dir),
         "plots": [plot.dict() for plot in plot_entries],

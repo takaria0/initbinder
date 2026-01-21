@@ -439,7 +439,7 @@ import csv
 from collections import defaultdict
 import numpy as np
 
-import subprocess, shlex, time
+import subprocess, shlex, time, sys
 
 
 ASSESS_CONDA_ACTIVATE = os.environ.get(
@@ -1273,19 +1273,48 @@ def main():
         else:
             if args.shard_mod > 1 and not args.merge_only and args.shard_idx is None:
                 raise ValueError("--shard_idx is required when --shard_mod > 1 (unless using --merge_only)")
-            # assess_rfa_all(
-            #     args.pdb,
-            #     binder_chain_id=args.binder_chain_id,
-            #     seed=args.seed,
-            #     sample_idx=args.sample_idx,
-            #     run_label=args.run_label,
-            #     skip_pml=args.skip_pml,
-            #     skip_seq=args.skip_seq,
-            #     include_keyword=include_kw,
-            #     shard_mod=max(1, args.shard_mod),
-            #     shard_idx=args.shard_idx,
-            #     merge_only=args.merge_only,
-            # )
+            assess_py = ROOT / "tools" / "assess_rfa_design.py"
+            if not assess_py.exists():
+                raise FileNotFoundError(f"Missing assessment tool: {assess_py}")
+
+            cmd = [
+                sys.executable,
+                str(assess_py),
+                args.pdb,
+                "--binder_chain",
+                args.binder_chain_id,
+            ]
+            if args.seed is not None:
+                cmd.extend(["--seed", str(args.seed)])
+            if args.sample_idx is not None:
+                cmd.extend(["--sample", str(args.sample_idx)])
+            if args.run_label:
+                cmd.extend(["--run_label", str(args.run_label)])
+            if include_kw:
+                tokens = [t for t in re.split(r"[,\s]+", include_kw) if t]
+                cmd.extend(["--include_keyword", *tokens])
+            if args.skip_pml:
+                cmd.append("--skip_pml")
+            if args.skip_seq:
+                cmd.append("--skip_seq")
+            if args.shard_mod:
+                cmd.extend(["--shard_mod", str(max(1, args.shard_mod))])
+            if args.shard_idx is not None:
+                cmd.extend(["--shard_idx", str(args.shard_idx)])
+            if args.merge_only:
+                cmd.append("--merge_only")
+
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                if res.stdout:
+                    print(res.stdout)
+                if res.stderr:
+                    print(res.stderr)
+                raise RuntimeError(f"assess-rfa-all failed (exit {res.returncode})")
+            if res.stdout.strip():
+                print(res.stdout.strip())
+            if res.stderr.strip():
+                print(res.stderr.strip())
 
     elif args.cmd == "report-scope":
         pass

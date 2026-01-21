@@ -99,21 +99,39 @@ def _discover_assessment_dir(pdb_id: str, run_label: Optional[str]) -> Tuple[Pat
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     pdb_dir = (targets_dir / pdb_id.upper()).resolve()
     designs_dir = pdb_dir / "designs"
-    assessments_dir = designs_dir / "_assessments"
-    if not assessments_dir.exists():
-        raise RankingsNotFoundError(f"Assessments directory missing: {assessments_dir}")
+    assessment_roots = [
+        designs_dir / "rfantibody" / "_assessments",
+        designs_dir / "_assessments",
+    ]
 
     if run_label:
-        candidate = assessments_dir / run_label
-        if not candidate.exists():
-            raise RankingsNotFoundError(f"Assessment run '{run_label}' not found under {assessments_dir}")
-        return candidate, run_label
+        for root in assessment_roots:
+            candidate = root / run_label
+            if candidate.exists():
+                return candidate, run_label
+        roots_text = ", ".join(str(root) for root in assessment_roots)
+        raise RankingsNotFoundError(f"Assessment run '{run_label}' not found under {roots_text}")
 
-    runs = [p for p in assessments_dir.iterdir() if p.is_dir()]
+    runs: List[Tuple[bool, float, Path]] = []
+    for root in assessment_roots:
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            has_rankings = (path / "af3_rankings.tsv").exists()
+            runs.append((has_rankings, mtime, path))
+
     if not runs:
-        raise RankingsNotFoundError(f"No assessment runs found under {assessments_dir}")
-    runs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    selected = runs[0]
+        roots_text = ", ".join(str(root) for root in assessment_roots)
+        raise RankingsNotFoundError(f"No assessment runs found under {roots_text}")
+
+    runs.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = runs[0][2]
     return selected, selected.name
 
 
@@ -211,22 +229,24 @@ def list_assessment_runs(pdb_id: str) -> List[AssessmentRunSummary]:
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     pdb_dir = (targets_dir / pdb_id.upper()).resolve()
-    assessments_dir = pdb_dir / "designs" / "_assessments"
-    if not assessments_dir.exists():
-        return []
-
-    runs: List[AssessmentRunSummary] = []
-    for path in assessments_dir.iterdir():
-        if not path.is_dir():
+    assessment_roots = [
+        pdb_dir / "designs" / "rfantibody" / "_assessments",
+        pdb_dir / "designs" / "_assessments",
+    ]
+    merged: Dict[str, AssessmentRunSummary] = {}
+    for root in assessment_roots:
+        if not root.exists():
             continue
-        try:
-            mtime = path.stat().st_mtime
-        except FileNotFoundError:
-            continue
-        rankings_path = path / "af3_rankings.tsv"
-        has_rankings = rankings_path.exists()
-        runs.append(
-            AssessmentRunSummary(
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            rankings_path = path / "af3_rankings.tsv"
+            has_rankings = rankings_path.exists()
+            entry = AssessmentRunSummary(
                 run_label=path.name,
                 updated_at=mtime,
                 rankings_path=str(rankings_path) if has_rankings else None,
@@ -236,8 +256,17 @@ def list_assessment_runs(pdb_id: str) -> List[AssessmentRunSummary]:
                 local_path=str(path),
                 origin="local",
             )
-        )
+            current = merged.get(path.name)
+            if current is None:
+                merged[path.name] = entry
+            else:
+                current_has_rankings = bool(current.rankings_path)
+                if has_rankings and not current_has_rankings:
+                    merged[path.name] = entry
+                elif has_rankings == current_has_rankings and mtime > current.updated_at:
+                    merged[path.name] = entry
 
+    runs = list(merged.values())
     runs.sort(key=lambda item: item.updated_at, reverse=True)
     return runs
 
