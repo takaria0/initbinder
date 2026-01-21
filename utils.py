@@ -1,7 +1,7 @@
 # utils.py
 from __future__ import annotations
 from collections import defaultdict, deque
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Iterable, Optional
 import math, statistics as stats, datetime, json
 import yaml
 from pathlib import Path
@@ -944,6 +944,114 @@ def crop_pdb_by_hotspots(
         "keep_glycans": bool(keep_glycans),
         "hotspots": list(hotspot_keys),
         "selected_keys": sorted({key_str(r) for r in selected_with_het}),
+    }
+    map_path = out_path.with_suffix(".json")
+    map_path.write_text(json.dumps(mapping, indent=2))
+    return {"out_path": out_path, **mapping}
+
+
+def crop_pdb_by_hotspots_radius(
+    pdb_path: Path,
+    hotspot_keys: list[str],
+    *,
+    radius_A: float = 14.0,
+    allowed_chains: Optional[Iterable[str]] = None,
+    out_path: Path | None = None,
+) -> dict:
+    """
+    Create a cropped PDB around hotspot residues using heavy-atom radius only.
+    - Keeps author residue numbering and chain IDs
+    - Includes residues within `radius_A` heavy-atom distance
+    - Only includes standard residues (no HETATMs)
+    - Optional chain filter (allowed_chains)
+    Returns dict with keys: out_path, selected_keys (list of 'Chain:SeqIcode' strings)
+    """
+    pdb_path = Path(pdb_path)
+    if out_path is None:
+        out_path = pdb_path.with_name(pdb_path.stem + "_crop.pdb")
+    allowed_upper = {str(c).strip().upper() for c in (allowed_chains or []) if str(c).strip()}
+    allowed_upper = allowed_upper or None
+
+    parser = PDBParser(QUIET=True)
+    s = parser.get_structure("crop", str(pdb_path))
+    model = s[0]
+
+    # Map from (chain, (' ', seqid, icode)) -> residue object and heavy atoms list
+    res_index = {}
+    heavy_atoms = []
+    for chain in model:
+        chain_id = str(chain.id).strip()
+        if not chain_id:
+            continue
+        if allowed_upper and chain_id.upper() not in allowed_upper:
+            continue
+        for res in chain:
+            if res.id[0] != " ":
+                continue
+            key = (chain.id, res.id)
+            res_index[key] = res
+            for atom in res.get_atoms():
+                elem = str(getattr(atom, "element", "")).strip().upper()
+                if elem.startswith("H") or elem == "D":
+                    continue
+                heavy_atoms.append(atom)
+
+    if not heavy_atoms:
+        raise ValueError(f"No heavy atoms found in {pdb_path.name} for crop.")
+
+    # Resolve hotspots to residue objects
+    hotspot_res = []
+    for k in hotspot_keys:
+        chain_id, rid = _parse_hotspot_key(k)
+        if allowed_upper and chain_id.upper() not in allowed_upper:
+            raise KeyError(f"Hotspot {k} not in allowed chains for crop.")
+        try:
+            hotspot_res.append(res_index[(chain_id, rid)])
+        except KeyError:
+            raise KeyError(f"Hotspot {k} not found in {pdb_path.name}")
+
+    if not hotspot_res:
+        raise ValueError("No hotspot residues resolved; cannot crop.")
+
+    ns = NeighborSearch(heavy_atoms)
+    selected = set(hotspot_res)
+
+    hotspot_atoms = [
+        a for r in hotspot_res for a in r.get_atoms()
+        if str(getattr(a, "element", "")).strip().upper() not in {"H", "D"}
+    ]
+    for ha in hotspot_atoms:
+        for atom in ns.search(ha.coord, radius_A):
+            pr = atom.get_parent()
+            if pr.id[0] != " ":
+                continue
+            selected.add(pr)
+
+    from Bio.PDB.PDBIO import Select
+
+    class SelectMask(Select):
+        def accept_residue(self, residue):
+            if residue.id[0] != " ":
+                return False
+            return residue in selected
+
+    io = PDBIO()
+    io.set_structure(s)
+    io.save(str(out_path), select=SelectMask())
+
+    def key_str(res):
+        ch = res.get_parent().id
+        idt = res.id
+        icode = idt[2] if isinstance(idt, tuple) else " "
+        return f"{ch}:{idt[1]}{icode if icode.strip() else ''}"
+
+    mapping = {
+        "source_pdb": str(pdb_path),
+        "out_pdb": str(out_path),
+        "radius_A": float(radius_A),
+        "allowed_chains": sorted(allowed_upper) if allowed_upper else None,
+        "hotspots": list(hotspot_keys),
+        "selected_keys": sorted({key_str(r) for r in selected}),
     }
     map_path = out_path.with_suffix(".json")
     map_path.write_text(json.dumps(mapping, indent=2))

@@ -634,7 +634,10 @@ def launch_boltzgen_top_binders(
     return script_path, launched
 
 
-def _selection_from_labels(binding_label: Optional[str], include_label: Optional[str]) -> Optional[str]:
+def _selection_map_from_labels(
+    binding_label: Optional[str],
+    include_label: Optional[str],
+) -> Dict[str, str]:
     tokens: list[str] = []
     for raw in (binding_label, include_label):
         if not raw:
@@ -644,31 +647,43 @@ def _selection_from_labels(binding_label: Optional[str], include_label: Optional
         elif isinstance(raw, (list, tuple, set)):
             tokens.extend([str(tok).strip() for tok in raw if str(tok).strip()])
     if not tokens:
-        return None
+        return {}
 
-    try:
-        mapping = BoltzGenEngine._expand_epitope_residues(tokens)
-    except Exception:
-        return None
-
-    selectors: list[str] = []
-    for chain, residues in mapping.items():
-        if not residues:
+    mapping: Dict[str, List[str]] = {}
+    for token in tokens:
+        if ":" not in token:
             continue
-        cleaned: list[int] = []
-        for res in residues:
-            try:
-                cleaned.append(int(float(res)))
-            except (TypeError, ValueError):
+        chain, rest = token.split(":", 1)
+        chain = chain.strip().upper()
+        if not chain or not rest:
+            continue
+        parts = [p.strip() for p in rest.split(",") if p.strip()]
+        cleaned_parts = [p.replace("..", "-") for p in parts if p]
+        if not cleaned_parts:
+            continue
+        mapping.setdefault(chain, [])
+        mapping[chain].extend(cleaned_parts)
+
+    out: Dict[str, str] = {}
+    for chain, parts in mapping.items():
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for part in parts:
+            if part in seen:
                 continue
-        if not cleaned:
-            continue
-        resi_tokens = "+".join(str(num) for num in sorted(set(cleaned)))
-        selectors.append(f"(chain {chain} and resi {resi_tokens})")
+            seen.add(part)
+            deduped.append(part)
+        if deduped:
+            out[chain] = "+".join(deduped)
+    return out
 
-    if not selectors:
+
+def _selection_from_labels(binding_label: Optional[str], include_label: Optional[str]) -> Optional[str]:
+    mapping = _selection_map_from_labels(binding_label, include_label)
+    if not mapping:
         return None
-    return " or ".join(selectors)
+    selectors = [f"(chain {chain} and resi {resi_expr})" for chain, resi_expr in mapping.items()]
+    return " or ".join(selectors) if selectors else None
 
 
 def launch_boltzgen_binder(
@@ -717,6 +732,7 @@ def launch_boltzgen_binder(
             target_dest = session_dir / candidate.name
             shutil.copy2(candidate, target_dest)
 
+    selection_map = _selection_map_from_labels(binding_label, include_label)
     selection = _selection_from_labels(binding_label, include_label)
     selection_obj = "target" if (target_dest or hotspot_pml) else "complex"
 
@@ -811,7 +827,15 @@ def launch_boltzgen_binder(
             script_lines.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_clean}\"")
 
     if target_obj == "target":
-        script_lines.append("align complex, target")
+        if selection_map:
+            for chain_id in sorted(selection_map):
+                resi_expr = selection_map[chain_id]
+                script_lines.append(
+                    f"align (complex and chain {chain_id} and resi {resi_expr}), "
+                    f"({target_obj} and chain {chain_id} and resi {resi_expr})"
+                )
+        else:
+            script_lines.append(f"align complex, {target_obj}")
 
     if selection:
         ep_token = _sanitize_design_token(epitope_label or "epitope")

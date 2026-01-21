@@ -12,7 +12,7 @@ from utils import (
     SLURM_GPU_TYPE,
 )
 from jsonschema import validate
-from utils import crop_pdb_by_hotspots
+from utils import crop_pdb_by_hotspots_radius
 from lib.scripts.pymol_utils import export_rfdiff_crop_bundle
 
 _EPITOPE_KEY_RE = re.compile(r"[^a-z0-9]+")
@@ -30,6 +30,11 @@ def _normalize_epitope_key(value: str) -> str:
 def _sanitize_epitope_label(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip())
     return text.strip("_") or "epitope"
+
+
+def _format_radius_tag(radius: float) -> str:
+    text = f"{float(radius):g}"
+    return text.replace(".", "p")
 
 
 def _format_hotspot_for_rfdiff(token: str) -> str | None:
@@ -229,21 +234,35 @@ def make_rfa_rfdiffusion_command(
         hotspots_rfdiff.append(formatted)
     hotspots_str = ",".join(hotspots_rfdiff)
 
-    # Optional: crop target around hotspots
+    # Optional: crop target around hotspots (radius-only, chain-filtered)
     target_pdb_for_inference = prep_pdb
     if crop_radius and crop_radius > 0:
-        hs_list = [h.strip() for h in hotspots_str.split(",") if h.strip()]
-        crop_out = crop_pdb_by_hotspots(
+        target_chains = cfg.get("chains") or cfg.get("target_chains") or []
+        if isinstance(target_chains, str):
+            target_chains = [target_chains]
+        target_chains = [str(c).strip().upper() for c in target_chains if str(c).strip()]
+        if not target_chains:
+            for token in hotspots:
+                text = str(token).strip()
+                if not text:
+                    continue
+                chain = text.split(":", 1)[0] if ":" in text else text[0]
+                chain = chain.strip().upper()
+                if chain and chain not in target_chains:
+                    target_chains.append(chain)
+        if crop_pad or crop_keep_glycans:
+            print("[info] crop_pad/crop_keep_glycans ignored for radius-only crop.")
+        radius_tag = _format_radius_tag(crop_radius)
+        crop_out = crop_pdb_by_hotspots_radius(
             prep_pdb,
-            hs_list,
+            hotspots,
             radius_A=float(crop_radius),
-            pad=int(crop_pad),
-            keep_glycans=bool(crop_keep_glycans),
-            out_path=tdir/"prep"/f"prepared_crop_{file_sanitized}_hs-{hotspot_variant}.pdb",
+            allowed_chains=target_chains,
+            out_path=tdir/"raw"/f"{pdb_id.upper()}_crop_{name_sanitized}_r{radius_tag}.pdb",
         )
         target_pdb_for_inference = Path(crop_out["out_pdb"])
         print(f"[ok] Cropped PDB for RFdiffusion: {target_pdb_for_inference.name} "
-              f"(radius={crop_radius}Å, pad=±{crop_pad}, keep_glycans={crop_keep_glycans})")
+              f"(radius={crop_radius}Å, chains={','.join(target_chains) or 'auto'})")
 
         # --- PyMOL Visualization Bundle Export ---
         try:
@@ -254,7 +273,7 @@ def make_rfa_rfdiffusion_command(
                 full_pdb_path=prep_pdb,
                 crop_pdb_path=target_pdb_for_inference,
                 epitope_mask_keys=epitope_mask_keys,
-                hotspot_keys=hs_list,
+                hotspot_keys=hotspots,
                 pdb_id=pdb_id,
                 epitope_name=epitope,
                 hotspot_variant=hotspot_variant
