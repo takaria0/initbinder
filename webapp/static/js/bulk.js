@@ -74,6 +74,7 @@ function isBoltzEngine(engine) {
 
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
+  bulkAlgorithmBtn: document.querySelector('#bulk-algorithm-btn'),
   bulkCsvInput: document.querySelector('#bulk-csv-input'),
   bulkEpitopes: document.querySelector('#bulk-epitopes'),
   bulkEpitopePrompt: document.querySelector('#bulk-epitope-prompt'),
@@ -129,12 +130,15 @@ const el = {
   boltzRerunRangeConfirm: document.querySelector('#boltz-rerun-range-confirm'),
   boltzRerunRangeCancel: document.querySelector('#boltz-rerun-range-cancel'),
   boltzRerunRangeClose: document.querySelector('#boltz-rerun-range-close'),
+  bulkAlgorithmModal: document.querySelector('#bulk-algorithm-modal'),
+  bulkAlgorithmClose: document.querySelector('#bulk-algorithm-close'),
   boltzRunRangeModal: document.querySelector('#boltz-run-range-modal'),
   boltzRunRangeStart: document.querySelector('#boltz-run-range-start'),
   boltzRunRangeEnd: document.querySelector('#boltz-run-range-end'),
   boltzRunRangeMinAllowed: document.querySelector('#boltz-run-range-min-allowed'),
   boltzRunRangeMinEpitopes: document.querySelector('#boltz-run-range-min-epitopes'),
   boltzRunRangeFilterNote: document.querySelector('#boltz-run-range-filter-note'),
+  boltzRunRangeAllowedNote: document.querySelector('#boltz-run-range-allowed-note'),
   boltzRunRangeCountNote: document.querySelector('#boltz-run-range-count-note'),
   boltzRunRangeConfirm: document.querySelector('#boltz-run-range-confirm'),
   boltzRunRangeCancel: document.querySelector('#boltz-run-range-cancel'),
@@ -1664,6 +1668,13 @@ function updateRunCommandFilterNote() {
   el.boltzRunRangeFilterNote.textContent = parts.length
     ? `Filters applied to commands (target.yaml): ${parts.join('; ')}.`
     : 'No filters applied to manual commands.';
+  if (el.boltzRunRangeAllowedNote) {
+    el.boltzRunRangeAllowedNote.textContent = (
+      'allowed_epitope_range is read from target.yaml (allowed_epitope_range or allowed_range). '
+      + 'Length is computed by summing inclusive residue spans per token '
+      + '(e.g. A:10-20,B:1-5 -> 16).'
+    );
+  }
   updateRunCommandCountNote(filters);
 }
 
@@ -3555,8 +3566,36 @@ async function handleVisualizeEpitopes() {
   scrollToSnapshots();
 }
 
+function setupExampleTabs() {
+  const containers = document.querySelectorAll('[data-example-tabs]');
+  containers.forEach((container) => {
+    const tabs = Array.from(container.querySelectorAll('[data-example-tab]'));
+    const panels = Array.from(container.querySelectorAll('[data-example-panel]'));
+    if (!tabs.length || !panels.length) return;
+
+    const activate = (key) => {
+      tabs.forEach((btn) => {
+        const active = btn.dataset.exampleTab === key;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      panels.forEach((panel) => {
+        panel.classList.toggle('is-active', panel.dataset.examplePanel === key);
+      });
+    };
+
+    tabs.forEach((btn) => {
+      btn.addEventListener('click', () => activate(btn.dataset.exampleTab));
+    });
+
+    const initial = tabs.find((btn) => btn.classList.contains('is-active')) || tabs[0];
+    if (initial) activate(initial.dataset.exampleTab);
+  });
+}
+
 function init() {
   loadClusterStatus();
+  setupExampleTabs();
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
   if (el.bulkCsvInput) el.bulkCsvInput.addEventListener('input', scheduleBulkPreview);
@@ -3639,6 +3678,7 @@ function init() {
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
+  if (el.bulkAlgorithmBtn) el.bulkAlgorithmBtn.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, true));
   if (el.binderFilterPdb) {
     el.binderFilterPdb.addEventListener('input', () => scheduleBinderRefresh({ silent: true }));
     el.binderFilterPdb.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
@@ -3684,6 +3724,7 @@ function init() {
   if (el.boltzConfigClose) el.boltzConfigClose.addEventListener('click', () => toggleModal(el.boltzConfigModal, false));
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
+  if (el.bulkAlgorithmClose) el.bulkAlgorithmClose.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, false));
   if (el.pipelineRerunClose) el.pipelineRerunClose.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
   if (el.pipelineRerunCancel) el.pipelineRerunCancel.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
   if (el.pipelineRerunConfirm) el.pipelineRerunConfirm.addEventListener('click', () => submitPipelineRerun(el.pipelineRerunConfirm));
@@ -3697,6 +3738,7 @@ function init() {
     if (closeTarget === 'boltz-run-range') toggleModal(el.boltzRunRangeModal, false);
     if (closeTarget === 'boltz-regenerate-range') toggleModal(el.boltzRegenerateRangeModal, false);
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
+    if (closeTarget === 'bulk-algorithm') toggleModal(el.bulkAlgorithmModal, false);
   });
 
   renderBoltzConfigs();

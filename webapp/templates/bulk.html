@@ -24,6 +24,12 @@
       #boltz-binders-panel .table-pagination { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 6px; flex-wrap: wrap; }
       #boltz-binders-panel .table-pagination button { padding: 6px 10px; font-size: 12px; }
       #boltz-binders-panel .table-pagination .page-label { font-size: 12px; color: #475569; }
+      .bulk-example-tabs { margin: 8px 0 12px; }
+      .bulk-example-tablist { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #e2e8f0; margin-bottom: 8px; }
+      .bulk-example-tab { padding: 6px 10px; border: 1px solid #cbd5e1; border-bottom: 1px solid #cbd5e1; border-radius: 6px 6px 0 0; background: #e2e8f0; color: #0f172a; cursor: pointer; font-size: 12px; }
+      .bulk-example-tab.is-active { background: #ffffff; border-bottom-color: #ffffff; font-weight: 600; }
+      .bulk-example-panel { display: none; }
+      .bulk-example-panel.is-active { display: block; }
     </style>
   </head>
   <body>
@@ -39,7 +45,10 @@
               <a href="/antigen-dms">Antigen DMS</a>
             </nav>
           </div>
-          <div id="bulk-status" class="badge" hidden>Idle</div>
+          <div class="flex-row" style="gap: 8px; align-items: center;">
+            <button type="button" id="bulk-algorithm-btn" class="ghost">Algorithm</button>
+            <div id="bulk-status" class="badge" hidden>Idle</div>
+          </div>
         </header>
 
         <div class="bulk-layout">
@@ -126,7 +135,7 @@
                     <input type="number" id="boltz-time-hours" value="12" min="1" max="240" step="1">
                   </label>
                   <label>Crop radius (Å)
-                    <input type="number" id="boltz-crop-radius" value="14" min="0" step="1">
+                    <input type="number" id="boltz-crop-radius" value="25" min="0" step="1">
                   </label>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
@@ -390,6 +399,7 @@
           <p class="help-text" id="boltz-run-range-filter-note" style="margin: 8px 0 0 0;">
             Filters applied to commands (target.yaml): allowed_epitope_range length &gt;= 50; epitopes selected &gt;= 10.
           </p>
+          <p class="help-text" id="boltz-run-range-allowed-note" style="margin: 6px 0 0 0;"></p>
           <p class="help-text" id="boltz-run-range-count-note" style="margin: 6px 0 0 0;"></p>
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
@@ -420,6 +430,552 @@
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-regenerate-range-cancel" class="ghost">Cancel</button>
           <button type="button" id="boltz-regenerate-range-confirm">Rebuild</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="bulk-algorithm-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-algorithm"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Bulk pipeline algorithm</h3>
+          <button type="button" id="bulk-algorithm-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" style="margin-top: 0;">
+            Supplementary methods: canonical target construction, epitope definition, hotspot selection, and aggregation.
+          </p>
+          <div style="color: #0f172a;">
+            <p><strong>Notation.</strong> Let <code>S</code> be the vendor-expressed antigen sequence (accession or expressed-sequence override), and let
+              <code>C_j</code> be candidate PDB chains extracted from mmCIF. An epitope is a set of residue spans
+              <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
+            <ol style="margin: 0 0 12px 18px; padding: 0;">
+              <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters.</li>
+              <li><strong>init_target.py (target construction).</strong> Download mmCIF and parse the vendor product page (SinoBio) to recover
+                accession and expressed range, or accept an expressed-sequence override. Fetch the full NCBI sequence and slice to the expressed
+                range to obtain <code>S</code>. Extract each PDB chain sequence <code>C_j</code> and perform local alignment (biotite) between <code>S</code>
+                and every <code>C_j</code>. If target.yaml already lists chains, prefer those; otherwise select the best alignment by identity/coverage.
+                Write <code>targets/&lt;PDB&gt;/target.yaml</code> with chain IDs, sequence blocks, alignment summary, and
+                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_mmcif</code> in auth numbering when available).</li>
+              <li><strong>decide_scope.py (epitope proposal).</strong> When epitopes are absent (or forced), propose spans using LLM + rule-based
+                constraints, restricted to <code>allowed_epitope_range</code>. Write epitope spans and rationales back to target.yaml.</li>
+              <li><strong>prep_target.py (epitope preparation).</strong> Expand spans into residue masks, validate against mmCIF coverage, and optionally
+                compute SASA (Shrake-Rupley) in <code>--check</code> mode to restrict candidates to solvent-exposed residues. Emit epitope
+                metadata under <code>prep/</code> and <code>configs/epitope_*/epitope_stats.json</code>. If no epitopes exist, create an
+                Epitope_1 placeholder from <code>allowed_epitope_range</code> or the first chain fallback.</li>
+              <li><strong>Config + run.</strong> Generate BoltzGen configs (and optional RFAntibody scripts), submit jobs, and store designs under
+                <code>targets/&lt;PDB&gt;/designs/</code>.</li>
+              <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> and RFAntibody produces
+                <code>af3_rankings.tsv</code>. Bulk diversity merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
+            </ol>
+            <p><strong>Hotspot selection (prep_target.py).</strong> For an epitope with spans <code>E</code>, define total length
+              <code>L = sum_k (end_k - start_k + 1)</code>. The default hotspot count is <code>n</code> (clamped 1..5; default 3). In minimal mode,
+              select evenly spaced ranks:</p>
+            <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">
+for i = 1..n_eff:
+    r_i = round(i * (L + 1) / (n_eff + 1))
+    hotspot_i = rank_to_position(E, r_i)
+            </pre>
+            <p>When <code>--check</code> is enabled, restrict candidates to <code>A = { (chain, pos) : SASA(chain,pos) >= tau }</code> and sample evenly
+              from <code>A</code>. If <code>L</code> is large, the algorithm probes up to <code>n_probe = min(200, max(20, 20*n))</code> ranks rather than
+              expanding all positions (cap <code>MAX_EXPAND_POSITIONS = 20000</code>). If filtering yields no candidates, fall back to unfiltered picks.</p>
+            <p><strong>Example (computed from code).</strong> Using <code>targets/8GYE/target.yaml</code>, epitope
+              <code>N-terminal_Cysteine-rich_Domain_1</code> has span <code>B:2-16</code> (so <code>L=15</code>, <code>n=3</code>). The formula yields
+              ranks <code>r = (4, 8, 12)</code>, mapping to hotspots <code>B:5</code>, <code>B:9</code>, <code>B:13</code>.</p>
+            <p><strong>Additional examples (computed from target.yaml).</strong></p>
+            <ul style="margin: 0 0 12px 18px; padding: 0;">
+              <li><code>8XSF</code>: <code>A:19-35</code> (L=17, r=4,9,14) -&gt; <code>A:22,A:27,A:32</code></li>
+              <li><code>8SR0</code>: <code>A:129-138</code> (L=10, r=3,6,8) -&gt; <code>A:131,A:134,A:136</code></li>
+              <li><code>7E5N</code>: <code>A:33-38</code> (L=6, r=2,4,5) -&gt; <code>A:34,A:36,A:37</code></li>
+              <li><code>4ZNE</code>: <code>A:99-105</code> (L=7, r=2,4,6) -&gt; <code>A:100,A:102,A:104</code></li>
+              <li><code>2HEY</code>: <code>C:5-18</code> (L=14, r=4,8,11) -&gt; <code>C:8,C:12,C:15</code></li>
+              <li><code>6MGP</code>: <code>B:33-45</code> (L=13, r=4,7,10) -&gt; <code>B:36,B:39,B:42</code></li>
+              <li><code>4R6U</code>: <code>A:35-53</code> (L=19, r=5,10,15) -&gt; <code>A:39,A:44,A:49</code></li>
+              <li><code>5MXA</code>: <code>B:30-45</code> (L=16, r=4,8,13) -&gt; <code>B:33,B:37,B:42</code></li>
+              <li><code>7FJD</code>: <code>D:33-40</code> (L=8, r=2,4,7) -&gt; <code>D:34,D:36,D:39</code></li>
+            </ul>
+                        <p><strong>Worked examples (tabbed).</strong> Each tab is a full CSV-to-epitope trace.</p>
+            <div class="bulk-example-tabs" data-example-tabs="bulk">
+              <div class="bulk-example-tablist" role="tablist">
+                <button type="button" class="bulk-example-tab is-active" data-example-tab="8GYE" aria-selected="true">8GYE</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="7TNG" aria-selected="false">7TNG</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="1J55" aria-selected="false">1J55</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="3Q2C" aria-selected="false">3Q2C</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="5DZO" aria-selected="false">5DZO</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="1HKF" aria-selected="false">1HKF</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="5VZ3" aria-selected="false">5VZ3</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="7M3Z" aria-selected="false">7M3Z</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="2JOP" aria-selected="false">2JOP</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="4GOS" aria-selected="false">4GOS</button>
+              </div>
+              <div class="bulk-example-panels">
+                <section class="bulk-example-panel is-active" data-example-panel="8GYE">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 2
+selection: biotin
+uniprot: Q07011
+gene: TNFRSF9
+protein_name: Tumor necrosis factor receptor superfamily member 9
+organism: Homo sapiens
+chosen_pdb: 8GYE
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-cd137-10041-h08h-b
+vendor_accession: NP_001552.2
+vendor_range: 1-186</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 8GYE
+csv_matched_chain: A
+selected_chain_ids: B
+allowed_epitope_range: B:2-139
+allowed_epitope_range_mmcif: D:25-162
+alignment_identity: 1.0
+alignment_coverage: 0.7419
+alignment_chain_ranges: {'B': '2-139'}
+vendor_range: 1-186
+vendor_aligned_range: 25-162
+vendor_overlap_range: 25-162
+expressed_aa (length 186):
+MGNSCYNIVATLLLVLNFERTRSL<span style="background:#fde68a;">QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQR
+TCDICRQCKGVFRTRKECSSTSNAECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDC
+CFGTFNDQKRGICRPWTNCSLDGKSVLVNGTKERDVVCGPSP</span>ADLSPGASSVTPPAPARE
+PGHSPQ
+pdb_chain_sequences:
+A:
+QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQRTCDICRQCKGVFRTRKECSSTSNA
+ECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDCCFGTFNDQKRGICRPWTNCSLDGK
+SVLVNGTKERDVVCGPS
+B:
+<span style="background:#fde68a;">QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQRTCDICRQCKGVFRTRKECSSTSNA
+ECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDCCFGTFNDQKRGICRPWTNCSLDGK
+SVLVNGTKERDVVCGPSP</span>
+C:
+QVQLQESGPGLVKPSETLSLTCTVSGSSLTSYGVHWVRQPPGKGLEGLGVIWPGGSTNYN
+SALMSRVTISKDNSKSQVSLKMSSLTAADTAVYYCARVTGTWYFDVWGQGTTVTVSSAST
+KGPSVFPLAPCSRSTSESTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLY
+SLSSVVTVPSSSLGTKTYTCNVDHKPSNTKVDKRVD
+D:
+DIQMTQSPSSLSASLGDRVTISCSASQGISNYLNWYQQKPDGTVKLLIYYTSTLHSGVPS
+RFSGSGSGTDYTLTISSLQPEDIATYYCQQYSKLPWTFGGGTKLEIKRTVAAPSVFIFPP
+SDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLT
+LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGE
+E:
+QVQLQESGPGLVKPSETLSLTCTVSGSSLTSYGVHWVRQPPGKGLEGLGVIWPGGSTNYN
+SALMSRVTISKDNSKSQVSLKMSSLTAADTAVYYCARVTGTWYFDVWGQGTTVTVSSAST
+KGPSVFPLAPCSRSTSESTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLY
+SLSSVVTVPSSSLGTKTYTCNVDHKPSNTKVDKRVD
+F:
+DIQMTQSPSSLSASLGDRVTISCSASQGISNYLNWYQQKPDGTVKLLIYYTSTLHSGVPS
+RFSGSGSGTDYTLTISSLQPEDIATYYCQQYSKLPWTFGGGTKLEIKRTVAAPSVFIFPP
+SDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLT
+LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGE</pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Cysteine-rich_Domain_1
+residues: B:2-16
+hotspots: B:5,B:9,B:13</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="7TNG">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 174
+selection: biotin
+uniprot: Q01973
+gene: ROR1
+protein_name: Inactive tyrosine-protein kinase transmembrane receptor ROR1
+organism: Homo sapiens
+chosen_pdb: 7TNG
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-ror1-13968-hcch1-b
+vendor_accession: NP_005003.2
+vendor_range: 1-403</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 7TNG
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:3-84
+allowed_epitope_range_mmcif: A:312-393
+alignment_identity: 1.0
+alignment_coverage: 0.2035
+alignment_chain_ranges: {'A': '3-84'}
+vendor_range: 1-403
+vendor_aligned_range: 312-393
+vendor_overlap_range: 312-393
+expressed_aa (length 403):
+MHRPRRRGTRPPLLALLAALLLAARGAAAQETELSVSAELVPTSSWNISSELNKDSYLTL
+DEPMNNITTSLGQTAELHCKVSGNPPPTIRWFKNDAPVVQEPRRLSFRSTIYGSRLRIRN
+LDTTDTGYFQCVATNGKEVVSSTGVLFVKFGPPPTASPGYSDEYEEDGFCQPYRGIACAR
+FIGNRTVYMESLHMQGEIENQITAAFTMIGTSSHLSDKCSQFAIPSLCHYAFPYCDETSS
+VPKPRDLCRDECEILENVLCQTEYIFARSNPMILMRLKLPNCEDLPQPESPEAANCIRIG
+IPMADPINKNH<span style="background:#fde68a;">KCYNSTGVDYRGTVSVTKSGRQCQPWNSQYPHTHTFTALRFPELNGGHS
+YCRNPGNQKEAPWCFTLDENFKSDLCDIPACDS</span>KDSKEKNKME
+pdb_chain_sequences:
+A:
+GS<span style="background:#fde68a;">KCYNSTGVDYRGTVSVTKSGRQCQPWNSQYPHTHTFTALRFPELNGGHSYCRNPGNQK
+EAPWCFTLDENFKSDLCDIPACDS</span>AAA</pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Loop
+residues: A:3-10
+hotspots: A:4,A:6,A:9</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="1J55">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 179
+selection: biotin
+uniprot: P25815
+gene: S100P
+protein_name: Protein S100-P
+organism: Homo sapiens
+chosen_pdb: 1J55
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-s100p-12635-hnae-b
+vendor_accession: P25815
+vendor_range: 1-95</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 1J55
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:1-94
+allowed_epitope_range_mmcif: A:1-94
+alignment_identity: 1.0
+alignment_coverage: 0.9263
+alignment_chain_ranges: {'A': '1-94'}
+vendor_range: 1-95
+vendor_aligned_range: 1-94
+vendor_overlap_range: 1-94
+expressed_aa (length 95):
+<span style="background:#fde68a;">MTELETAMGMIIDVFSRYSGSEGSTQTLTKGELKVLMEKELPGFLQSGKDKDAVDKLLKD
+LDANGDAQVDFSEFIVFVAAITSACHKYFEKAGL</span>K
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">MTELETAMGMIIDVFSRYSGSEGSTQTLTKGELKVLMEKELPGFLDAVDKLLKDLDANGD
+AQVDFSEFIVFVAAITSACHKYFEKAGL</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Helix
+residues: A:3-18
+hotspots: A:6,A:10,A:15</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="3Q2C">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 139
+selection: biotin
+uniprot: Q8N6C8
+gene: LILRA3
+protein_name: Leukocyte immunoglobulin-like receptor subfamily A member 3
+organism: Homo sapiens
+chosen_pdb: 3Q2C
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-lilra3-13549-h08h-b
+vendor_accession: AAH28208.1
+vendor_range: 1-439</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 3Q2C
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:2-97
+allowed_epitope_range_mmcif: A:2-97
+alignment_identity: 1.0
+alignment_coverage: 0.2187
+alignment_chain_ranges: {'A': '2-97'}
+vendor_range: 1-439
+vendor_aligned_range: 25-120
+vendor_overlap_range: 25-120
+expressed_aa (length 439):
+MTSILTVLICLGLSLDPRTHVQAG<span style="background:#fde68a;">PLPKPTLWAEPGSVITQGSPVTLRCQGSLETQEYHL
+YREKKTALWITRIPQELVKKGQFPILSITWEHAGRYCCIYGSHTVGLSESSDPLELVVTG</span>
+AYSKPTLSALPSPVVTSGGNVTIQCDSQVAFDGFILCKEGEDEHPQCLNSHSHARGSSRA
+IFSVGPVSPSRRWSYRCYGYDSRAPYVWSLPSDLLGLLVPGVSKKPSLSVQPGPVVAPGE
+KLTFQCGSDAGYDRFVLYKEWGRDFLQRPGRQPQAGLSQANFTLGPVSRSYGGQYTCSGA
+YNLSSEWSAPSDPLDILITGQIRARPFLSVRPGPTVASGENVTLLCQSQGGMHTFLLTKE
+GAADSPLRLKSKRQSHKYQAEFPMSPVTSAHAGTYRCYGSLSSNPYLLTHPSDPLELVVS
+GAAETLSPPQNKSDSKAGE
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">PLPKPTLWAEPGSVITQGSPVTLRCQGSLETQEYHLYREKKTALWITRIPQELVKKGQFP
+ILSITWEHAGRYCCIYGSHTVGLSESSDPLELVVTG</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Ig-like_Loop
+residues: A:2-10
+hotspots: A:3,A:6,A:9</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="5DZO">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 194
+selection: biotin
+uniprot: Q96D42
+gene: HAVCR1
+protein_name: Hepatitis A virus cellular receptor 1
+organism: Homo sapiens
+chosen_pdb: 5DZO
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-tim-1-11051-h49h-b
+vendor_accession: AAC39862.1
+vendor_range: 21-290</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 5DZO
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:2-107
+allowed_epitope_range_mmcif: A:5-110
+alignment_identity: 1.0
+alignment_coverage: 0.3926
+alignment_chain_ranges: {'A': '2-107'}
+vendor_range: 21-290
+vendor_aligned_range: 22-127
+vendor_overlap_range: 22-127
+expressed_aa (length 270):
+S<span style="background:#fde68a;">VKVGGEAGPSVTLPCHYSGAVTSMCWNRGSCSLFTCQNGIVWTNGTHVTYRKDTRYKLL
+GDLSRRDVSLTIENTAVSDSGVYCCRVEHRGWFNDMKITVSLEIVPP</span>KVTTTPIVTTVPT
+VTTVRTSTTVPTTTTVPTTTVPTTMSIPTTTTVPTTMTVSTTTSVPTTTSIPTTTSVPVT
+TTVSTFVPPMPLPRQNHEPVATSPSSPQPAETHPTTLQGAIRREPTSSPLYSYTTDGNDT
+VTESSDGLWNNNQTQLFLEHSLLTANTTKG
+pdb_chain_sequences:
+A:
+M<span style="background:#fde68a;">VKVGGEAGPSVTLPCHYSGAVTSMCWNRGSCSLFTCQNGIVWTNGTHVTYRKDTRYKLL
+GDLSRRDVSLTIENTAVSDSGVYCCRVEHRGWFNDMKITVSLEIVPP</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Beta-Strand_Epitope
+residues: A:2-15
+hotspots: A:5,A:9,A:12</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="1HKF">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 148
+selection: biotin
+uniprot: O95944
+gene: NCR2
+protein_name: Natural cytotoxicity triggering receptor 2
+organism: Homo sapiens
+chosen_pdb: 1HKF
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-nkp44-ncr2-11550-h08h-b
+vendor_accession: NP_004819.2
+vendor_range: 1-190</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 1HKF
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:15-122
+allowed_epitope_range_mmcif: A:5-112
+alignment_identity: 1.0
+alignment_coverage: 0.5684
+alignment_chain_ranges: {'A': '15-122'}
+vendor_range: 1-190
+vendor_aligned_range: 23-130
+vendor_overlap_range: 23-130
+expressed_aa (length 190):
+MAWRALHPLLLLLLLFPGSQAQ<span style="background:#fde68a;">SKAQVLQSVAGQTLTVRCQYPPTGSLYEKKGWCKEASA
+LVCIRLVTSSKPRTMAWTSRFTIWDDPDAGFFTVTMTDLREEDSGHYWCRIYRPSDNSVS
+KSVRFYLVVS</span>PASASTQTSWTPRDLVSSQTQTQSCVPPTAGARQAPESPSTIPVPSQPQN
+STLRPGPAAP
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">SKAQVLQSVAGQTLTVRCQYPPTGSLYEKKGWCKEASALVCIRLVTSSKPRTMAWTSRFT
+IWDDPDAGFFTVTMTDLREEDSGHYWCRIYRPSDNSVSKSVRFYLVVS</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Ig-like_Loop
+residues: A:15-25
+hotspots: A:17,A:20,A:23</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="5VZ3">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 88
+selection: biotin
+uniprot: Q99988
+gene: GDF15
+protein_name: Growth/differentiation factor 15
+organism: Homo sapiens
+chosen_pdb: 5VZ3
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-gdf15-10936-h44e-b
+vendor_accession: NP_004855.2
+vendor_range: 197-308</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 5VZ3
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:5-112
+allowed_epitope_range_mmcif: A:5-112
+alignment_identity: 1.0
+alignment_coverage: 0.9643
+alignment_chain_ranges: {'A': '5-112'}
+vendor_range: 197-308
+vendor_aligned_range: 201-308
+vendor_overlap_range: 201-308
+expressed_aa (length 112):
+ARNG<span style="background:#fde68a;">DHCPLGPGRCCRLHTVRASLEDLGWADWVLSPREVQVTMCIGACPSQFRAANMHAQ
+IKTSLHRLKPDTVPAPCCVPASYNPMVLIQKTDTGVSLQTYDDLLAKDCHCI</span>
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">DHCPLGPGRCCRLHTVRASLEDLGWADWVLSPREVQVTMCIGACPSQFRAANMHAQIKTS
+LHRLKPDTVPAPCCVPASYNPMVLIQKTDTGVSLQTYDDLLAKDCHCI</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Accessible_Loop
+residues: A:5-15
+hotspots: A:7,A:10,A:13</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="7M3Z">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 228
+selection: biotin
+uniprot: Q8TDQ0
+gene: HAVCR2
+protein_name: Hepatitis A virus cellular receptor 2
+organism: Homo sapiens
+chosen_pdb: 7M3Z
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-tim-3-10390-h08h-b
+vendor_accession: AAL65157.1
+vendor_range: 1-200</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 7M3Z
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:1-109
+allowed_epitope_range_mmcif: A:1-109
+alignment_identity: 1.0
+alignment_coverage: 0.545
+alignment_chain_ranges: {'A': '1-109'}
+vendor_range: 1-200
+vendor_aligned_range: 22-130
+vendor_overlap_range: 22-130
+expressed_aa (length 200):
+MFSHLPFDCVLLLLLLLLTRS<span style="background:#fde68a;">SEVEYRAEVGQNAYLPCFYTPAAPGNLVPVCWGKGACPV
+FECGNVVLRTDERDVNYWTSRYWLNGDFRKGDVSLTIENVTLADSGIYCCRIQIPGIMND
+EKFNLKLVIK</span>PAKVTPAPTLQRDFTAAFPRMLTTRGHGPAETQTLGSLPDINLTQISTLA
+NELRDSRLANDLRDSGATIR
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">SEVEYRAEVGQNAYLPCFYTPAAPGNLVPVCWGKGACPVFECGNVVLRTDERDVNYWTSR
+YWLNGDFRKGDVSLTIENVTLADSGIYCCRIQIPGIMNDEKFNLKLVIK</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Loop
+residues: A:22-32
+hotspots: A:24,A:27,A:30</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="2JOP">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 44
+selection: biotin
+uniprot: P06127
+gene: CD5
+protein_name: T-cell surface glycoprotein CD5
+organism: Homo sapiens
+chosen_pdb: 2JOP
+matched_chain: A
+antigen_url: https://www.sinobiological.com/search?keywords=11027-H27H-B
+vendor_accession: NP_055022.2
+vendor_range: 1-372</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 2JOP
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:22-131
+allowed_epitope_range_mmcif: A:25-134
+alignment_identity: 0.9818
+alignment_coverage: 0.2957
+alignment_chain_ranges: {'A': '22-131'}
+vendor_range: 1-372
+vendor_aligned_range: 25-134
+vendor_overlap_range: 25-134
+expressed_aa (length 372):
+MPMGSLQPLATLYLLGMLVASCLG<span style="background:#fde68a;">RLSWYDPDFQARLTRSNSKCQGQLEVYLKDGWHMVC
+SQSWGRSSKQWEDPSQASKVCQRLNCGVPLSLGPFLVTYTPQSSIICYGQLGSFSNCSHS
+RNDMCHSLGLTCLE</span>PQKTTPPTTRPPPTTTPEPTAPPRLQLVAQSGGQHCAGVVEFYSGS
+LGGTISYEAQDKTQDLENFLCNNLQCGSFLKHLPETEAGRAQDPGEPREHQPLPIQWKIQ
+NSSCTSLEHCFRKIKPQKSGRVLALLCSGFQPKVQSRLVGGSSICEGTVEVRQGAQWAAL
+CDSSSARSSLRWEEVCREQQCGSVNSYRVLDAGDPTSRGLFCPHQKLSQCHELWERNSYC
+KKVFVTCQDPNP
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">RLSWYDPDFQARLTRSNSKCQGQLEVYLKDGWHMVCSQSWGRSSKQWEDPSQASKVCQRL
+NCGDPLSLGPFLKTYTPQSSIICYGQLGSFSNCSHSRNDMCHSLGLTCLE</span></pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Loop_Epitope
+residues: A:22-30
+hotspots: A:23,A:26,A:29</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="4GOS">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">rank: 17
+selection: biotin
+uniprot: Q7Z7D3
+gene: VTCN1
+protein_name: V-set domain-containing T-cell activation inhibitor 1
+organism: Homo sapiens
+chosen_pdb: 4GOS
+matched_chain: A
+antigen_url: https://www.sinobiological.com/search?keywords=10738-H27H-B
+vendor_accession: NP_078902.2
+vendor_range: 29-258</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">PDB ID: 4GOS
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:6-119
+allowed_epitope_range_mmcif: A:35-148
+alignment_identity: 1.0
+alignment_coverage: 0.4957
+alignment_chain_ranges: {'A': '6-119'}
+vendor_range: 29-258
+vendor_aligned_range: 35-148
+vendor_overlap_range: 35-148
+expressed_aa (length 230):
+FGISGR<span style="background:#fde68a;">HSITVTTVASAGNIGEDGILSCTFEPDIKLSDIVIQWLKEGVLGLVHEFKEGKD
+ELSEQDEMFRGRTAVFADQVIVGNASLRLKNVQLTDAGTYKCYIITSKGKGNANLEYKTG</span>
+AFSMPEVNVDYNASSETLRCEAPRWFPQPTVVWASQVDQGANFSEVSNTSFELNSENVTM
+KVVSVLYNVTINNTYSCMIENDIAKATGDIKVTESEIKRRSHLQLLNSKA
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">HSITVTTVASAGNIGEDGILSCTFEPDIKLSDIVIQWLKEGVLGLVHEFKEGKDELSEQD
+EMFRGRTAVFADQVIVGNASLRLKNVQLTDAGTYKCYIITSKGKGNANLEYKTG</span>H</pre>
+                  <p class="help-text" style="margin: 0 0 8px;">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Loop
+residues: A:6-15
+hotspots: A:8,A:11,A:13</pre>
+                </section>
+              </div>
+            </div>
+            <p><strong>SASA check examples.</strong> When <code>prep_target</code> is run with <code>--sasa-cutoff</code>, per-epitope SASA
+              statistics and top-exposed residues are recorded in <code>epitopes_metadata.json</code>.</p>
+            <p><strong>Example A (5VZ3, Epitope_1_Site; sasa_cutoff=10.0 A^2).</strong></p>
+            <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">source: targets/5VZ3/history/20251222_180939/prep/epitopes_metadata.json
+declared_count: 9
+exposed_count: 7
+exposed_fraction: 0.778
+sasa_summary: declared_total=529.216, exposed_total=526.17, exposed_mean=75.167, exposed_p25=46.235, exposed_median=61.372, exposed_p75=91.656, exposed_skew=0.992, n_gt_100A2=1
+top_exposed_residues:
+  A:13 ARG (charged) sasa=152.317 rsa=0.556
+  A:11 PRO (hydrophobic) sasa=91.656 rsa=0.576
+  A:16 ARG (charged) sasa=89.371 rsa=0.326
+  A:17 LEU (hydrophobic) sasa=61.372 rsa=0.305
+  A:18 HIS (charged) sasa=50.579 rsa=0.226
+  A:10 GLY (polar) sasa=46.235 rsa=0.445
+  A:12 GLY (polar) sasa=34.641 rsa=0.333</pre>
+            <p><strong>Example B (3Q0H, Epitope_1_N_terminal_strand_region; sasa_cutoff=10.0 A^2).</strong></p>
+            <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">source: targets/3Q0H/history/20260115_003657/prep/epitopes_metadata.json
+declared_count: 5
+exposed_count: 5
+exposed_fraction: 1.0
+sasa_summary: declared_total=285.035, exposed_total=285.035, exposed_mean=57.007, exposed_p25=39.126, exposed_median=52.576, exposed_p75=77.104, exposed_skew=0.03, n_gt_100A2=0
+top_exposed_residues:
+  B:28 GLU (charged) sasa=78.973 rsa=0.354
+  B:26 THR (polar) sasa=75.234 rsa=0.437
+  B:25 GLY (polar) sasa=52.576 rsa=0.506
+  B:29 THR (polar) sasa=45.466 rsa=0.264
+  B:27 ILE (hydrophobic) sasa=32.786 rsa=0.166</pre>
+<p class="help-text" style="margin: 0;">
+              <strong>allowed_epitope_range length</strong> is computed by summing inclusive spans per token
+              (e.g. A:10-20,B:1-5 =&gt; 16). The GUI uses this length for filter thresholds.
+            </p>
+          </div>
         </div>
       </div>
     </div>

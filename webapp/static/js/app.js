@@ -1970,7 +1970,17 @@ async function updateClusterStatus() {
       }
     } else {
       const msg = payload.message || 'control master not active';
-      setClusterStatus('error', `Cluster: not connected - ${msg}. Run ssh -o ControlPath=/Users/inagakit/.ssh/cm-initbinder-hpc3.rcic.uci.edu -o ControlMaster=auto -o ControlPersist=yes -MNf hpc3.rcic.uci.edu`);
+      const controlPath = payload.control_path || '';
+      const controlPersist = payload.control_persist || '';
+      const sshTarget = payload.ssh_target || '';
+      const args = [];
+      if (controlPath) args.push(`-o ControlPath=${controlPath}`);
+      args.push('-o ControlMaster=auto');
+      if (controlPersist) args.push(`-o ControlPersist=${controlPersist}`);
+      const command = sshTarget
+        ? `ssh ${args.join(' ')} -MNf ${sshTarget}`
+        : 'ssh -o ControlMaster=auto -MNf <cluster>';
+      setClusterStatus('error', `Cluster: not connected - ${msg}. Run ${command}`);
     }
   } catch (err) {
     setClusterStatus('error', `Cluster: status unavailable (${err.message || err})`);

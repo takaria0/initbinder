@@ -671,6 +671,7 @@ PY
         status: dict[str, object] = {
             "mock": self.cfg.mock,
             "control_path": str(self.control_path) if self.control_path else None,
+            "control_persist": self.control_persist,
             "control_master": False,
             "local_root": str(self.local_root) if self.local_root else None,
             "remote_root": str(self.cfg.remote_root) if self.cfg.remote_root else None,

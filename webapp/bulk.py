@@ -2089,14 +2089,14 @@ def regenerate_boltzgen_configs(
         design_counts = [design_count] * len(epitopes)
         
         _log(f"[rfa-pipeline] Generating RFA pipeline scripts...")
-        rfa_status, rfa_msg = _generate_rfa_pipeline_scripts(pdb_id, design_count, _log)
-        if rfa_status == "ok" and rfa_msg:
-            msg = f"{rfa_msg}"
-        elif rfa_status == "skipped" and rfa_msg:
-            msg = f"RFA pipeline skipped ({rfa_msg})"
-        elif rfa_status == "error":
-            status = "error"
-            msg = f"RFA pipeline failed ({rfa_msg})"
+        # rfa_status, rfa_msg = _generate_rfa_pipeline_scripts(pdb_id, design_count, _log)
+        # if rfa_status == "ok" and rfa_msg:
+        #     msg = f"{rfa_msg}"
+        # elif rfa_status == "skipped" and rfa_msg:
+        #     msg = f"RFA pipeline skipped ({rfa_msg})"
+        # elif rfa_status == "error":
+        #     status = "error"
+        #     msg = f"RFA pipeline failed ({rfa_msg})"
 
         boltz_error = None
         try:
