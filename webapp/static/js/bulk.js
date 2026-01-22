@@ -59,6 +59,19 @@ function epitopeColor(label) {
   return `rgb(${rgb.join(',')})`;
 }
 
+function formatEngineLabel(engine) {
+  const raw = String(engine || '').trim().toLowerCase();
+  if (!raw) return '—';
+  if (raw.includes('boltz')) return 'BoltzGen';
+  if (raw.includes('rfa')) return 'RFAntibody';
+  return engine;
+}
+
+function isBoltzEngine(engine) {
+  const raw = String(engine || '').trim().toLowerCase();
+  return !raw || raw.includes('boltz');
+}
+
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
   bulkCsvInput: document.querySelector('#bulk-csv-input'),
@@ -142,6 +155,7 @@ const el = {
   binderPageLabel: document.querySelector('#boltz-binders-page-label'),
   binderFilterPdb: document.querySelector('#binder-filter-pdb'),
   binderFilterEpitope: document.querySelector('#binder-filter-epitope'),
+  binderFilterEngine: document.querySelector('#binder-filter-engine'),
   binderOrderBy: document.querySelector('#binder-order-by'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
@@ -337,6 +351,7 @@ function getBinderFilters() {
   return {
     pdb: (el.binderFilterPdb?.value || '').trim(),
     epitope: (el.binderFilterEpitope?.value || '').trim(),
+    engine: (el.binderFilterEngine?.value || '').trim(),
     orderBy: (el.binderOrderBy?.value || '').trim(),
   };
 }
@@ -921,7 +936,7 @@ function renderDiversityPlots(items = []) {
     const message = (state.diversityMessage || '').trim();
     empty.textContent =
       message ||
-      'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs). For RFAntibody, sync af3_rankings.tsv under targets/<PDB>/designs/rfantibody/_assessments/<run_label>/ (legacy: designs/_assessments), then click Refresh.';
+      'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs). For RFAntibody, sync af3_rankings.tsv under targets/<PDB>/designs/rfantibody/_assessments/<run_label>/ (legacy: designs/_assessments), then click Refresh to rebuild all_design_metrics.';
     el.diversityGrid.appendChild(empty);
   }
   state.diversityPlots = list;
@@ -1041,6 +1056,7 @@ async function refreshDiversity({ silent = false, page = null, force = false } =
     const filters = getBinderFilters();
     if (filters.pdb) params.append('filter_pdb', filters.pdb);
     if (filters.epitope) params.append('filter_epitope', filters.epitope);
+    if (filters.engine) params.append('filter_engine', filters.engine);
     if (filters.orderBy) params.append('order_by', filters.orderBy);
     const baseUrl = force ? '/api/bulk/boltzgen/diversity/refresh' : '/api/bulk/boltzgen/diversity';
     const res = await fetch(`${baseUrl}?${params.toString()}`, { method: force ? 'POST' : 'GET' });
@@ -1159,7 +1175,7 @@ function renderBinderRows(rows = []) {
     const td = document.createElement('td');
     td.colSpan = 9;
     td.style.color = '#64748b';
-    td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No BoltzGen binders found.');
+    td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No binders found.');
     tr.appendChild(td);
     return tr;
   };
@@ -1170,10 +1186,11 @@ function renderBinderRows(rows = []) {
     list.forEach((row, idx) => {
       const epLabel = row.epitope_id || row.epitope || '—';
       const tr = document.createElement('tr');
+      const engineLabel = formatEngineLabel(row.engine);
       const values = [
         row.pdb_id || '—',
         epLabel,
-        row.rank ?? '—',
+        engineLabel,
         row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
         row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
         row.hotspot_dist !== null && row.hotspot_dist !== undefined ? Number(row.hotspot_dist).toFixed(2) : '—',
@@ -1209,7 +1226,7 @@ function renderBinderRows(rows = []) {
       pymolBtn.textContent = 'PyMOL';
       pymolBtn.dataset.action = 'pymol-binder';
       pymolBtn.dataset.index = String(idx);
-      if (!row.design_path) pymolBtn.disabled = true;
+      if (!row.design_path || !isBoltzEngine(row.engine)) pymolBtn.disabled = true;
       pymolTd.appendChild(pymolBtn);
       tr.appendChild(pymolTd);
 
@@ -1278,6 +1295,7 @@ async function loadBinderTable({ page = 1, silent = false, force = false } = {})
   const filters = getBinderFilters();
   if (filters.pdb) params.append('filter_pdb', filters.pdb);
   if (filters.epitope) params.append('filter_epitope', filters.epitope);
+  if (filters.engine) params.append('filter_engine', filters.engine);
   if (filters.orderBy) params.append('order_by', filters.orderBy);
   if (force) params.append('_ts', String(Date.now()));
   try {
@@ -1343,6 +1361,10 @@ async function launchBinderPymol(index) {
   const row = Array.isArray(state.binderRows) ? state.binderRows[index] : null;
   if (!row) {
     showAlert('No binder selected.');
+    return;
+  }
+  if (!isBoltzEngine(row.engine)) {
+    showAlert('PyMOL launch is only available for BoltzGen binders.');
     return;
   }
   if (!row.design_path) {
@@ -3624,6 +3646,9 @@ function init() {
   if (el.binderFilterEpitope) {
     el.binderFilterEpitope.addEventListener('input', () => scheduleBinderRefresh({ silent: true }));
     el.binderFilterEpitope.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
+  }
+  if (el.binderFilterEngine) {
+    el.binderFilterEngine.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
   }
   if (el.binderOrderBy) {
     el.binderOrderBy.addEventListener('change', () => {

@@ -187,6 +187,14 @@
                     <span style="color:#0f172a;">Filter epitope</span>
                     <input type="text" id="binder-filter-epitope" placeholder="e.g. epitope_1" style="min-width:140px;">
                   </label>
+                  <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:160px;">
+                    <span style="color:#0f172a;">Filter engine</span>
+                    <select id="binder-filter-engine" style="min-width:140px;">
+                      <option value="">All</option>
+                      <option value="boltzgen">BoltzGen</option>
+                      <option value="rfantibody">RFAntibody</option>
+                    </select>
+                  </label>
                   <label class="help-text" style="display:flex; flex-direction:column; gap:3px; min-width:120px;">
                     <span style="color:#0f172a;">Order by</span>
                     <select id="binder-order-by" style="min-width:120px;">
@@ -204,18 +212,18 @@
                 </div>
               </div>
               <div class="card" style="padding: 10px; border:1px solid #e2e8f0; border-radius:8px;">
-                <p class="help-text" style="margin: 0 0 8px 0;">Latest BoltzGen binders from the diversity roll-up. Paths are clickable; PyMOL will highlight the target epitope.</p>
+                <p class="help-text" style="margin: 0 0 8px 0;">Latest binders from the diversity roll-up (BoltzGen + RFAntibody). After rsync, click Refresh to rebuild all_design_metrics and update the table.</p>
                 <table id="boltz-binders-table">
                   <thead>
                     <tr>
                       <th>PDB ID</th>
                       <th>Epitope</th>
-                      <th>Rank</th>
+                      <th>Engine</th>
                       <th>ipTM</th>
                       <th>RMSD</th>
                       <th>Hotspot dist (Å)</th>
                       <th>ipSAE</th>
-                      <th>CIF path</th>
+                      <th>Design path</th>
                       <th>PyMOL</th>
                     </tr>
                   </thead>

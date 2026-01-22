@@ -294,6 +294,7 @@ class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None
     epitope_id: Optional[str] = None
+    engine: Optional[str] = None
     rank: int
     iptm: Optional[float] = None
     rmsd: Optional[float] = None
@@ -461,6 +462,7 @@ class BoltzgenBinderPymolRequest(BaseModel):
     binding_label: Optional[str] = None
     include_label: Optional[str] = None
     target_path: Optional[str] = None
+    config_path: Optional[str] = None
 
 
 class BoltzgenBinderPymolResponse(BaseModel):

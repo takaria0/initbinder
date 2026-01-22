@@ -2446,9 +2446,9 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
-_DIVERSITY_CACHE_VERSION = 3
+_DIVERSITY_CACHE_VERSION = 4
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
-_BINDER_CACHE_VERSION = 4
+_BINDER_CACHE_VERSION = 5
 _DIVERSITY_SOURCE_FILES = (
     "all_designs_metrics.csv",
     "epitope_stats.json",
@@ -2563,7 +2563,15 @@ def _populate_hotspot_distances(
             return None
         return num if math.isfinite(num) else None
 
-    pending = [row for row in rows if _num(row.get("hotspot_dist")) is None]
+    def _is_boltz_row(row: dict) -> bool:
+        engine = str(row.get("engine") or "").strip().lower()
+        return not engine or "boltz" in engine
+
+    pending = [
+        row
+        for row in rows
+        if _num(row.get("hotspot_dist")) is None and _is_boltz_row(row)
+    ]
     if not pending:
         return False
 
@@ -2626,6 +2634,7 @@ def _get_cached_binder_rows(
     ids: Optional[List[str]] = None,
     filter_pdb: Optional[str] = None,
     filter_epitope: Optional[str] = None,
+    filter_engine: Optional[str] = None,
     order_by: Optional[str] = None,
     page: int = 1,
     page_size: int = 100,
@@ -2648,6 +2657,18 @@ def _get_cached_binder_rows(
     if ids:
         wanted = {p.strip().upper() for p in ids if p and str(p).strip()}
         rows = [row for row in rows if str(row.get("pdb_id") or "").strip().upper() in wanted]
+
+    engine_filter = str(filter_engine or "").strip().lower()
+    if engine_filter:
+        if "boltz" in engine_filter:
+            engine_filter = "boltzgen"
+        elif engine_filter in {"rfa", "rf", "rfantibody"}:
+            engine_filter = "rfantibody"
+        rows = [
+            row
+            for row in rows
+            if str(row.get("engine") or "").strip().lower() == engine_filter
+        ]
 
     pdb_filter = str(filter_pdb or "").strip().upper()
     ep_filter = str(filter_epitope or "").strip().lower()
@@ -2860,15 +2881,10 @@ def _maybe_run_rfa_assessments(
                 log(res.stderr.strip())
 
 
-def _collect_rfa_scatter_metrics(
-    targets_dir: Path,
-) -> tuple[Dict[str, Dict[str, Dict[str, List[float]]]], Dict[str, str]]:
-    metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(
-        lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
-    )
-    run_labels: Dict[str, str] = {}
+def _find_latest_rfa_rankings(targets_dir: Path) -> Dict[str, Path]:
+    latest_by_pdb: Dict[str, Path] = {}
     if not targets_dir.exists():
-        return metrics, run_labels
+        return latest_by_pdb
 
     for pdb_dir in sorted(targets_dir.iterdir()):
         if not pdb_dir.is_dir():
@@ -2884,16 +2900,99 @@ def _collect_rfa_scatter_metrics(
             assess_roots.append(legacy_assess)
         if not assess_roots:
             continue
-        ranking_files = []
+        ranking_files: List[Path] = []
         for root in assess_roots:
             ranking_files.extend(root.glob("*/af3_rankings.tsv"))
         ranking_files = sorted(
             ranking_files,
             key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
         )
-        if not ranking_files:
+        if ranking_files:
+            latest_by_pdb[pdb_id] = ranking_files[-1]
+
+    return latest_by_pdb
+
+
+def _pick_rfa_design_path(row: Dict[str, object]) -> Optional[str]:
+    for key in (
+        "af3_model_cif_path",
+        "mpnn_pdb_path",
+        "rfdiffusion_pdb_path",
+        "prepared_pdb_path",
+    ):
+        path = str(row.get(key) or "").strip()
+        if path:
+            return path
+    return None
+
+
+def _collect_rfa_design_rows(targets_dir: Path) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    latest_by_pdb = _find_latest_rfa_rankings(targets_dir)
+    rank_counters: Dict[str, int] = defaultdict(int)
+    for pdb_id, latest in latest_by_pdb.items():
+        run_label = latest.parent.name
+        try:
+            with latest.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                for row in reader:
+                    rank_counters[pdb_id] += 1
+                    ep_label = (
+                        str(row.get("arm") or "").strip()
+                        or str(row.get("epitope") or "").strip()
+                        or str(row.get("hotspot_variant") or "").strip()
+                        or "unknown"
+                    )
+                    record: Dict[str, object] = dict(row)
+                    record.setdefault("PDB_ID", pdb_id)
+                    record.setdefault("pdb_id", pdb_id)
+                    record.setdefault("epitope_name", ep_label)
+                    record.setdefault("epitope", ep_label)
+                    record.setdefault("datetime", run_label)
+                    record.setdefault("run_label", run_label)
+                    record["engine"] = "rfantibody"
+                    record["source_path"] = str(latest)
+                    record["design_path"] = _pick_rfa_design_path(record) or None
+                    record.setdefault("target_path", row.get("prepared_pdb_path") or row.get("prepared_target_pdb_path"))
+                    record["rank"] = _safe_int(row.get("rank") or row.get("index") or row.get("af2_rank"), rank_counters[pdb_id])
+                    record["iptm"] = _safe_float(row.get("af3_iptm") or row.get("iptm") or row.get("design_iptm"))
+                    record["rmsd"] = _safe_float(
+                        row.get("rmsd_binder_prepared_frame")
+                        or row.get("rmsd_binder_after_kabsch")
+                        or row.get("rmsd")
+                    )
+                    record["ipsae_min"] = _safe_float(
+                        row.get("ipsae_min")
+                        or row.get("ipsae")
+                        or row.get("ipSAE_min")
+                        or row.get("ipsae_minimum")
+                    )
+                    record["binder_seq"] = (
+                        row.get("binder_seq")
+                        or row.get("binder_sequence")
+                        or row.get("binder_sequence_aa")
+                        or row.get("sequence")
+                    )
+                    rows.append(record)
+        except Exception as exc:
+            print(f"[rfa-diversity] failed to read {latest}: {exc}")
+            traceback.print_exc()
             continue
-        latest = ranking_files[-1]
+    return rows
+
+
+def _collect_rfa_scatter_metrics(
+    targets_dir: Path,
+) -> tuple[Dict[str, Dict[str, Dict[str, List[float]]]], Dict[str, str]]:
+    metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(
+        lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
+    )
+    run_labels: Dict[str, str] = {}
+    if not targets_dir.exists():
+        return metrics, run_labels
+
+    latest_by_pdb = _find_latest_rfa_rankings(targets_dir)
+    for pdb_id, latest in latest_by_pdb.items():
         run_labels[pdb_id] = latest.parent.name
         try:
             with latest.open("r", encoding="utf-8") as handle:
@@ -2937,6 +3036,7 @@ def _response_from_diversity_cache(
     binder_page_size: int,
     binder_filter_pdb: Optional[str] = None,
     binder_filter_epitope: Optional[str] = None,
+    binder_filter_engine: Optional[str] = None,
     binder_order_by: Optional[str] = None,
 ) -> Optional[BoltzgenDiversityResponse]:
     csv_name = cache.get("csv_name") or None
@@ -2958,16 +3058,12 @@ def _response_from_diversity_cache(
     page_val = max(1, int(binder_page or 1))
     page_size_val = min(200, max(1, int(binder_page_size or 100)))
     if include_binders and csv_path:
-        binder_ids = sorted({
-            str(entry.get("pdb_id") or "").strip().upper()
-            for entry in metrics_files
-            if entry.get("pdb_id")
-        })
         binder_rows, binder_total = _get_cached_binder_rows(
             csv_path,
-            ids=binder_ids,
+            ids=None,
             filter_pdb=binder_filter_pdb,
             filter_epitope=binder_filter_epitope,
+            filter_engine=binder_filter_engine,
             order_by=binder_order_by,
             page=page_val,
             page_size=page_size_val,
@@ -2977,7 +3073,7 @@ def _response_from_diversity_cache(
         if binder_total:
             binder_msg = f"Showing {len(binder_rows)} of {binder_total} binders"
         else:
-            binder_msg = "No binders match current filters." if filters_active else "No BoltzGen binders found."
+            binder_msg = "No binders match current filters." if filters_active else "No binders found."
 
     return BoltzgenDiversityResponse(
         csv_name=csv_name,
@@ -3572,6 +3668,7 @@ def build_boltzgen_diversity_report(
     binder_page_size: int = 100,
     binder_filter_pdb: Optional[str] = None,
     binder_filter_epitope: Optional[str] = None,
+    binder_filter_engine: Optional[str] = None,
     binder_order_by: Optional[str] = None,
     force_refresh: bool = False,
 ) -> BoltzgenDiversityResponse:
@@ -3579,6 +3676,7 @@ def build_boltzgen_diversity_report(
 
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    print(f"[bulk-diversity] starting report; targets_dir={targets_dir}")
     if not targets_dir.exists():
         return BoltzgenDiversityResponse(
             message=f"Targets directory missing: {targets_dir}",
@@ -3605,6 +3703,7 @@ def build_boltzgen_diversity_report(
                     binder_page_size=binder_page_size,
                     binder_filter_pdb=binder_filter_pdb,
                     binder_filter_epitope=binder_filter_epitope,
+                    binder_filter_engine=binder_filter_engine,
                     binder_order_by=binder_order_by,
                 )
                 if cached:
@@ -3622,12 +3721,19 @@ def build_boltzgen_diversity_report(
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[epitope-diversity] failed to build plots: {exc}")
 
-    aggregate_rows: List[Dict[str, object]] = []
+    boltz_rows: List[Dict[str, object]] = []
     metrics: Dict[str, Dict[str, Dict[str, List[object]]]] = defaultdict(
         lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
     )
     rfa_metrics, rfa_run_labels = _collect_rfa_scatter_metrics(targets_dir)
+    rfa_rows = _collect_rfa_design_rows(targets_dir)
     has_rfa_metrics = any(rfa_metrics.values())
+    has_rfa_rows = bool(rfa_rows)
+    print(
+        "[bulk-diversity] collected inputs: "
+        f"boltz_rows=0 rfa_rows={len(rfa_rows)} "
+        f"rfa_metrics_targets={len(rfa_metrics)}"
+    )
     seen_metrics: set[str] = set()
     metrics_files: List[Dict[str, str]] = []
     epitope_residues: Dict[str, Dict[str, str]] = defaultdict(dict)
@@ -3783,14 +3889,30 @@ def build_boltzgen_diversity_report(
                                             min_dist = _min_distance(binder_coords, hotspot_coords)
                                             if min_dist is not None:
                                                 record["binder_hotspot_min_dist"] = round(min_dist, 3)
-                            aggregate_rows.append(record)
-
                             rmsd_val = _safe_float(row.get("filter_rmsd") or row.get("native_rmsd"))
                             iptm_val = _safe_float(
                                 row.get("design_to_target_iptm")
                                 or row.get("designfolding-design_to_target_iptm")
                                 or row.get("iptm")
                             )
+                            record.setdefault("engine", "boltzgen")
+                            record.setdefault("run_label", run_label)
+                            if iptm_val is not None:
+                                record["iptm"] = iptm_val
+                            if rmsd_val is not None:
+                                record["rmsd"] = rmsd_val
+                            if "design_path" not in record or not record.get("design_path"):
+                                if cif_path:
+                                    record["design_path"] = str(cif_path)
+                                else:
+                                    try:
+                                        spec_dir = metrics_path.parent.parent
+                                        design = resolve_boltz_design_path(spec_dir, row)
+                                        if design:
+                                            record["design_path"] = str(design)
+                                    except Exception:
+                                        pass
+                            boltz_rows.append(record)
                             if rmsd_val is not None:
                                 metrics[pdb_id][epitope_name]["rmsd"].append(rmsd_val)
                             if iptm_val is not None:
@@ -3803,6 +3925,8 @@ def build_boltzgen_diversity_report(
                     traceback.print_exc()
                     continue
 
+    aggregate_rows: List[Dict[str, object]] = boltz_rows + rfa_rows
+    print(f"[bulk-diversity] aggregate_rows={len(aggregate_rows)} boltz_rows={len(boltz_rows)}")
     epitope_plot_entries: List[BoltzgenDiversityPlot] = []
     epitope_html_sections: List[str] = []
     if epitope_plot_specs:
@@ -3861,17 +3985,48 @@ def build_boltzgen_diversity_report(
         })
         return response
 
-    csv_path: Path | None = None
-    if aggregate_rows:
-        for row in aggregate_rows:
+    boltz_csv_path: Path | None = None
+    all_csv_path: Path | None = None
+    if boltz_rows:
+        for row in boltz_rows:
             pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
             if not pdb_val:
                 continue
             binder_counts[pdb_val] = binder_counts.get(pdb_val, 0) + 1
 
+        boltz_keys: List[str] = []
+        boltz_seen: set[str] = set()
+        boltz_cols = ["PDB_ID", "epitope_name", "datetime", "source_path"]
+        for col in boltz_cols:
+            boltz_keys.append(col)
+            boltz_seen.add(col)
+        for row in boltz_rows:
+            for key in row.keys():
+                if key not in boltz_seen:
+                    boltz_keys.append(key)
+                    boltz_seen.add(key)
+
+        boltz_csv_path = out_dir / f"boltzgen_design_metrics_{timestamp}.csv"
+        with boltz_csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=boltz_keys)
+            writer.writeheader()
+            writer.writerows(boltz_rows)
+        print(f"[bulk-diversity] wrote boltz CSV: {boltz_csv_path}")
+
+    if aggregate_rows:
         all_keys: List[str] = []
         seen_keys: set[str] = set()
-        extra_cols = ["PDB_ID", "epitope_name", "datetime", "source_path"]
+        extra_cols = [
+            "PDB_ID",
+            "epitope_name",
+            "datetime",
+            "engine",
+            "rank",
+            "iptm",
+            "rmsd",
+            "design_path",
+            "source_path",
+        ]
         for col in extra_cols:
             all_keys.append(col)
             seen_keys.add(col)
@@ -3881,24 +4036,30 @@ def build_boltzgen_diversity_report(
                     all_keys.append(key)
                     seen_keys.add(key)
 
-        csv_path = out_dir / f"boltzgen_design_metrics_{timestamp}.csv"
-        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        all_csv_path = out_dir / f"all_design_metrics_{timestamp}.csv"
+        with all_csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=all_keys)
             writer.writeheader()
             writer.writerows(aggregate_rows)
+        print(f"[bulk-diversity] wrote combined CSV: {all_csv_path}")
 
     page_val = max(1, int(binder_page or 1))
     page_size_val = min(200, max(1, int(binder_page_size or 100)))
     binder_rows: List[BoltzgenBinderRow] = []
     binder_total = 0
     binder_msg: Optional[str] = None
-    if include_binders and csv_path:
-        binder_ids = sorted({entry.get("pdb_id", "").strip().upper() for entry in metrics_files if entry.get("pdb_id")})
+    if include_binders and all_csv_path:
+        binder_ids = sorted({
+            str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
+            for row in aggregate_rows
+            if str(row.get("PDB_ID") or row.get("pdb_id") or "").strip()
+        })
         binder_rows, binder_total = _get_cached_binder_rows(
-            csv_path,
+            all_csv_path,
             ids=binder_ids,
             filter_pdb=binder_filter_pdb,
             filter_epitope=binder_filter_epitope,
+            filter_engine=binder_filter_engine,
             order_by=binder_order_by,
             page=page_val,
             page_size=page_size_val,
@@ -3908,7 +4069,7 @@ def build_boltzgen_diversity_report(
         if binder_total:
             binder_msg = f"Showing {len(binder_rows)} of {binder_total} binders"
         else:
-            binder_msg = "No binders match current filters." if filters_active else "No BoltzGen binders found."
+            binder_msg = "No binders match current filters." if filters_active else "No binders found."
 
     plot_entries: List[BoltzgenDiversityPlot] = list(epitope_plot_entries)
     try:
@@ -3921,11 +4082,11 @@ def build_boltzgen_diversity_report(
         print(exc)
         traceback.print_exc()
         source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
-        csv_name = csv_path.name if csv_path else None
+        csv_name = all_csv_path.name if all_csv_path else None
         if aggregate_rows and has_rfa_metrics:
             message = (
-                f"Generated BoltzGen CSV ({len(aggregate_rows)} rows); "
-                f"RFA scatter plots skipped (matplotlib unavailable)."
+                f"Generated combined CSV ({len(aggregate_rows)} rows); "
+                "RFA scatter plots skipped (matplotlib unavailable)."
             )
         else:
             message = "Matplotlib unavailable; generated CSV only." if aggregate_rows else "Matplotlib unavailable."
@@ -4481,7 +4642,7 @@ def build_boltzgen_diversity_report(
     report_title = "Binder diversity"
     report_summary = (
         "Aggregated metrics across targets and epitopes from BoltzGen runs."
-        if not has_rfa_metrics
+        if not (has_rfa_metrics or has_rfa_rows)
         else "Aggregated metrics across targets and epitopes from BoltzGen and RFAntibody runs."
     )
     html_content = "\n".join(
@@ -4511,22 +4672,32 @@ def build_boltzgen_diversity_report(
     )
     html_path.write_text(html_content, encoding="utf-8")
     source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
-    rfa_designs = sum(
+    rfa_scatter_designs = sum(
         len(ep_vals.get("pairs") or [])
         for target_vals in rfa_metrics.values()
         for ep_vals in target_vals.values()
     )
-    if aggregate_rows and has_rfa_metrics:
+    boltz_designs = len(boltz_rows)
+    rfa_designs = len(rfa_rows)
+    rfa_target_ids: List[str] = []
+    for row in rfa_rows:
+        pdb_val = str(row.get("PDB_ID") or row.get("pdb_id") or "").strip().upper()
+        if pdb_val:
+            rfa_target_ids.append(pdb_val)
+    rfa_targets = len(set(rfa_target_ids))
+    if boltz_designs and (rfa_designs or has_rfa_metrics):
         message = (
-            f"Aggregated {len(aggregate_rows)} BoltzGen designs across {len(metrics)} targets; "
-            f"{rfa_designs} RFA designs across {len(rfa_metrics)} targets."
+            f"Aggregated {boltz_designs} BoltzGen designs across {len(metrics)} targets; "
+            f"{rfa_designs} RFA designs across {rfa_targets or len(rfa_metrics)} targets."
         )
-    elif aggregate_rows:
-        message = f"Aggregated {len(aggregate_rows)} designs across {len(metrics)} targets."
+    elif boltz_designs:
+        message = f"Aggregated {boltz_designs} designs across {len(metrics)} targets."
+    elif rfa_designs:
+        message = f"Aggregated {rfa_designs} RFA designs across {rfa_targets or len(rfa_metrics)} targets."
     else:
-        message = f"Plotted {rfa_designs} RFA designs across {len(rfa_metrics)} targets."
+        message = f"Plotted {rfa_scatter_designs} RFA designs across {len(rfa_metrics)} targets."
     response = BoltzgenDiversityResponse(
-        csv_name=csv_path.name if csv_path else None,
+        csv_name=all_csv_path.name if all_csv_path else None,
         output_dir=str(out_dir),
         html_name=html_path.name,
         plots=plot_entries,
@@ -4540,7 +4711,7 @@ def build_boltzgen_diversity_report(
         binder_counts=binder_counts,
     )
     _write_diversity_cache(out_dir, {
-        "csv_name": csv_path.name if csv_path else None,
+        "csv_name": all_csv_path.name if all_csv_path else None,
         "html_name": html_path.name,
         "output_dir": str(out_dir),
         "plots": [plot.dict() for plot in plot_entries],
@@ -4629,10 +4800,23 @@ def _load_binder_rows_from_csv(
             if wanted_set and pdb_id not in wanted_set:
                 continue
 
+            engine_raw = str(raw.get("engine") or raw.get("model_engine") or raw.get("pipeline") or "").strip().lower()
+            if engine_raw:
+                if "boltz" in engine_raw:
+                    engine = "boltzgen"
+                elif engine_raw in {"rfa", "rf", "rfantibody"} or "rfantibody" in engine_raw:
+                    engine = "rfantibody"
+                else:
+                    engine = engine_raw
+            else:
+                engine = "boltzgen"
+
             epitope = (raw.get("epitope_name") or raw.get("spec") or raw.get("epitope") or "").strip() or None
             run_label = (raw.get("datetime") or raw.get("run_label") or "").strip() or None
             iptm_val = _safe_float(
-                raw.get("design_to_target_iptm")
+                raw.get("iptm")
+                or raw.get("af3_iptm")
+                or raw.get("design_to_target_iptm")
                 or raw.get("iptm")
                 or raw.get("design_iptm")
                 or raw.get("af2_iptm")
@@ -4644,7 +4828,10 @@ def _load_binder_rows_from_csv(
                 or raw.get("ipsae_minimum")
             )
             rmsd_val = _safe_float(
-                raw.get("filter_rmsd")
+                raw.get("rmsd")
+                or raw.get("rmsd_binder_prepared_frame")
+                or raw.get("rmsd_binder_after_kabsch")
+                or raw.get("filter_rmsd")
                 or raw.get("filter_rmsd_design")
                 or raw.get("bb_rmsd")
                 or raw.get("bb_target_aligned_rmsd_design")
@@ -4656,10 +4843,19 @@ def _load_binder_rows_from_csv(
 
             metrics_raw_path = str(raw.get("source_path") or "").strip()
             metrics_path = Path(metrics_raw_path).expanduser() if metrics_raw_path else None
-            spec_dir = metrics_path.parent.parent if metrics_path else None
+            spec_dir = metrics_path.parent.parent if metrics_path and engine == "boltzgen" else None
             design_path = None
             target_path = None
-            if spec_dir and spec_dir.exists():
+            if raw.get("design_path"):
+                design_path = str(raw.get("design_path")).strip() or None
+            if raw.get("target_path"):
+                target_path = str(raw.get("target_path")).strip() or None
+            if engine == "rfantibody":
+                if not design_path:
+                    design_path = _pick_rfa_design_path(raw)
+                if not target_path:
+                    target_path = str(raw.get("prepared_pdb_path") or raw.get("prepared_target_pdb_path") or "").strip() or None
+            elif spec_dir and spec_dir.exists():
                 try:
                     design = resolve_boltz_design_path(spec_dir, raw)
                     design_path = str(design) if design else None
@@ -4668,10 +4864,12 @@ def _load_binder_rows_from_csv(
                 target_candidate = spec_dir / "full_target.cif"
                 target_path = str(target_candidate) if target_candidate.exists() else None
 
-            if pdb_id not in config_cache:
-                cfg_entries = _discover_boltzgen_configs(pdb_id)
-                config_cache[pdb_id] = _binder_config_map(cfg_entries)
-            cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+            cfg_meta: Dict[str, object] = {}
+            if engine == "boltzgen":
+                if pdb_id not in config_cache:
+                    cfg_entries = _discover_boltzgen_configs(pdb_id)
+                    config_cache[pdb_id] = _binder_config_map(cfg_entries)
+                cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
             epitope_id = cfg_meta.get("epitope_id")
             if not epitope_id and epitope:
                 ep_norm = str(epitope).strip()
@@ -4691,7 +4889,7 @@ def _load_binder_rows_from_csv(
             )
             binder_seq_clean = str(binder_seq).strip() if binder_seq else None
             hotspot_dist = None
-            if compute_hotspot_distance:
+            if compute_hotspot_distance and engine == "boltzgen":
                 hotspot_dist = _min_hotspot_distance(
                     binding_label=binding_label,
                     include_label=include_label,
@@ -4705,6 +4903,7 @@ def _load_binder_rows_from_csv(
                     pdb_id=pdb_id,
                     epitope=epitope,
                     epitope_id=epitope_id,
+                    engine=engine,
                     rank=rank_val,
                     iptm=iptm_val,
                     rmsd=rmsd_val,
@@ -4732,6 +4931,7 @@ def list_boltzgen_binders(
     page_size: int = 50,
     filter_pdb: Optional[str] = None,
     filter_epitope: Optional[str] = None,
+    filter_engine: Optional[str] = None,
     order_by: Optional[str] = None,
 ) -> BoltzgenBinderResponse:
     ids = [p.strip().upper() for p in pdb_ids if p and str(p).strip()]
@@ -4745,7 +4945,7 @@ def list_boltzgen_binders(
     csv_name = report.csv_name
     if not csv_name:
         return BoltzgenBinderResponse(
-            message=report.message or "No BoltzGen metrics detected for the requested targets.",
+            message=report.message or "No binder metrics detected for the requested targets.",
             page=page,
             page_size=page_size,
         )
@@ -4761,6 +4961,7 @@ def list_boltzgen_binders(
         ids=ids,
         filter_pdb=filter_pdb,
         filter_epitope=filter_epitope,
+        filter_engine=filter_engine,
         order_by=order_by,
         page=page,
         page_size=page_size,
@@ -4773,7 +4974,7 @@ def list_boltzgen_binders(
         if filters_active:
             message = "No binders match current filters."
         else:
-            message = report.message or "No BoltzGen metrics detected for the requested targets."
+            message = report.message or "No binder metrics detected for the requested targets."
     else:
         message = f"Showing {len(page_rows)} of {total_rows} binders"
 

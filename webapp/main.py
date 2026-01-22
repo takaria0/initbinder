@@ -913,6 +913,7 @@ async def api_boltzgen_diversity(
     page_size: int = Query(100, ge=1, le=200),
     filter_pdb: Optional[str] = Query(None),
     filter_epitope: Optional[str] = Query(None),
+    filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
 ) -> BoltzgenDiversityResponse:
     return build_boltzgen_diversity_report(
@@ -921,6 +922,7 @@ async def api_boltzgen_diversity(
         binder_page_size=page_size,
         binder_filter_pdb=filter_pdb,
         binder_filter_epitope=filter_epitope,
+        binder_filter_engine=filter_engine,
         binder_order_by=order_by,
     )
 
@@ -931,6 +933,7 @@ async def api_boltzgen_diversity_refresh(
     page_size: int = Query(100, ge=1, le=200),
     filter_pdb: Optional[str] = Query(None),
     filter_epitope: Optional[str] = Query(None),
+    filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
 ) -> BoltzgenDiversityResponse:
     return build_boltzgen_diversity_report(
@@ -939,6 +942,7 @@ async def api_boltzgen_diversity_refresh(
         binder_page_size=page_size,
         binder_filter_pdb=filter_pdb,
         binder_filter_epitope=filter_epitope,
+        binder_filter_engine=filter_engine,
         binder_order_by=order_by,
         force_refresh=True,
     )
@@ -960,6 +964,7 @@ async def api_boltzgen_binders(
     page_size: int = Query(100, ge=1, le=100),
     filter_pdb: Optional[str] = Query(None),
     filter_epitope: Optional[str] = Query(None),
+    filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
 ) -> BoltzgenBinderResponse:
     response.headers["Cache-Control"] = "no-store"
@@ -971,6 +976,7 @@ async def api_boltzgen_binders(
         page_size=page_size,
         filter_pdb=filter_pdb,
         filter_epitope=filter_epitope,
+        filter_engine=filter_engine,
         order_by=order_by,
     )
 
@@ -1044,6 +1050,7 @@ async def api_boltzgen_binder_pymol(
             binding_label=payload.binding_label,
             include_label=payload.include_label,
             target_path=payload.target_path,
+            config_path=payload.config_path,
         )
     except PyMolLaunchError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

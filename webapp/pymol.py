@@ -29,11 +29,13 @@ try:
         export_design_bundle,
         export_hotspot_bundle,
         _collect_expression_regions,
+        _load_boltzgen_crop_tokens,
     )
 except Exception as exc:  # pragma: no cover - defensive import guard
     export_design_bundle = None  # type: ignore
     export_hotspot_bundle = None  # type: ignore
     _collect_expression_regions = None  # type: ignore
+    _load_boltzgen_crop_tokens = None  # type: ignore
     _PYMOL_UTILS_ERROR = exc
 else:
     _PYMOL_UTILS_ERROR = None
@@ -124,6 +126,83 @@ def _gather_expression_regions(pdb_id: str) -> tuple[Optional[str], list[dict[st
                 target_chains.add(str(entry).strip().upper())
 
     return vendor_label, regions, target_chains
+
+
+def _normalize_label(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _resolve_boltzgen_config_path(
+    pdb_id: str,
+    *,
+    design_path: Path,
+    epitope_label: Optional[str],
+    config_path: Optional[str],
+) -> Optional[Path]:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    target_dir = targets_dir / pdb_id.upper()
+
+    if config_path:
+        candidate = Path(config_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = target_dir / candidate
+        if candidate.exists():
+            return candidate
+
+    config_dir = target_dir / "configs"
+    if not config_dir.exists():
+        return None
+
+    candidates = sorted(config_dir.rglob("boltzgen_config.yaml"))
+    if not candidates:
+        return None
+
+    labels: set[str] = set()
+    if epitope_label:
+        labels.add(_normalize_label(epitope_label))
+    for part in design_path.parts:
+        norm = _normalize_label(part)
+        if not norm:
+            continue
+        match = re.search(r"epitope\\d+", norm)
+        if match:
+            labels.add(match.group(0))
+        if norm.startswith("epitope"):
+            labels.add(norm)
+
+    if labels:
+        for cand in candidates:
+            parent_norm = _normalize_label(cand.parent.name)
+            if parent_norm in labels:
+                return cand
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _infer_boltzgen_include_label(
+    pdb_id: str,
+    *,
+    design_path: Path,
+    epitope_label: Optional[str],
+    config_path: Optional[str],
+) -> Optional[str]:
+    if _load_boltzgen_crop_tokens is None:
+        return None
+    cfg_path = _resolve_boltzgen_config_path(
+        pdb_id,
+        design_path=design_path,
+        epitope_label=epitope_label,
+        config_path=config_path,
+    )
+    if not cfg_path:
+        return None
+    tokens = _load_boltzgen_crop_tokens(cfg_path)
+    if not tokens:
+        return None
+    return ";".join(tokens)
 
 
 def _ensure_env() -> Path:
@@ -694,6 +773,7 @@ def launch_boltzgen_binder(
     binding_label: Optional[str] = None,
     include_label: Optional[str] = None,
     target_path: Optional[str] = None,
+    config_path: Optional[str] = None,
     launch: bool = True,
 ) -> tuple[Path, Path, bool]:
     _ensure_env()
@@ -732,8 +812,15 @@ def launch_boltzgen_binder(
             target_dest = session_dir / candidate.name
             shutil.copy2(candidate, target_dest)
 
-    selection_map = _selection_map_from_labels(binding_label, include_label)
-    selection = _selection_from_labels(binding_label, include_label)
+    resolved_include = include_label or _infer_boltzgen_include_label(
+        pdb_id,
+        design_path=design_src,
+        epitope_label=epitope_label,
+        config_path=config_path,
+    )
+    selection_map = _selection_map_from_labels(binding_label, resolved_include)
+    selection = _selection_from_labels(binding_label, resolved_include)
+    crop_selection = _selection_from_labels(None, resolved_include)
     selection_obj = "target" if (target_dest or hotspot_pml) else "complex"
 
     vendor_label, expression_regions, target_chain_ids = _gather_expression_regions(pdb_id)
@@ -826,7 +913,24 @@ def launch_boltzgen_binder(
         if vendor_clean:
             script_lines.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_clean}\"")
 
-    if target_obj == "target":
+    crop_aligned = False
+    if crop_selection and target_obj == "target":
+        script_lines.extend(
+            [
+                "set_color boltzgen_crop, [0.950, 0.650, 0.200]",
+                f"select boltzgen_crop, {target_obj} and ({crop_selection})",
+                "show surface, boltzgen_crop",
+                "set transparency, 0.65, boltzgen_crop",
+                "color boltzgen_crop, boltzgen_crop",
+                "create cropped_target, boltzgen_crop",
+                "show cartoon, cropped_target",
+                "color boltzgen_crop, cropped_target",
+                f"align (complex and ({crop_selection})), cropped_target",
+            ]
+        )
+        crop_aligned = True
+
+    if target_obj == "target" and not crop_aligned:
         if selection_map:
             for chain_id in sorted(selection_map):
                 resi_expr = selection_map[chain_id]
