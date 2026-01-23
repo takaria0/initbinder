@@ -59,6 +59,8 @@ from .models import (
     DesignEngineListResponse,
     DesignRunRequest,
     DesignRunResponse,
+    EpitopeDiversityRequest,
+    EpitopeDiversityResponse,
     ExportRequest,
     ExportResponse,
     GoldenGateRequest,
@@ -100,6 +102,7 @@ from .designs import list_design_engines
 from .pipeline import get_target_status
 from .bulk import (
     build_antigen_diversity_report,
+    build_epitope_diversity_report_for_selection,
     build_boltzgen_diversity_report,
     list_boltzgen_binders,
     list_boltzgen_config_state,
@@ -954,6 +957,14 @@ async def api_boltzgen_antigen_diversity(
 ) -> AntigenDiversityResponse:
     ids = [(p or "").strip().upper() for p in (payload.pdb_ids or []) if (p or "").strip()]
     return build_antigen_diversity_report(ids)
+
+
+@app.post("/api/bulk/boltzgen/epitope-diversity", response_model=EpitopeDiversityResponse)
+async def api_boltzgen_epitope_diversity(
+    payload: EpitopeDiversityRequest,
+) -> EpitopeDiversityResponse:
+    selections = [str(item).strip() for item in (payload.selections or []) if str(item).strip()]
+    return build_epitope_diversity_report_for_selection(selections)
 
 
 @app.get("/api/bulk/boltzgen/binders", response_model=BoltzgenBinderResponse)

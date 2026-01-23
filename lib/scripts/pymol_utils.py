@@ -1057,11 +1057,13 @@ def _write_hotspot_pml(
         # mask（sticks）
         mask_keys = (epitopes.get(epi, {}) or {}).get("mask", [])
         sel = _keys_to_sel("target", mask_keys)
+        label_parts: list[str] = []
         if sel:
             pml.append(f"select epi_mask_{epi_key}, {sel}\n")
             pml.append(f"show sticks, epi_mask_{epi_key}\n")
             pml.append(f"color epi_{epi_key}, epi_mask_{epi_key}\n")
             pml.append(f"group {epi_key}, epi_mask_{epi_key}\n")
+            label_parts.append(f"epi_mask_{epi_key}")
 
         # 各 variant（spheres / crop）
         has_crop = False
@@ -1079,6 +1081,7 @@ def _write_hotspot_pml(
                 pml.append(f"color epi_{epi_key}, {obj}\n")
                 pml.append(f"group {epi_key}, {obj}\n")
                 has_crop = True
+                label_parts.append(obj)
                 continue
             if not keys:
                 continue
@@ -1092,17 +1095,17 @@ def _write_hotspot_pml(
             color_name = f"epi_{epi_key}_{var_key}" if var in {"A", "B", "C"} else f"epi_{epi_key}"
             pml.append(f"color {color_name}, {obj}\n")
             pml.append(f"group {epi_key}, {obj}\n")
+            label_parts.append(obj)
 
         label_sel = f"epi_label_{epi_key}"
-        label_expr = f"epi_mask_{epi_key} or epi_hot_{epi_key}_*"
-        if has_crop:
-            label_expr = f"{label_expr} or epi_crop_{epi_key}"
-        pml.append(f"select {label_sel}, {label_expr}\n")
-        norm_name = _norm_label(epi)
-        label_text = None
-        if epitope_index_map and norm_name in epitope_index_map:
-            label_text = epitope_index_map.get(norm_name)
-        label_specs.append((label_sel, label_text or epi, f"epi_{epi_key}"))
+        if label_parts:
+            label_expr = " or ".join(label_parts)
+            pml.append(f"select {label_sel}, {label_expr}\n")
+            norm_name = _norm_label(epi)
+            label_text = None
+            if epitope_index_map and norm_name in epitope_index_map:
+                label_text = epitope_index_map.get(norm_name)
+            label_specs.append((label_sel, label_text or epi, f"epi_{epi_key}"))
         pml.append("\n")
 
     if label_specs:
@@ -1358,6 +1361,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     selection_mode = "auth" if label_auth_map else "label"
     dropped_keys: list[str] = []
     available_chains = _detect_structure_chains(structure_path)
+    fallback_auth = False
     epitopes_mapped = False
     if label_auth_map:
         expression_regions = _augment_regions_with_auth_selection(
@@ -1376,17 +1380,27 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             if missing_expr or missing_allowed:
                 print("[pymol_utils] Warning: auth mapping missing for some ranges; those meshes will be skipped to avoid mixing numbering.")
     if available_chains:
+        def _map_epitope_keys(keys: Sequence[object]) -> list[str]:
+            nonlocal fallback_auth
+            if label_auth_map:
+                mapped = _append_auth_tokens(
+                    keys,
+                    label_auth_map,
+                    strict_auth=selection_mode == "auth",
+                    dropped=dropped_keys,
+                )
+                if not mapped and keys:
+                    mapped = [str(k).strip() for k in keys if str(k).strip()]
+                    fallback_auth = True
+                return _remap_keys_to_chains(mapped, available_chains)
+            return _remap_keys_to_chains(keys, available_chains)
+
         remapped_epitopes: Dict[str, Dict[str, List[str]]] = {}
         for epi, variants in epitopes.items():
             if not isinstance(variants, Mapping):
                 continue
             remapped_epitopes[epi] = {
-                var: _remap_keys_to_chains(
-                    _append_auth_tokens(keys, label_auth_map, strict_auth=selection_mode == "auth", dropped=dropped_keys)
-                    if label_auth_map
-                    else keys,
-                    available_chains,
-                )
+                var: _map_epitope_keys(keys)
                 for var, keys in variants.items()
             }
         epitopes = remapped_epitopes or epitopes
@@ -1401,12 +1415,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
                 if not isinstance(variants, Mapping):
                     continue
                 remapped_epitopes[epi] = {
-                    var: _remap_keys_to_chains(
-                        _append_auth_tokens(keys, label_auth_map, strict_auth=selection_mode == "auth", dropped=dropped_keys)
-                        if label_auth_map
-                        else keys,
-                        available_chains,
-                    )
+                    var: _map_epitope_keys(keys)
                     for var, keys in variants.items()
                 }
             epitopes = remapped_epitopes or epitopes
@@ -1451,6 +1460,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
             sample = ", ".join(dropped_keys[:6])
             suffix = "..." if len(dropped_keys) > 6 else ""
             print(f"[pymol_utils] Warning: dropped {len(dropped_keys)} epitope residues without auth mapping (e.g., {sample}{suffix}).")
+        if fallback_auth:
+            print("[pymol_utils] Warning: using raw epitope keys; auth mapping returned no matches.")
 
     bundle_dir = Path(tempfile.mkdtemp(prefix=f"{pdb_id_u}_prep_pymol_"))
     # Copy chosen structure with just its basename

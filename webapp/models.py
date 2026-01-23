@@ -290,6 +290,28 @@ class AntigenDiversityResponse(BaseModel):
     message: Optional[str] = None
 
 
+class EpitopeDiversityPlot(BaseModel):
+    title: str
+    png_name: Optional[str] = None
+    png_path: Optional[str] = None
+    svg_name: Optional[str] = None
+    svg_path: Optional[str] = None
+
+
+class EpitopeDiversityRequest(BaseModel):
+    selections: List[str] = Field(
+        default_factory=list,
+        description="Entries like 5WT9:epitope_1, 3J8F:4",
+    )
+
+
+class EpitopeDiversityResponse(BaseModel):
+    output_dir: Optional[str] = None
+    csv_name: Optional[str] = None
+    plots: List[EpitopeDiversityPlot] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
 class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None

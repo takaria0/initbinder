@@ -68,6 +68,27 @@ def _parse_int_token(value: object) -> Optional[int]:
     return None
 
 
+def _normalize_epitope_selectors(selectors: Optional[Sequence[object]]) -> Tuple[set[int], set[str]]:
+    indices: set[int] = set()
+    names: set[str] = set()
+    for raw in selectors or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        match = re.match(r"^epitope[_-]?(?P<idx>\d+)$", text, flags=re.IGNORECASE)
+        if match:
+            try:
+                indices.add(int(match.group("idx")))
+            except Exception:
+                continue
+            continue
+        if text.isdigit():
+            indices.add(int(text))
+            continue
+        names.add(text.lower())
+    return indices, names
+
+
 def _expand_epitope_tokens(tokens: Iterable[object]) -> Dict[str, List[int]]:
     mapping: Dict[str, set[int]] = defaultdict(set)
     for raw in tokens or []:
@@ -114,7 +135,11 @@ def _build_residue_index_map(residue_numbers: Sequence[object]) -> Dict[object, 
     return index_map
 
 
-def _collect_epitope_compositions(target_yaml: Path, pdb_id: str) -> List[dict]:
+def _collect_epitope_compositions(
+    target_yaml: Path,
+    pdb_id: str,
+    selectors: Optional[Sequence[object]] = None,
+) -> List[dict]:
     try:
         data = yaml.safe_load(target_yaml.read_text()) or {}
     except Exception:
@@ -123,9 +148,10 @@ def _collect_epitope_compositions(target_yaml: Path, pdb_id: str) -> List[dict]:
     if not isinstance(epitopes, list) or not epitopes:
         return []
 
+    idx_select, name_select = _normalize_epitope_selectors(selectors)
     seq_block = data.get("sequences") or {}
     seq_map = seq_block.get("pdb") or {}
-    res_map = seq_block.get("pdb_residue_numbers") or {}
+    res_map = seq_block.get("pdb_residue_numbers") or seq_block.get("cif_residue_numbers") or {}
     if not isinstance(seq_map, dict) or not isinstance(res_map, dict):
         return []
 
@@ -134,12 +160,17 @@ def _collect_epitope_compositions(target_yaml: Path, pdb_id: str) -> List[dict]:
         chain_index[str(chain_id).strip()] = _build_residue_index_map(residue_numbers or [])
 
     rows: List[dict] = []
-    for entry in epitopes:
+    for ep_idx, entry in enumerate(epitopes, start=1):
         if not isinstance(entry, dict):
             continue
         name = (entry.get("display_name") or entry.get("name") or "").strip()
         if not name:
             continue
+        if idx_select or name_select:
+            match_name = name.lower()
+            alt_name = str(entry.get("name") or "").strip().lower()
+            if ep_idx not in idx_select and match_name not in name_select and alt_name not in name_select:
+                continue
         residues = entry.get("residues") or []
         mapping = _expand_epitope_tokens(residues)
         aa_list: List[str] = []
@@ -189,28 +220,13 @@ def _collect_epitope_compositions(target_yaml: Path, pdb_id: str) -> List[dict]:
     return rows
 
 
-def build_epitope_diversity_plots(
-    *,
-    targets_dir: Path,
+def _render_epitope_diversity_plots(
+    rows: List[dict],
     out_dir: Path,
     timestamp: str,
-    log: Optional[Callable[[str], None]] = None,
+    log: Optional[Callable[[str], None]],
 ) -> Tuple[List[EpitopeDiversityPlotSpec], Optional[Path], int]:
-    """Render epitope diversity plots based on target.yaml epitope residues."""
     plot_specs: List[EpitopeDiversityPlotSpec] = []
-    if not targets_dir.exists():
-        return plot_specs, None, 0
-
-    rows: List[dict] = []
-    for entry in sorted(targets_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        pdb_id = entry.name.upper()
-        target_yaml = entry / "target.yaml"
-        if not target_yaml.exists():
-            continue
-        rows.extend(_collect_epitope_compositions(target_yaml, pdb_id))
-
     if not rows:
         return plot_specs, None, 0
 
@@ -375,3 +391,52 @@ def build_epitope_diversity_plots(
     if log:
         log(f"[epitope-diversity] plotted {len(plot_specs)} panels from {len(rows)} epitopes")
     return plot_specs, csv_path, len(rows)
+
+
+def build_epitope_diversity_plots(
+    *,
+    targets_dir: Path,
+    out_dir: Path,
+    timestamp: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> Tuple[List[EpitopeDiversityPlotSpec], Optional[Path], int]:
+    """Render epitope diversity plots based on target.yaml epitope residues."""
+    if not targets_dir.exists():
+        return [], None, 0
+
+    rows: List[dict] = []
+    for entry in sorted(targets_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        pdb_id = entry.name.upper()
+        target_yaml = entry / "target.yaml"
+        if not target_yaml.exists():
+            continue
+        rows.extend(_collect_epitope_compositions(target_yaml, pdb_id))
+
+    return _render_epitope_diversity_plots(rows, out_dir, timestamp, log)
+
+
+def build_epitope_diversity_plots_for_selection(
+    *,
+    targets_dir: Path,
+    out_dir: Path,
+    timestamp: str,
+    selections: Dict[str, Sequence[object]],
+    log: Optional[Callable[[str], None]] = None,
+) -> Tuple[List[EpitopeDiversityPlotSpec], Optional[Path], int]:
+    """Render epitope diversity plots for explicit PDB+epitope selections."""
+    if not targets_dir.exists():
+        return [], None, 0
+
+    rows: List[dict] = []
+    for pdb_id, selectors in selections.items():
+        pdb_id = (pdb_id or "").strip().upper()
+        if not pdb_id:
+            continue
+        target_yaml = targets_dir / pdb_id / "target.yaml"
+        if not target_yaml.exists():
+            continue
+        rows.extend(_collect_epitope_compositions(target_yaml, pdb_id, selectors))
+
+    return _render_epitope_diversity_plots(rows, out_dir, timestamp, log)

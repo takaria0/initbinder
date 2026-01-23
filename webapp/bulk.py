@@ -18,7 +18,7 @@ import subprocess
 import importlib.util
 from functools import lru_cache
 from difflib import SequenceMatcher
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -28,7 +28,11 @@ import yaml
 from plot_antigen_diversity import plot_antigen_diversity
 
 from .alignment import AlignmentNotFoundError, compute_alignment
-from .bulk_utils import EpitopeDiversityPlotSpec, build_epitope_diversity_plots
+from .bulk_utils import (
+    EpitopeDiversityPlotSpec,
+    build_epitope_diversity_plots,
+    build_epitope_diversity_plots_for_selection,
+)
 from .config import load_config
 from .designs import BoltzGenEngine
 from .job_store import JobStatus, JobStore, get_job_store
@@ -53,6 +57,8 @@ from .models import (
     BulkPreviewResponse,
     BulkRunRequest,
     DesignRunRequest,
+    EpitopeDiversityPlot,
+    EpitopeDiversityResponse,
     RfaPipelineConfigListResponse,
     RfaPipelineScript,
     RfaPipelineScriptContent,
@@ -181,6 +187,37 @@ _RES_TOKEN_PLAIN_RE = re.compile(
     r"^\s*(?P<chain>[A-Za-z0-9]+?)\s*(?P<resnum>-?\d+)\s*(?P<icode>[A-Za-z]?)\s*$"
 )
 
+AA_LIST = list("ACDEFGHIKLMNPQRSTVWY")
+AA_SET = set(AA_LIST)
+AA_GROUPS = {
+    "hydrophobic": set("AVILMFWY"),
+    "polar": set("STNQC"),
+    "charged": set("DEKRH"),
+    "special": set("GP"),
+}
+KD_SCALE = {
+    "A": 1.8,
+    "C": 2.5,
+    "D": -3.5,
+    "E": -3.5,
+    "F": 2.8,
+    "G": -0.4,
+    "H": -3.2,
+    "I": 4.5,
+    "K": -3.9,
+    "L": 3.8,
+    "M": 1.9,
+    "N": -3.5,
+    "P": -1.6,
+    "Q": -3.5,
+    "R": -4.5,
+    "S": -0.8,
+    "T": -0.7,
+    "V": 4.2,
+    "W": -0.9,
+    "Y": -1.3,
+}
+
 
 def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     """Parse residue tokens like 'A35', 'A:35', 'A_35', 'A-35', or 'A35A'."""
@@ -204,6 +241,148 @@ def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     if not chain:
         return None
     return chain, resnum, icode
+
+
+def _parse_residue_index_token(value: object) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        match = re.search(r"-?\d+", str(value))
+        if match:
+            try:
+                return int(match.group(0))
+            except Exception:
+                return None
+    return None
+
+
+def _build_residue_index_map(residue_numbers: Sequence[object]) -> Dict[object, int]:
+    index_map: Dict[object, int] = {}
+    for idx, label in enumerate(residue_numbers or []):
+        text = str(label).strip()
+        if not text:
+            continue
+        if text not in index_map:
+            index_map[text] = idx
+        numeric = _parse_residue_index_token(text)
+        if numeric is not None and numeric not in index_map:
+            index_map[numeric] = idx
+            index_map[str(numeric)] = idx
+    return index_map
+
+
+def _sequence_maps_from_target(data: dict) -> Tuple[Dict[str, str], Dict[str, Sequence[object]]]:
+    seq_block = data.get("sequences") or {}
+    seq_map_raw = seq_block.get("pdb") or {}
+    res_map_raw = seq_block.get("cif_residue_numbers") or seq_block.get("pdb_residue_numbers") or {}
+    if not isinstance(seq_map_raw, dict) or not isinstance(res_map_raw, dict):
+        return {}, {}
+    seq_map: Dict[str, str] = {}
+    res_map: Dict[str, Sequence[object]] = {}
+    for chain_id, seq in seq_map_raw.items():
+        chain = str(chain_id).strip()
+        if not chain or seq is None:
+            continue
+        seq_map[chain] = str(seq)
+    for chain_id, residues in res_map_raw.items():
+        chain = str(chain_id).strip()
+        if not chain or residues is None:
+            continue
+        if isinstance(residues, list):
+            res_map[chain] = residues
+    return seq_map, res_map
+
+
+def _compute_residue_composition(
+    tokens: Sequence[object],
+    seq_map: Dict[str, str],
+    chain_index: Dict[str, Dict[object, int]],
+) -> Optional[dict]:
+    if not tokens or not seq_map or not chain_index:
+        return None
+    aa_list: List[str] = []
+    missing = 0
+    for tok in tokens:
+        parsed = _parse_chain_res_token(tok)
+        if not parsed:
+            continue
+        chain, resnum, _icode = parsed
+        seq = seq_map.get(chain)
+        idx_map = chain_index.get(chain)
+        if not seq or not idx_map:
+            missing += 1
+            continue
+        idx = idx_map.get(resnum)
+        if idx is None:
+            idx = idx_map.get(str(resnum))
+        if idx is None or idx >= len(seq):
+            missing += 1
+            continue
+        aa = str(seq[idx]).upper()
+        if aa in AA_SET:
+            aa_list.append(aa)
+    if not aa_list:
+        return None
+    total = len(aa_list)
+    counts = Counter(aa_list)
+    group_counts = {
+        name: sum(counts.get(aa, 0) for aa in group) for name, group in AA_GROUPS.items()
+    }
+    group_fractions = {name: round(count / total, 4) for name, count in group_counts.items()}
+    kd_vals = [KD_SCALE.get(aa) for aa in aa_list if aa in KD_SCALE]
+    kd_mean = round(sum(kd_vals) / len(kd_vals), 4) if kd_vals else None
+    entropy = -sum(
+        (count / total) * math.log2(count / total) for count in counts.values() if count > 0
+    )
+    dominant = max(group_counts.items(), key=lambda item: item[1])[0] if group_counts else None
+    return {
+        "residue_count": total,
+        "missing_residues": missing,
+        "group_counts": group_counts,
+        "group_fractions": group_fractions,
+        "dominant_group": dominant,
+        "hydrophobic_fraction": group_fractions.get("hydrophobic"),
+        "hydrophobicity_kd": kd_mean,
+        "entropy": round(entropy, 4),
+        "aa_counts": {aa: counts.get(aa, 0) for aa in AA_LIST},
+    }
+
+
+def _apply_epitope_composition(
+    data: dict,
+    *,
+    ep_name: str,
+    ep_index: int,
+    hotspot_composition: Optional[dict],
+    epitope_composition: Optional[dict],
+) -> bool:
+    epitopes = data.get("epitopes")
+    if not isinstance(epitopes, list) or not epitopes:
+        return False
+    target_entry = None
+    name_norm = (ep_name or "").strip().lower()
+    if name_norm:
+        for entry in epitopes:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "display_name", "epitope_name"):
+                raw = str(entry.get(key) or "").strip().lower()
+                if raw and raw == name_norm:
+                    target_entry = entry
+                    break
+            if target_entry is not None:
+                break
+    if target_entry is None and 0 < ep_index <= len(epitopes):
+        entry = epitopes[ep_index - 1]
+        if isinstance(entry, dict):
+            target_entry = entry
+    if target_entry is None:
+        return False
+    if hotspot_composition:
+        target_entry["hotspot_composition"] = hotspot_composition
+    if epitope_composition:
+        target_entry["epitope_composition"] = epitope_composition
+    return True
 
 
 def _expand_binding_label(label: Optional[str]) -> Dict[str, List[int]]:
@@ -1523,6 +1702,24 @@ def _write_boltzgen_configs(
     engine = BoltzGenEngine()
     scaffold_paths = engine._resolve_nanobody_scaffolds()
     target_chain_ids = _target_chains_for_boltz(pdb_id)
+    target_yaml = target_dir / "target.yaml"
+    target_data: Optional[dict] = None
+    seq_map: Dict[str, str] = {}
+    chain_index: Dict[str, Dict[object, int]] = {}
+    target_dirty = False
+    if target_yaml.exists():
+        try:
+            target_data = yaml.safe_load(target_yaml.read_text()) or {}
+        except Exception:
+            target_data = None
+        if isinstance(target_data, dict):
+            seq_map, res_map = _sequence_maps_from_target(target_data)
+            if seq_map and res_map:
+                chain_index = {
+                    chain: _build_residue_index_map(residue_numbers) for chain, residue_numbers in res_map.items()
+                }
+            else:
+                target_data = None
 
     for idx, ep in enumerate(epitopes, start=1):
         ep_dir = config_root / f"epitope_{idx}"
@@ -1555,6 +1752,26 @@ def _write_boltzgen_configs(
                     continue
                 chain, resnum, _icode = parsed
                 epitope_residues.append(f"{chain}:{resnum}")
+
+        hotspot_composition = None
+        epitope_composition = None
+        if seq_map and chain_index:
+            hotspot_composition = _compute_residue_composition(hotspot_keys, seq_map, chain_index)
+            ep_tokens = epitope_residues or hotspot_keys
+            epitope_composition = _compute_residue_composition(ep_tokens, seq_map, chain_index)
+            if hotspot_composition:
+                ep["hotspot_composition"] = hotspot_composition
+            if epitope_composition:
+                ep["epitope_composition"] = epitope_composition
+            if target_data and (hotspot_composition or epitope_composition):
+                updated = _apply_epitope_composition(
+                    target_data,
+                    ep_name=name,
+                    ep_index=idx,
+                    hotspot_composition=hotspot_composition,
+                    epitope_composition=epitope_composition,
+                )
+                target_dirty = target_dirty or updated
 
         try:
             info = engine._write_spec(
@@ -1597,6 +1814,13 @@ def _write_boltzgen_configs(
             msg = f"  [epitope-stats] failed for {pdb_id.upper()} · {name}: {exc}"
             log(msg)
             print(msg)
+
+    if target_data and target_dirty:
+        try:
+            target_yaml.write_text(yaml.safe_dump(target_data, sort_keys=False))
+            log(f"  [boltzgen-config] wrote hotspot/epitope composition to {target_yaml}")
+        except Exception as exc:
+            log(f"  [boltzgen-config] warn: failed to persist composition to {target_yaml}: {exc}")
 
 
 _CONFIG_LOG_HEADERS = [
@@ -4764,6 +4988,82 @@ def build_antigen_diversity_report(pdb_ids: List[str]) -> AntigenDiversityRespon
     return AntigenDiversityResponse(
         output_dir=str(out_dir),
         plots=plot_entries,
+        message=message,
+    )
+
+
+_EPITOPE_SELECTION_RE = re.compile(r"^(?P<pdb>[0-9A-Za-z]{4})\s*[:/\-]\s*(?P<ep>.+)$")
+
+
+def _parse_epitope_diversity_selections(
+    selections: Sequence[str],
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    selection_map: Dict[str, List[str]] = defaultdict(list)
+    invalid: List[str] = []
+    for raw in selections or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        match = _EPITOPE_SELECTION_RE.match(text)
+        if not match:
+            invalid.append(text)
+            continue
+        pdb_id = (match.group("pdb") or "").strip().upper()
+        ep = (match.group("ep") or "").strip()
+        if not pdb_id or not ep:
+            invalid.append(text)
+            continue
+        selection_map[pdb_id].append(ep)
+    return selection_map, invalid
+
+
+def build_epitope_diversity_report_for_selection(
+    selections: List[str],
+) -> EpitopeDiversityResponse:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    out_dir = _output_dir()
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    selection_map, invalid = _parse_epitope_diversity_selections(selections)
+    if not selection_map:
+        message = "No valid PDB:epitope selections provided."
+        if invalid:
+            message = f"{message} Invalid entries: {', '.join(invalid)}"
+        return EpitopeDiversityResponse(
+            output_dir=str(out_dir),
+            plots=[],
+            csv_name=None,
+            message=message,
+        )
+
+    plot_specs, csv_path, row_count = build_epitope_diversity_plots_for_selection(
+        targets_dir=targets_dir,
+        out_dir=out_dir,
+        timestamp=timestamp,
+        selections=selection_map,
+        log=print,
+    )
+    plot_entries = [
+        EpitopeDiversityPlot(
+            title=spec.title,
+            png_name=spec.png_path.name,
+            png_path=str(spec.png_path),
+            svg_name=spec.svg_path.name,
+            svg_path=str(spec.svg_path),
+        )
+        for spec in plot_specs
+    ]
+    message = None
+    if plot_entries:
+        message = f"Generated {len(plot_entries)} epitope diversity plot(s) from {row_count} epitopes."
+    else:
+        message = "No epitope diversity plots generated for the requested selections."
+    if invalid:
+        message = f"{message} Invalid entries: {', '.join(invalid)}"
+    return EpitopeDiversityResponse(
+        output_dir=str(out_dir),
+        plots=plot_entries,
+        csv_name=csv_path.name if csv_path else None,
         message=message,
     )
 

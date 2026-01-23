@@ -67,6 +67,14 @@ function formatEngineLabel(engine) {
   return engine;
 }
 
+function bulkFileSrc(value) {
+  if (!value) return null;
+  const text = String(value);
+  const baseName = text.split('/').pop();
+  const name = baseName || text;
+  return `/api/bulk/file?name=${encodeURIComponent(name)}&t=${Date.now()}`;
+}
+
 function isBoltzEngine(engine) {
   const raw = String(engine || '').trim().toLowerCase();
   return !raw || raw.includes('boltz');
@@ -118,6 +126,8 @@ const el = {
   boltzRegenerate: document.querySelector('#boltz-config-regenerate'),
   boltzRefresh: document.querySelector('#boltz-config-refresh'),
   boltzPlotDiversity: document.querySelector('#boltz-plot-diversity'),
+  epitopeDiversitySelection: document.querySelector('#epitope-diversity-selection'),
+  epitopeDiversityPlot: document.querySelector('#epitope-diversity-plot'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunRange: document.querySelector('#boltz-rerun-range'),
   boltzShowRunRange: document.querySelector('#boltz-show-run-range'),
@@ -2277,6 +2287,52 @@ async function plotBoltzAntigenDiversity() {
   }
 }
 
+async function plotEpitopeDiversitySelection() {
+  const raw = (el.epitopeDiversitySelection?.value || '').trim();
+  if (!raw) {
+    showAlert('Enter selections like 5WT9:epitope_1, 3J8F:epitope_4.');
+    return;
+  }
+  const selections = raw
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!selections.length) {
+    showAlert('No valid selections found.');
+    return;
+  }
+  const btn = el.epitopeDiversityPlot;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/boltzgen/epitope-diversity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selections }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Failed to plot epitope diversity (${res.status})`);
+    }
+    const body = await res.json();
+    const plots = Array.isArray(body.plots) ? body.plots : [];
+    const items = plots
+      .map((plot) => {
+        const src = bulkFileSrc(plot.png_name || plot.png_path || plot.svg_name || plot.svg_path);
+        const label = plot.title || plot.png_name || plot.svg_name || 'Epitope diversity';
+        if (!src) return null;
+        return { src, label };
+      })
+      .filter(Boolean);
+    renderEpitopePlots(items);
+    const message = body.message || `Generated ${items.length} epitope diversity plot(s).`;
+    showAlert(message, false);
+  } catch (err) {
+    showAlert(err.message || 'Failed to plot epitope diversity.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function fetchBoltzConfig(pdbId, configPath) {
   const params = new URLSearchParams();
   params.append('pdb_id', pdbId);
@@ -2574,6 +2630,7 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     ? `${boltz.output_root}`.replace(/\/$/, '')
     : `${remoteTarget}/designs/boltzgen`;
   const outputRoot = outputRootFor(outputRootBase, runLabel);
+  const localOutputDir = `${localTarget}/designs/boltzgen/${runLabel}`;
   const cacheDir = boltz.cache_dir ? `${boltz.cache_dir}` : null;
   const extraArgs = Array.isArray(boltz.extra_args) ? boltz.extra_args : (boltz.extra_args ? [boltz.extra_args] : []);
   const specs = (specPaths && specPaths.length) ? specPaths : ['configs/*/boltzgen_config.yaml'];
@@ -2614,8 +2671,8 @@ function buildRunCommandText(pdbId, specPaths = [], epitopeName = null) {
     `ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`,
     '',
     '# 5) Pull results back',
-    `mkdir -p ${localTarget}/designs/boltzgen/`,
-    `rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`,
+    `mkdir -p ${localOutputDir}`,
+    `rsync -az ${sshTarget}:${outputRoot}/ ${localOutputDir}/`,
   ].filter(Boolean).join('\n');
 }
 
@@ -2811,6 +2868,7 @@ function buildAllRunCommandsText(targets = []) {
     const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
     const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
     const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    const localOutputDir = `${localTarget}/designs/boltzgen/${runLabel}`;
 
     lines.push(
       '',
@@ -2827,8 +2885,8 @@ function buildAllRunCommandsText(targets = []) {
 
     monitorLines.push(`ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`);
     monitorLines.push(`ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`);
-    pullLines.push(`mkdir -p ${localTarget}/designs/boltzgen/`);
-    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localTarget}/designs/boltzgen/`);
+    pullLines.push(`mkdir -p ${localOutputDir}`);
+    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localOutputDir}/`);
   });
 
   if (monitorLines.length) {
@@ -3621,6 +3679,7 @@ function init() {
   if (el.diversityDownloadCsv) el.diversityDownloadCsv.addEventListener('click', () => downloadDiversityFile('csv'));
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzPlotDiversity) el.boltzPlotDiversity.addEventListener('click', () => plotBoltzAntigenDiversity());
+  if (el.epitopeDiversityPlot) el.epitopeDiversityPlot.addEventListener('click', () => plotEpitopeDiversitySelection());
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzRerunRange) {
     el.boltzRerunRange.addEventListener('click', openPipelineRerunRangeModal);

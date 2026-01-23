@@ -145,6 +145,12 @@
                   <button type="button" id="boltz-plot-diversity" class="ghost">Plot diversity</button>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
+                  <label>Epitope diversity selection
+                    <input type="text" id="epitope-diversity-selection" placeholder="5WT9:epitope_1, 3J8F:epitope_4" style="min-width: 260px;">
+                  </label>
+                  <button type="button" id="epitope-diversity-plot" class="ghost">Plot epitope diversity</button>
+                </div>
+                <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
                   <button type="button" id="boltz-show-run-range" class="ghost">Show run command (rows)</button>
                   <button type="button" id="boltz-rerun-range" class="ghost">Re-run pipeline (rows)</button>
                 </div>
@@ -328,6 +334,11 @@
               Force re-init
             </label>
           </div>
+          <p class="help-text" style="margin: 6px 0 0 0;">
+            Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
+            <code>target.yaml</code> and <code>prep/</code> are snapshotted to
+            <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
+          </p>
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
@@ -363,6 +374,11 @@
               Force re-init
             </label>
           </div>
+          <p class="help-text" style="margin: 6px 0 0 0;">
+            Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
+            <code>target.yaml</code> and <code>prep/</code> are snapshotted to
+            <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
+          </p>
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-rerun-range-cancel" class="ghost">Cancel</button>
