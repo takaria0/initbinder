@@ -797,9 +797,13 @@ def launch_boltzgen_binder(
         if bundle_path:
             try:
                 shutil.copytree(Path(bundle_path), session_dir, dirs_exist_ok=True)
-                candidate = session_dir / "hotspot_visualization.pml"
-                if candidate.exists():
-                    hotspot_pml = candidate
+                expressed = session_dir / "hotspot_visualization.pml"
+                if expressed.exists():
+                    hotspot_pml = expressed
+                else:
+                    candidate = session_dir / "hotspot_visualization.pml"
+                    if candidate.exists():
+                        hotspot_pml = candidate
             except Exception:
                 hotspot_pml = None
 

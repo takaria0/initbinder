@@ -1131,6 +1131,66 @@ def _write_hotspot_pml(
     pml.append("zoom target\n")
     pml_path.write_text("".join(pml))
 
+
+def _write_hotspot_target_mesh_pml(
+    struct_name: str,
+    pml_path: Path,
+    *,
+    expression_regions: Optional[List[dict[str, str]]] = None,
+    allowed_ranges: Optional[List[dict[str, str]]] = None,
+    target_chains: Optional[Sequence[str]] = None,
+    selection_mode: str = "auto",
+) -> None:
+    import re
+
+    def _sanitize(s: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_")
+
+    def _pick_selection(region: dict[str, str]) -> Optional[str]:
+        sel_expr = region.get("selection")
+        sel_auth = region.get("selection_auth")
+        if selection_mode == "auth":
+            return sel_auth
+        if selection_mode == "label":
+            return sel_expr
+        return sel_auth or sel_expr
+
+    pml: list[str] = []
+    pml.append("reinitialize\n")
+    pml.append(f"load {struct_name}, target\n")
+    pml.append("bg_color white\n")
+    pml.append("hide everything\n")
+    pml.append("set mesh_width, 0.6\n")
+
+    cleaned: list[str] = []
+    for ch in target_chains or []:
+        text = str(ch).strip().upper()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    if cleaned:
+        chain_expr = " or ".join(f"chain {ch}" for ch in cleaned)
+        pml.append(f"remove target and not ({chain_expr})\n")
+
+    mesh_regions = allowed_ranges or expression_regions or []
+    if allowed_ranges:
+        pml.append("set_color allowed_epitope_range, [0.200, 0.600, 0.900]\n")
+        mesh_color = "allowed_epitope_range"
+    else:
+        pml.append("set_color vendor_expression, [0.35, 0.35, 0.35]\n")
+        mesh_color = "vendor_expression"
+
+    for idx, region in enumerate(mesh_regions, start=1):
+        chosen_expr = _pick_selection(region)
+        if not chosen_expr:
+            continue
+        obj = _sanitize(f"mesh_region_{idx:02d}") or f"mesh_region_{idx:02d}"
+        pml.append(f"select {obj}, {chosen_expr}\n")
+        pml.append(f"show mesh, {obj}\n")
+        pml.append(f"color {mesh_color}, {obj}\n")
+
+    pml.append("zoom target\n")
+    pml_path.write_text("".join(pml))
+
 def _norm_label(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
@@ -1484,6 +1544,15 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         full_struct_name=raw_bundle_name,
         target_chains=target_chain_ids,
         supporting_chains=supporting_chain_ids,
+        selection_mode=selection_mode,
+    )
+    expressed_pml_path = bundle_dir / "hotspot_visualization_target_expressed.pml"
+    _write_hotspot_target_mesh_pml(
+        dest_pdb_name,
+        expressed_pml_path,
+        expression_regions=expression_regions,
+        allowed_ranges=allowed_ranges,
+        target_chains=target_chain_ids,
         selection_mode=selection_mode,
     )
     return bundle_dir
