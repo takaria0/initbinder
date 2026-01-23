@@ -442,7 +442,9 @@ def _populate_sequences_and_alignment(
                                 )
                             )
                         if allowed_mmcif:
-                            config["allowed_epitope_range_mmcif"] = ", ".join(allowed_mmcif)
+                            allowed_auth = ", ".join(allowed_mmcif)
+                            config["allowed_epitope_range_auth"] = allowed_auth
+                            config.setdefault("allowed_epitope_range_mmcif", allowed_auth)
 
     config.setdefault("sequences", {})
     existing_acc = (config["sequences"].get("accession") or {}).copy()

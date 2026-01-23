@@ -779,17 +779,18 @@ def _shift_residue_tokens(tokens: Sequence[object], structure_path: Path) -> Lis
 
 
 def _prepared_structure_path_for_target(pdb_id: str) -> Path:
-    """Prefer prepared.cif / prepared.mmcif; fall back to prepared.pdb for legacy targets."""
+    """Return the raw mmCIF path for BoltzGen (fallback to prepared.mmcif)."""
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
     target_dir = targets_dir / pdb_id.upper()
     cif = target_dir / "raw" / f"{pdb_id.upper()}.cif"
     if cif.exists():
         return cif
-    mmcif = target_dir / "prep" / "prepared.mmcif"
-    if mmcif.exists():
-        return mmcif
-    return target_dir / "prep" / "prepared.pdb"
+    for candidate in ("prepared.mmcif", "prepared.cif"):
+        mmcif = target_dir / "prep" / candidate
+        if mmcif.exists():
+            return mmcif
+    return cif
 
 
 def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
@@ -1690,7 +1691,7 @@ def _write_boltzgen_configs(
     prepared_structure = _prepared_structure_path_for_target(pdb_id)
     if not prepared_structure.exists():
         msg = (
-            f"  [boltzgen-config] Missing prepared structure for {pdb_id.upper()} "
+            f"  [boltzgen-config] Missing raw/prepared mmCIF for {pdb_id.upper()} "
             f"(expected {prepared_structure}); skipping spec export."
         )
         log(msg)
@@ -2281,7 +2282,7 @@ def regenerate_boltzgen_configs(
                     pdb_id=pdb_id,
                     status="skipped",
                     configs_written=0,
-                    message=f"Missing prepared structure ({prepared_structure}).",
+                    message=f"Missing raw/prepared mmCIF ({prepared_structure}).",
                 )
             )
             continue

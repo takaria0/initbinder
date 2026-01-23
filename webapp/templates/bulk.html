@@ -472,7 +472,7 @@
                 range to obtain <code>S</code>. Extract each PDB chain sequence <code>C_j</code> and perform local alignment (biotite) between <code>S</code>
                 and every <code>C_j</code>. If target.yaml already lists chains, prefer those; otherwise select the best alignment by identity/coverage.
                 Write <code>targets/&lt;PDB&gt;/target.yaml</code> with chain IDs, sequence blocks, alignment summary, and
-                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_mmcif</code> in auth numbering when available).</li>
+                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_auth</code> in auth numbering when available).</li>
               <li><strong>decide_scope.py (epitope proposal).</strong> When epitopes are absent (or forced), propose spans using LLM + rule-based
                 constraints, restricted to <code>allowed_epitope_range</code>. Write epitope spans and rationales back to target.yaml.</li>
               <li><strong>prep_target.py (epitope preparation).</strong> Expand spans into residue masks, validate against mmCIF coverage, and optionally
@@ -510,7 +510,19 @@ for i = 1..n_eff:
               <li><code>5MXA</code>: <code>B:30-45</code> (L=16, r=4,8,13) -&gt; <code>B:33,B:37,B:42</code></li>
               <li><code>7FJD</code>: <code>D:33-40</code> (L=8, r=2,4,7) -&gt; <code>D:34,D:36,D:39</code></li>
             </ul>
-                        <p><strong>Worked examples (tabbed).</strong> Each tab is a full CSV-to-epitope trace.</p>
+            <p><strong>mmCIF vs PDB numbering (raw CIF example).</strong> The app reads label-asym/label-seq from
+              <code>targets/8GYE/raw/8GYE.cif</code> and maps to auth-asym/auth-seq for cross-checking:</p>
+            <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">_atom_site (raw CIF)
+label_asym_id B label_seq_id 2   -&gt; auth_asym_id D auth_seq_id 25
+label_asym_id B label_seq_id 70  -&gt; auth_asym_id D auth_seq_id 93
+label_asym_id B label_seq_id 139 -&gt; auth_asym_id D auth_seq_id 162
+
+target.yaml (derived)
+allowed_epitope_range (label): B:2-139
+allowed_epitope_range_auth (auth): D:25-162</pre>
+            <p>BoltzGen configs always use the raw mmCIF path plus label numbering (<code>allowed_epitope_range</code>);
+              <code>allowed_epitope_range_auth</code> is stored for cross-referencing against PDB-style annotations.</p>
+            <p><strong>Worked examples (tabbed).</strong> Each tab is a full CSV-to-epitope trace.</p>
             <div class="bulk-example-tabs" data-example-tabs="bulk">
               <div class="bulk-example-tablist" role="tablist">
                 <button type="button" class="bulk-example-tab is-active" data-example-tab="8GYE" aria-selected="true">8GYE</button>
@@ -543,7 +555,7 @@ vendor_range: 1-186</pre>
 csv_matched_chain: A
 selected_chain_ids: B
 allowed_epitope_range: B:2-139
-allowed_epitope_range_mmcif: D:25-162
+allowed_epitope_range_auth: D:25-162
 alignment_identity: 1.0
 alignment_coverage: 0.7419
 alignment_chain_ranges: {'B': '2-139'}
@@ -589,6 +601,13 @@ LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGE</pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Cysteine-rich_Domain_1
 residues: B:2-16
 hotspots: B:5,B:9,B:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id B label_seq_id 2 -> auth_asym_id D auth_seq_id 25
+label_asym_id B label_seq_id 70 -> auth_asym_id D auth_seq_id 93
+label_asym_id B label_seq_id 139 -> auth_asym_id D auth_seq_id 162
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="7TNG">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -608,7 +627,7 @@ vendor_range: 1-403</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:3-84
-allowed_epitope_range_mmcif: A:312-393
+allowed_epitope_range_auth: A:312-393
 alignment_identity: 1.0
 alignment_coverage: 0.2035
 alignment_chain_ranges: {'A': '3-84'}
@@ -632,6 +651,13 @@ EAPWCFTLDENFKSDLCDIPACDS</span>AAA</pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Loop
 residues: A:3-10
 hotspots: A:4,A:6,A:9</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 3 -> auth_asym_id A auth_seq_id 312
+label_asym_id A label_seq_id 43 -> auth_asym_id A auth_seq_id 352
+label_asym_id A label_seq_id 84 -> auth_asym_id A auth_seq_id 393
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="1J55">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -651,7 +677,7 @@ vendor_range: 1-95</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:1-94
-allowed_epitope_range_mmcif: A:1-94
+allowed_epitope_range_auth: A:1-94
 alignment_identity: 1.0
 alignment_coverage: 0.9263
 alignment_chain_ranges: {'A': '1-94'}
@@ -670,6 +696,12 @@ AQVDFSEFIVFVAAITSACHKYFEKAGL</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Helix
 residues: A:3-18
 hotspots: A:6,A:10,A:15</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 1 -> auth_asym_id A auth_seq_id 1
+label_asym_id A label_seq_id 94 -> auth_asym_id A auth_seq_id 94
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="3Q2C">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -689,7 +721,7 @@ vendor_range: 1-439</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:2-97
-allowed_epitope_range_mmcif: A:2-97
+allowed_epitope_range_auth: A:2-97
 alignment_identity: 1.0
 alignment_coverage: 0.2187
 alignment_chain_ranges: {'A': '2-97'}
@@ -714,6 +746,13 @@ ILSITWEHAGRYCCIYGSHTVGLSESSDPLELVVTG</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Ig-like_Loop
 residues: A:2-10
 hotspots: A:3,A:6,A:9</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 2 -> auth_asym_id A auth_seq_id 2
+label_asym_id A label_seq_id 49 -> auth_asym_id A auth_seq_id 49
+label_asym_id A label_seq_id 97 -> auth_asym_id A auth_seq_id 97
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="5DZO">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -733,7 +772,7 @@ vendor_range: 21-290</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:2-107
-allowed_epitope_range_mmcif: A:5-110
+allowed_epitope_range_auth: A:5-110
 alignment_identity: 1.0
 alignment_coverage: 0.3926
 alignment_chain_ranges: {'A': '2-107'}
@@ -755,6 +794,13 @@ GDLSRRDVSLTIENTAVSDSGVYCCRVEHRGWFNDMKITVSLEIVPP</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Beta-Strand_Epitope
 residues: A:2-15
 hotspots: A:5,A:9,A:12</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 2 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 54 -> auth_asym_id A auth_seq_id 57
+label_asym_id A label_seq_id 107 -> auth_asym_id A auth_seq_id 110
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="1HKF">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -774,7 +820,7 @@ vendor_range: 1-190</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:15-122
-allowed_epitope_range_mmcif: A:5-112
+allowed_epitope_range_auth: A:5-112
 alignment_identity: 1.0
 alignment_coverage: 0.5684
 alignment_chain_ranges: {'A': '15-122'}
@@ -795,6 +841,13 @@ IWDDPDAGFFTVTMTDLREEDSGHYWCRIYRPSDNSVSKSVRFYLVVS</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Ig-like_Loop
 residues: A:15-25
 hotspots: A:17,A:20,A:23</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 15 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 68 -> auth_asym_id A auth_seq_id 58
+label_asym_id A label_seq_id 122 -> auth_asym_id A auth_seq_id 112
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="5VZ3">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -814,7 +867,7 @@ vendor_range: 197-308</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:5-112
-allowed_epitope_range_mmcif: A:5-112
+allowed_epitope_range_auth: A:5-112
 alignment_identity: 1.0
 alignment_coverage: 0.9643
 alignment_chain_ranges: {'A': '5-112'}
@@ -833,6 +886,18 @@ LHRLKPDTVPAPCCVPASYNPMVLIQKTDTGVSLQTYDDLLAKDCHCI</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Accessible_Loop
 residues: A:5-15
 hotspots: A:7,A:10,A:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 5 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 58 -> auth_asym_id A auth_seq_id 58
+label_asym_id A label_seq_id 112 -> auth_asym_id A auth_seq_id 112
+SASA check (history/20251222_180939):
+sasa_cutoff: 10.0
+declared_count: 9
+exposed_count: 7
+exposed_fraction: 0.778
+sasa_exposed_total: 526.17
+rsa_mean: 0.395</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="7M3Z">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -852,7 +917,7 @@ vendor_range: 1-200</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:1-109
-allowed_epitope_range_mmcif: A:1-109
+allowed_epitope_range_auth: A:1-109
 alignment_identity: 1.0
 alignment_coverage: 0.545
 alignment_chain_ranges: {'A': '1-109'}
@@ -873,6 +938,13 @@ YWLNGDFRKGDVSLTIENVTLADSGIYCCRIQIPGIMNDEKFNLKLVIK</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Loop
 residues: A:22-32
 hotspots: A:24,A:27,A:30</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 1 -> auth_asym_id A auth_seq_id 1
+label_asym_id A label_seq_id 55 -> auth_asym_id A auth_seq_id 55
+label_asym_id A label_seq_id 109 -> auth_asym_id A auth_seq_id 109
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="2JOP">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -892,7 +964,7 @@ vendor_range: 1-372</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:22-131
-allowed_epitope_range_mmcif: A:25-134
+allowed_epitope_range_auth: A:25-134
 alignment_identity: 0.9818
 alignment_coverage: 0.2957
 alignment_chain_ranges: {'A': '22-131'}
@@ -916,6 +988,13 @@ NCGDPLSLGPFLKTYTPQSSIICYGQLGSFSNCSHSRNDMCHSLGLTCLE</span></pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_Loop_Epitope
 residues: A:22-30
 hotspots: A:23,A:26,A:29</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 22 -> auth_asym_id A auth_seq_id 25
+label_asym_id A label_seq_id 76 -> auth_asym_id A auth_seq_id 79
+label_asym_id A label_seq_id 131 -> auth_asym_id A auth_seq_id 134
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="4GOS">
                   <p><strong>CSV input (target_generation TSV row).</strong></p>
@@ -935,7 +1014,7 @@ vendor_range: 29-258</pre>
 csv_matched_chain: A
 selected_chain_ids: A
 allowed_epitope_range: A:6-119
-allowed_epitope_range_mmcif: A:35-148
+allowed_epitope_range_auth: A:35-148
 alignment_identity: 1.0
 alignment_coverage: 0.4957
 alignment_chain_ranges: {'A': '6-119'}
@@ -956,6 +1035,18 @@ EMFRGRTAVFADQVIVGNASLRLKNVQLTDAGTYKCYIITSKGKGNANLEYKTG</span>H</pre>
                   <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">epitope_1 name: N-terminal_IgV_Loop
 residues: A:6-15
 hotspots: A:8,A:11,A:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre style="margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 6 -> auth_asym_id A auth_seq_id 35
+label_asym_id A label_seq_id 62 -> auth_asym_id A auth_seq_id 91
+label_asym_id A label_seq_id 119 -> auth_asym_id A auth_seq_id 148
+SASA check (history/20260115_031825):
+sasa_cutoff: 10.0
+declared_count: 9
+exposed_count: 8
+exposed_fraction: 0.889
+sasa_exposed_total: 469.567
+rsa_mean: 0.386</pre>
                 </section>
               </div>
             </div>

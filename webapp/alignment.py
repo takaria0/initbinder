@@ -56,7 +56,7 @@ def compute_alignment(pdb_id: str, *, max_results: Optional[int] = None) -> Dict
     if not vendor_seq:
         raise ValueError(f"No vendor sequence found in target.yaml for {pdb_id}")
 
-    residue_numbers_raw = sequences.get("pdb_residue_numbers") or {}
+    residue_numbers_raw = sequences.get("cif_residue_numbers") or sequences.get("pdb_residue_numbers") or {}
     chain_residue_numbers = {
         str(cid).strip().upper(): nums
         for cid, nums in residue_numbers_raw.items()
