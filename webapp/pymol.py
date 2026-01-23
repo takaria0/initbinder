@@ -655,6 +655,7 @@ def launch_boltzgen_top_binders(
 
     target_source = spec_dir / "full_target.cif"
     target_loaded = False
+    chain_obj_name: Optional[str] = None
     if target_source.exists():
         target_dest = session_dir / target_source.name
         shutil.copy2(target_source, target_dest)
@@ -812,24 +813,14 @@ def launch_boltzgen_binder(
             target_dest = session_dir / candidate.name
             shutil.copy2(candidate, target_dest)
 
-    resolved_include = include_label or _infer_boltzgen_include_label(
-        pdb_id,
-        design_path=design_src,
-        epitope_label=epitope_label,
-        config_path=config_path,
-    )
-    selection_map = _selection_map_from_labels(binding_label, resolved_include)
-    selection = _selection_from_labels(binding_label, resolved_include)
-    crop_selection = _selection_from_labels(None, resolved_include)
-    selection_obj = "target" if (target_dest or hotspot_pml) else "complex"
-
-    vendor_label, expression_regions, target_chain_ids = _gather_expression_regions(pdb_id)
-    target_obj = "target" if (target_dest or hotspot_pml) else "complex"
     pdb_fetch_name = (pdb_id or "").strip().upper()
+    _, _, target_chain_ids = _gather_expression_regions(pdb_id)
 
     script_lines: list[str] = []
+    target_loaded = False
     if hotspot_pml:
         script_lines.append(f"@{hotspot_pml.name}")
+        target_loaded = True
     else:
         script_lines.extend(
             [
@@ -837,27 +828,6 @@ def launch_boltzgen_binder(
                 "bg_color white",
             ]
         )
-    script_lines.extend(
-        [
-            "set ray_opaque_background, off",
-            "set cartoon_fancy_helices, on",
-            "set cartoon_smooth_loops, on",
-            "set_color designed_binder, [0.220, 0.420, 0.780]",
-            f"load {design_dest.name}, complex",
-            "hide everything, complex",
-            "show cartoon, complex",
-            "color designed_binder, complex",
-        ]
-    )
-
-    if pdb_fetch_name and not hotspot_pml:
-        script_lines.extend(
-            [
-                f"fetch {pdb_fetch_name}",
-                f"align {pdb_fetch_name}, complex",
-            ]
-        )
-
     if target_dest:
         script_lines.extend(
             [
@@ -865,96 +835,52 @@ def launch_boltzgen_binder(
                 "hide everything, target",
                 "show cartoon, target",
                 "color gray80, target",
-                "set cartoon_transparency, 0.45, target",
             ]
         )
+        target_loaded = True
 
-    if target_chain_ids:
+    if pdb_fetch_name and not hotspot_pml and not target_loaded:
+        script_lines.extend(
+            [
+                f"fetch {pdb_fetch_name}, target",
+                "hide everything, target",
+                "show cartoon, target",
+                "color gray80, target",
+            ]
+        )
+        target_loaded = True
+
+    if target_loaded and target_chain_ids:
         chain_expr = " or ".join(f"chain {cid}" for cid in sorted(target_chain_ids))
+        chain_label = "_".join(sorted(target_chain_ids))
+        base_name = _sanitize_design_token(pdb_fetch_name or "target")
+        obj_name = (
+            f"{base_name}_chain_{chain_label}"
+            if len(target_chain_ids) == 1
+            else f"{base_name}_chains_{chain_label}"
+        )
+        chain_obj_name = obj_name
         script_lines.extend(
             [
-                f"select target_chains_complex, complex and ({chain_expr})",
-                "color gray80, target_chains_complex",
-                "set cartoon_transparency, 0.45, target_chains_complex",
-                "group target_chains, target_chains_complex",
+                f"create {obj_name}, target and ({chain_expr})",
+                f"show cartoon, {obj_name}",
+                f"color gray80, {obj_name}",
             ]
         )
+        script_lines.append(f"align {obj_name}, target")
 
-    if expression_regions and not hotspot_pml:
-        vendor_clean = str(vendor_label).replace("\n", " ").replace('"', "") if vendor_label else None
-        script_lines.extend(
-            [
-                "set_color vendor_expression, [0.960, 0.720, 0.240]",
-                "set label_font_id, 7",
-                "set label_size, -0.6",
-                f"set cartoon_transparency, 0.65, {target_obj}",
-            ]
-        )
-        for idx, region in enumerate(expression_regions, start=1):
-            sel_expr = _swap_selection_object(region.get("selection", ""), target_obj)
-            if not sel_expr:
-                continue
-            chain = region.get("chain") or f"chain{idx}"
-            start_label = region.get("start") or ""
-            end_label = region.get("end") or ""
-            obj_name = f"vendor_expr_{idx:02d}_{chain}"
-            script_lines.extend(
-                [
-                    f"select {obj_name}, {sel_expr}",
-                    f"set cartoon_transparency, 0.05, {obj_name}",
-                    f"color vendor_expression, {obj_name}",
-                    f"group vendor_expression, {obj_name}",
-                    f"label first ({sel_expr} and name CA), \"{chain}:{start_label}\"",
-                    f"label last ({sel_expr} and name CA), \"{chain}:{end_label}\"",
-                    f"set label_color, vendor_expression, first ({sel_expr} and name CA)",
-                    f"set label_color, vendor_expression, last ({sel_expr} and name CA)",
-                ]
-            )
-        if vendor_clean:
-            script_lines.append(f"print \"Vendor expression overlap (vendor numbering): {vendor_clean}\"")
+    script_lines.extend(
+        [
+            "set_color designed_binder, [0.220, 0.420, 0.780]",
+            f"load {design_dest.name}, design",
+            "hide everything, design",
+            "show cartoon, design",
+            "color designed_binder, design",
+        ]
+    )
 
-    crop_aligned = False
-    if crop_selection and target_obj == "target":
-        script_lines.extend(
-            [
-                "set_color boltzgen_crop, [0.950, 0.650, 0.200]",
-                f"select boltzgen_crop, {target_obj} and ({crop_selection})",
-                "show surface, boltzgen_crop",
-                "set transparency, 0.65, boltzgen_crop",
-                "color boltzgen_crop, boltzgen_crop",
-                "create cropped_target, boltzgen_crop",
-                "show cartoon, cropped_target",
-                "color boltzgen_crop, cropped_target",
-                f"align (complex and ({crop_selection})), cropped_target",
-            ]
-        )
-        crop_aligned = True
-
-    if target_obj == "target" and not crop_aligned:
-        if selection_map:
-            for chain_id in sorted(selection_map):
-                resi_expr = selection_map[chain_id]
-                script_lines.append(
-                    f"align (complex and chain {chain_id} and resi {resi_expr}), "
-                    f"({target_obj} and chain {chain_id} and resi {resi_expr})"
-                )
-        else:
-            script_lines.append(f"align complex, {target_obj}")
-
-    if selection:
-        ep_token = _sanitize_design_token(epitope_label or "epitope")
-        if ep_token[0].isdigit():
-            ep_token = f"epitope_{ep_token}"
-        sel_name = f"{ep_token}_sel"
-        script_lines.extend(
-            [
-                f"select {sel_name}, {selection_obj} and ({selection})",
-                f"color hotpink, {sel_name}",
-                f"show sticks, {sel_name}",
-                f"set stick_radius, 0.2, {sel_name}",
-                f"group {ep_token}, {sel_name}",
-            ]
-        )
+    if target_loaded:
+        script_lines.append("align (design and chain A), target")
 
     script_lines.extend(
         [
