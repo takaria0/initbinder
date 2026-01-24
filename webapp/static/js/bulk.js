@@ -16,6 +16,8 @@ const state = {
   diversityMessage: null,
   diversityFiles: [],
   diversityOutputDir: null,
+  epitopeCsvName: null,
+  epitopeHotspotCsvName: null,
   binderRows: [],
   binderTotal: 0,
   binderPage: 1,
@@ -110,6 +112,8 @@ const el = {
   epitopePlotSection: document.querySelector('#epitope-plot-section'),
   epitopePlotGrid: document.querySelector('#epitope-plot-grid'),
   epitopeReportDownload: document.querySelector('#epitope-report-download'),
+  epitopeCsvDownload: document.querySelector('#epitope-csv-download'),
+  epitopeHotspotCsvDownload: document.querySelector('#epitope-hotspot-csv-download'),
   epitopeMetricsSection: document.querySelector('#epitope-metrics-section'),
   diversitySection: document.querySelector('#diversity-section'),
   diversityGrid: document.querySelector('#diversity-grid'),
@@ -872,6 +876,10 @@ function renderEpitopePlots(items = []) {
   if (!list.length) {
     state.epitopePlots = [];
     el.epitopePlotSection.hidden = true;
+    state.epitopeCsvName = null;
+    state.epitopeHotspotCsvName = null;
+    if (el.epitopeCsvDownload) el.epitopeCsvDownload.hidden = true;
+    if (el.epitopeHotspotCsvDownload) el.epitopeHotspotCsvDownload.hidden = true;
     return;
   }
   state.epitopePlots = list;
@@ -902,6 +910,12 @@ function renderEpitopePlots(items = []) {
 
     el.epitopePlotGrid.appendChild(card);
   });
+  if (el.epitopeCsvDownload) {
+    el.epitopeCsvDownload.hidden = !state.epitopeCsvName;
+  }
+  if (el.epitopeHotspotCsvDownload) {
+    el.epitopeHotspotCsvDownload.hidden = !state.epitopeHotspotCsvName;
+  }
   el.epitopePlotSection.hidden = false;
 }
 
@@ -1058,6 +1072,74 @@ async function downloadEpitopeReportHtml() {
     showAlert(err.message || 'Unable to generate report.');
   } finally {
     if (el.epitopeReportDownload) el.epitopeReportDownload.disabled = false;
+  }
+}
+
+async function downloadEpitopeCsv() {
+  if (el.epitopeCsvDownload) el.epitopeCsvDownload.disabled = true;
+  try {
+    if (!state.epitopeCsvName) {
+      showAlert('No epitope diversity CSV available.');
+      return;
+    }
+    const src = bulkFileSrc(state.epitopeCsvName);
+    if (!src) {
+      showAlert('CSV not available.');
+      return;
+    }
+    const res = await fetch(src);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(detail || `Failed to download CSV (${res.status})`);
+    }
+    const blob = await res.blob();
+    const filename = state.epitopeCsvName || 'epitope_diversity.csv';
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (err) {
+    showAlert(err.message || 'Unable to download CSV.');
+  } finally {
+    if (el.epitopeCsvDownload) el.epitopeCsvDownload.disabled = false;
+  }
+}
+
+async function downloadEpitopeHotspotCsv() {
+  if (el.epitopeHotspotCsvDownload) el.epitopeHotspotCsvDownload.disabled = true;
+  try {
+    if (!state.epitopeHotspotCsvName) {
+      showAlert('No hotspot diversity CSV available.');
+      return;
+    }
+    const src = bulkFileSrc(state.epitopeHotspotCsvName);
+    if (!src) {
+      showAlert('CSV not available.');
+      return;
+    }
+    const res = await fetch(src);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(detail || `Failed to download CSV (${res.status})`);
+    }
+    const blob = await res.blob();
+    const filename = state.epitopeHotspotCsvName || 'hotspot_diversity.csv';
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (err) {
+    showAlert(err.message || 'Unable to download hotspot CSV.');
+  } finally {
+    if (el.epitopeHotspotCsvDownload) el.epitopeHotspotCsvDownload.disabled = false;
   }
 }
 
@@ -2315,6 +2397,8 @@ async function plotEpitopeDiversitySelection() {
     }
     const body = await res.json();
     const plots = Array.isArray(body.plots) ? body.plots : [];
+    state.epitopeCsvName = body.csv_name || null;
+    state.epitopeHotspotCsvName = body.hotspot_csv_name || null;
     const items = plots
       .map((plot) => {
         const src = bulkFileSrc(plot.png_name || plot.png_path || plot.svg_name || plot.svg_path);
@@ -3788,6 +3872,8 @@ function init() {
   if (el.pipelineRerunCancel) el.pipelineRerunCancel.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
   if (el.pipelineRerunConfirm) el.pipelineRerunConfirm.addEventListener('click', () => submitPipelineRerun(el.pipelineRerunConfirm));
   if (el.epitopeReportDownload) el.epitopeReportDownload.addEventListener('click', downloadEpitopeReportHtml);
+  if (el.epitopeHotspotCsvDownload) el.epitopeHotspotCsvDownload.addEventListener('click', downloadEpitopeHotspotCsv);
+  if (el.epitopeCsvDownload) el.epitopeCsvDownload.addEventListener('click', downloadEpitopeCsv);
   document.addEventListener('click', (evt) => {
     const closeTarget = evt.target?.dataset?.close;
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);

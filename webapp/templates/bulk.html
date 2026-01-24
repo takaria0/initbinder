@@ -115,7 +115,11 @@
             <section id="epitope-plot-section" hidden>
               <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <h2 style="margin: 0;">Epitope plots</h2>
-                <button type="button" id="epitope-report-download" class="ghost">Download report (HTML)</button>
+                <div class="flex-row" style="gap: 8px; flex-wrap: wrap;">
+                  <button type="button" id="epitope-csv-download" class="ghost" hidden>Download CSV</button>
+                  <button type="button" id="epitope-hotspot-csv-download" class="ghost" hidden>Download Hotspot CSV</button>
+                  <button type="button" id="epitope-report-download" class="ghost">Download report (HTML)</button>
+                </div>
               </div>
               <div id="epitope-plot-grid" class="catalog-viewer"></div>
             </section>

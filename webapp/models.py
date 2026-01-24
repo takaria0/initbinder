@@ -308,6 +308,7 @@ class EpitopeDiversityRequest(BaseModel):
 class EpitopeDiversityResponse(BaseModel):
     output_dir: Optional[str] = None
     csv_name: Optional[str] = None
+    hotspot_csv_name: Optional[str] = None
     plots: List[EpitopeDiversityPlot] = Field(default_factory=list)
     message: Optional[str] = None
 

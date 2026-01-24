@@ -32,6 +32,7 @@ from .bulk_utils import (
     EpitopeDiversityPlotSpec,
     build_epitope_diversity_plots,
     build_epitope_diversity_plots_for_selection,
+    build_hotspot_diversity_plots_for_selection,
 )
 from .config import load_config
 from .designs import BoltzGenEngine
@@ -5044,6 +5045,13 @@ def build_epitope_diversity_report_for_selection(
         selections=selection_map,
         log=print,
     )
+    hotspot_specs, hotspot_csv_path, hotspot_count = build_hotspot_diversity_plots_for_selection(
+        targets_dir=targets_dir,
+        out_dir=out_dir,
+        timestamp=timestamp,
+        selections=selection_map,
+        log=print,
+    )
     plot_entries = [
         EpitopeDiversityPlot(
             title=spec.title,
@@ -5052,19 +5060,22 @@ def build_epitope_diversity_report_for_selection(
             svg_name=spec.svg_path.name,
             svg_path=str(spec.svg_path),
         )
-        for spec in plot_specs
+        for spec in (plot_specs + hotspot_specs)
     ]
     message = None
     if plot_entries:
         message = f"Generated {len(plot_entries)} epitope diversity plot(s) from {row_count} epitopes."
     else:
         message = "No epitope diversity plots generated for the requested selections."
+    if hotspot_count:
+        message = f"{message} Hotspot summary included for {hotspot_count} epitope(s)."
     if invalid:
         message = f"{message} Invalid entries: {', '.join(invalid)}"
     return EpitopeDiversityResponse(
         output_dir=str(out_dir),
         plots=plot_entries,
         csv_name=csv_path.name if csv_path else None,
+        hotspot_csv_name=hotspot_csv_path.name if hotspot_csv_path else None,
         message=message,
     )
 
