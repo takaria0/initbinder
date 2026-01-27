@@ -39,6 +39,8 @@ from .models import (
     AssessmentRunSummary,
     BoltzgenBinderPymolRequest,
     BoltzgenBinderPymolResponse,
+    BoltzgenBinderExportRequest,
+    BoltzgenBinderExportResponse,
     BoltzgenBinderResponse,
     BoltzgenConfigContent,
     BoltzgenConfigListResponse,
@@ -104,6 +106,7 @@ from .bulk import (
     build_antigen_diversity_report,
     build_epitope_diversity_report_for_selection,
     build_boltzgen_diversity_report,
+    export_selected_binders,
     list_boltzgen_binders,
     list_boltzgen_config_state,
     regenerate_boltzgen_configs,
@@ -990,6 +993,13 @@ async def api_boltzgen_binders(
         filter_engine=filter_engine,
         order_by=order_by,
     )
+
+
+@app.post("/api/bulk/boltzgen/binders/export", response_model=BoltzgenBinderExportResponse)
+async def api_boltzgen_binders_export(
+    payload: BoltzgenBinderExportRequest,
+) -> BoltzgenBinderExportResponse:
+    return export_selected_binders(payload)
 
 
 @app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)

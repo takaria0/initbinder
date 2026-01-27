@@ -342,6 +342,23 @@ class BoltzgenBinderResponse(BaseModel):
     message: Optional[str] = None
 
 
+class BoltzgenBinderExportRequest(BaseModel):
+    selections: List[str] = Field(
+        default_factory=list,
+        description="PDB:epitope entries (e.g. 5WT9:epitope_1).",
+    )
+    per_group: int = Field(48, ge=1, description="Binders to export per antigen:epitope group.")
+    include_summary: bool = Field(True, description="Whether to emit a summary CSV.")
+
+
+class BoltzgenBinderExportResponse(BaseModel):
+    csv_name: Optional[str] = None
+    summary_csv_name: Optional[str] = None
+    selection_count: int = 0
+    invalid: List[str] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
 class PipelineRefreshRequest(BaseModel):
     pdb_id: str
     force: bool = True

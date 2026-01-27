@@ -42,6 +42,8 @@ from .models import (
     AntigenDiversityResponse,
     BoltzgenBinderResponse,
     BoltzgenBinderRow,
+    BoltzgenBinderExportRequest,
+    BoltzgenBinderExportResponse,
     BoltzgenConfigContent,
     BoltzgenConfigListResponse,
     BoltzgenConfigRegenerateResponse,
@@ -5234,6 +5236,296 @@ def _load_binder_rows_from_csv(
 
     all_rows.sort(key=lambda r: (r.pdb_id, r.epitope or "", r.rank))
     return all_rows
+
+
+_BINDER_EXPORT_COLUMNS = [
+    "pdb_id",
+    "epitope",
+    "epitope_id",
+    "engine",
+    "rank",
+    "iptm",
+    "rmsd",
+    "hotspot_dist",
+    "ipsae_min",
+    "binder_seq",
+    "binder_length",
+    "design_path",
+    "metrics_path",
+    "run_label",
+    "config_path",
+    "binding_label",
+    "include_label",
+    "target_path",
+    "ranking_score",
+    "rank_within_epitope",
+    "epitope_total",
+    "selected_percentile",
+]
+
+
+_BINDER_EXPORT_SUMMARY_COLUMNS = [
+    "pdb_id",
+    "epitope",
+    "total_binders",
+    "selected_count",
+    "selected_percentile",
+    "iptm_min",
+    "iptm_max",
+    "iptm_mean",
+    "rmsd_min",
+    "rmsd_max",
+    "rmsd_mean",
+    "ranking_score_min",
+    "ranking_score_max",
+    "ranking_score_mean",
+]
+
+
+def _normalize_epitope_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"epitope[_\-\s]*(\d+)", text, flags=re.IGNORECASE)
+    if match:
+        return f"epitope_{int(match.group(1))}"
+    if re.fullmatch(r"\d+", text):
+        return f"epitope_{int(text)}"
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _finite_float(value: object) -> Optional[float]:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _summary_stats(values: List[float]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not values:
+        return None, None, None
+    return min(values), max(values), statistics.mean(values)
+
+
+def _parse_binder_export_selections(
+    selections: Sequence[str],
+) -> Tuple[List[Tuple[str, str]], List[str]]:
+    seen = set()
+    entries: List[Tuple[str, str]] = []
+    invalid: List[str] = []
+    for raw in selections or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        match = _EPITOPE_SELECTION_RE.match(text)
+        if not match:
+            invalid.append(text)
+            continue
+        pdb_id = (match.group("pdb") or "").strip().upper()
+        ep_raw = (match.group("ep") or "").strip()
+        ep_norm = _normalize_epitope_token(ep_raw)
+        if not pdb_id or not ep_norm:
+            invalid.append(text)
+            continue
+        key = f"{pdb_id}:{ep_norm}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((pdb_id, ep_norm))
+    return entries, invalid
+
+
+def export_selected_binders(
+    request: BoltzgenBinderExportRequest,
+) -> BoltzgenBinderExportResponse:
+    selections = request.selections or []
+    per_group = max(1, int(request.per_group or 1))
+    include_summary = bool(request.include_summary)
+    entries, invalid = _parse_binder_export_selections(selections)
+    if not entries:
+        message = "No valid PDB:epitope selections provided."
+        if invalid:
+            message = f"{message} Invalid entries: {', '.join(invalid)}"
+        return BoltzgenBinderExportResponse(
+            selection_count=0,
+            invalid=invalid,
+            message=message,
+        )
+
+    report = build_boltzgen_diversity_report()
+    csv_name = report.csv_name
+    if not csv_name:
+        return BoltzgenBinderExportResponse(
+            selection_count=len(entries),
+            invalid=invalid,
+            message=report.message or "No binder metrics detected for the requested targets.",
+        )
+    csv_path = _output_dir() / csv_name
+    if not csv_path.exists():
+        return BoltzgenBinderExportResponse(
+            selection_count=len(entries),
+            invalid=invalid,
+            message=f"Aggregated metrics CSV missing: {csv_path}",
+        )
+
+    pdb_ids = sorted({pdb_id for pdb_id, _ in entries})
+    all_rows = _load_binder_rows_from_csv(csv_path, ids=pdb_ids, compute_hotspot_distance=False)
+    if not all_rows:
+        return BoltzgenBinderExportResponse(
+            selection_count=len(entries),
+            invalid=invalid,
+            message="No binder rows found for the requested selections.",
+        )
+
+    group_map: Dict[str, List[BoltzgenBinderRow]] = defaultdict(list)
+    for row in all_rows:
+        ep_key = _normalize_epitope_token(row.epitope_id or row.epitope or "")
+        if not ep_key:
+            continue
+        key = f"{row.pdb_id}:{ep_key}"
+        group_map[key].append(row)
+
+    export_rows: List[Dict[str, object]] = []
+    summary_rows: List[Dict[str, object]] = []
+    total_selected = 0
+
+    for pdb_id, ep_key in entries:
+        key = f"{pdb_id}:{ep_key}"
+        group_rows = group_map.get(key, [])
+        total = len(group_rows)
+        selected_count = min(per_group, total)
+        selected_percentile = (selected_count / total * 100) if total else 0.0
+
+        if not total:
+            summary_rows.append(
+                {
+                    "pdb_id": pdb_id,
+                    "epitope": ep_key,
+                    "total_binders": 0,
+                    "selected_count": 0,
+                    "selected_percentile": 0,
+                    "iptm_min": None,
+                    "iptm_max": None,
+                    "iptm_mean": None,
+                    "rmsd_min": None,
+                    "rmsd_max": None,
+                    "rmsd_mean": None,
+                    "ranking_score_min": None,
+                    "ranking_score_max": None,
+                    "ranking_score_mean": None,
+                }
+            )
+            continue
+
+        iptm_values = [_finite_float(row.iptm) for row in group_rows]
+        iptm_values = [val for val in iptm_values if val is not None]
+        rmsd_values = [_finite_float(row.rmsd) for row in group_rows]
+        rmsd_values = [val for val in rmsd_values if val is not None]
+        iptm_min = min(iptm_values) if iptm_values else None
+        iptm_max = max(iptm_values) if iptm_values else None
+        rmsd_min = min(rmsd_values) if rmsd_values else None
+        rmsd_max = max(rmsd_values) if rmsd_values else None
+        iptm_den = (iptm_max - iptm_min) if iptm_min is not None and iptm_max is not None else None
+        rmsd_den = (rmsd_max - rmsd_min) if rmsd_min is not None and rmsd_max is not None else None
+
+        scored: List[Tuple[BoltzgenBinderRow, float, Optional[float], Optional[float]]] = []
+        for row in group_rows:
+            iptm_val = _finite_float(row.iptm)
+            rmsd_val = _finite_float(row.rmsd)
+            if iptm_val is None:
+                iptm_norm = 0.0
+            else:
+                iptm_norm = 1.0 if iptm_den == 0 else (iptm_val - iptm_min) / (iptm_den or 1.0)
+            if rmsd_val is None:
+                rmsd_norm = 1.0
+            else:
+                rmsd_norm = 0.0 if rmsd_den == 0 else (rmsd_val - rmsd_min) / (rmsd_den or 1.0)
+            score = iptm_norm + (1.0 - rmsd_norm)
+            scored.append((row, score, iptm_val, rmsd_val))
+
+        scored.sort(
+            key=lambda item: (
+                -item[1],
+                -(item[2] if item[2] is not None else float("-inf")),
+                item[3] if item[3] is not None else float("inf"),
+                item[0].rank,
+            )
+        )
+        selected = scored[:selected_count]
+        total_selected += len(selected)
+
+        iptm_selected: List[float] = []
+        rmsd_selected: List[float] = []
+        score_selected: List[float] = []
+        for idx, (row, score, iptm_val, rmsd_val) in enumerate(selected, start=1):
+            record = row.dict()
+            record["epitope"] = row.epitope or row.epitope_id or ep_key
+            record["epitope_id"] = row.epitope_id
+            record["rank"] = idx
+            record["ranking_score"] = _format_float(score, 6)
+            record["rank_within_epitope"] = idx
+            record["epitope_total"] = total
+            record["selected_percentile"] = _format_float(selected_percentile, 2)
+            record["binder_length"] = len(row.binder_seq) if row.binder_seq else None
+            export_rows.append(record)
+            if iptm_val is not None:
+                iptm_selected.append(iptm_val)
+            if rmsd_val is not None:
+                rmsd_selected.append(rmsd_val)
+            score_selected.append(score)
+
+        iptm_stats = _summary_stats(iptm_selected)
+        rmsd_stats = _summary_stats(rmsd_selected)
+        score_stats = _summary_stats(score_selected)
+        summary_rows.append(
+            {
+                "pdb_id": pdb_id,
+                "epitope": ep_key,
+                "total_binders": total,
+                "selected_count": selected_count,
+                "selected_percentile": _format_float(selected_percentile, 2),
+                "iptm_min": _format_float(iptm_stats[0], 3),
+                "iptm_max": _format_float(iptm_stats[1], 3),
+                "iptm_mean": _format_float(iptm_stats[2], 3),
+                "rmsd_min": _format_float(rmsd_stats[0], 3),
+                "rmsd_max": _format_float(rmsd_stats[1], 3),
+                "rmsd_mean": _format_float(rmsd_stats[2], 3),
+                "ranking_score_min": _format_float(score_stats[0], 6),
+                "ranking_score_max": _format_float(score_stats[1], 6),
+                "ranking_score_mean": _format_float(score_stats[2], 6),
+            }
+        )
+
+    if not export_rows:
+        return BoltzgenBinderExportResponse(
+            selection_count=len(entries),
+            invalid=invalid,
+            message="No binders matched the requested selections.",
+        )
+
+    out_dir = _output_dir()
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    export_name = f"selected_binders_{timestamp}.csv"
+    export_path = out_dir / export_name
+    _write_csv(export_path, _BINDER_EXPORT_COLUMNS, export_rows)
+
+    summary_name = None
+    if include_summary:
+        summary_name = f"selected_binders_summary_{timestamp}.csv"
+        summary_path = out_dir / summary_name
+        _write_csv(summary_path, _BINDER_EXPORT_SUMMARY_COLUMNS, summary_rows)
+
+    message = f"Exported {total_selected} binders across {len(entries)} selections."
+    if invalid:
+        message = f"{message} Invalid entries: {', '.join(invalid)}"
+    return BoltzgenBinderExportResponse(
+        csv_name=export_name,
+        summary_csv_name=summary_name,
+        selection_count=len(entries),
+        invalid=invalid,
+        message=message,
+    )
 
 
 def list_boltzgen_binders(

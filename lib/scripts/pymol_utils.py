@@ -942,6 +942,7 @@ def _write_hotspot_pml(
     pml.append("color gray80, target\n")
     pml.append("set stick_radius, 0.25\n")
     pml.append("set sphere_scale, 0.6\n")
+    pml.append("set sphere_transparency, 0.0\n")
     pml.append("set cartoon_rect_width, 0.4\n")
     pml.append("set cartoon_oval_width, 0.2\n")
     pml.append("set auto_zoom, off\n\n")
@@ -1092,8 +1093,13 @@ def _write_hotspot_pml(
             obj = f"epi_hot_{epi_key}_{var_key}"
             pml.append(f"select {obj}, {sel}\n")
             pml.append(f"show spheres, {obj}\n")
+            pml.append(f"set sphere_scale, 0.9, {obj}\n")
+            pml.append(f"show sticks, {obj}\n")
+            pml.append(f"set stick_radius, 0.35, {obj}\n")
+            pml.append(f"set stick_transparency, 0.1, {obj}\n")
             color_name = f"epi_{epi_key}_{var_key}" if var in {"A", "B", "C"} else f"epi_{epi_key}"
             pml.append(f"color {color_name}, {obj}\n")
+            pml.append(f"group hotspots, {obj}\n")
             pml.append(f"group {epi_key}, {obj}\n")
             label_parts.append(obj)
 

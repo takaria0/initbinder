@@ -132,6 +132,7 @@ const el = {
   boltzPlotDiversity: document.querySelector('#boltz-plot-diversity'),
   epitopeDiversitySelection: document.querySelector('#epitope-diversity-selection'),
   epitopeDiversityPlot: document.querySelector('#epitope-diversity-plot'),
+  boltzShowRunSelection: document.querySelector('#boltz-show-run-selection'),
   boltzShowRunAll: document.querySelector('#boltz-show-run-all'),
   boltzRerunRange: document.querySelector('#boltz-rerun-range'),
   boltzShowRunRange: document.querySelector('#boltz-show-run-range'),
@@ -168,6 +169,7 @@ const el = {
   binderSummary: document.querySelector('#boltz-binders-summary'),
   binderCsvNote: document.querySelector('#boltz-binders-csv'),
   binderRefresh: document.querySelector('#boltz-binders-refresh'),
+  binderExportBtn: document.querySelector('#boltz-binders-export'),
   binderDownload: document.querySelector('#boltz-binders-download'),
   binderPagination: document.querySelector('#boltz-binders-pagination'),
   binderPageLabel: document.querySelector('#boltz-binders-page-label'),
@@ -175,6 +177,13 @@ const el = {
   binderFilterEpitope: document.querySelector('#binder-filter-epitope'),
   binderFilterEngine: document.querySelector('#binder-filter-engine'),
   binderOrderBy: document.querySelector('#binder-order-by'),
+  binderExportModal: document.querySelector('#binder-export-modal'),
+  binderExportClose: document.querySelector('#binder-export-close'),
+  binderExportCancel: document.querySelector('#binder-export-cancel'),
+  binderExportConfirm: document.querySelector('#binder-export-confirm'),
+  binderExportSelections: document.querySelector('#binder-export-selections'),
+  binderExportCount: document.querySelector('#binder-export-count'),
+  binderExportSummary: document.querySelector('#binder-export-summary'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
@@ -273,11 +282,49 @@ async function copyTextToClipboard(text, btn = null) {
   }
 }
 
-function renderRunCommandBlocks(text) {
+function renderRunCommandBlocks(text, options = {}) {
   if (!el.boltzRunBody) return;
   el.boltzRunBody.innerHTML = '';
+  const singleBlock = Boolean(options.singleBlock);
   if (!text) {
     el.boltzRunBody.textContent = 'No commands available.';
+    return;
+  }
+  if (singleBlock) {
+    const wrapper = document.createElement('div');
+    wrapper.style.marginBottom = '12px';
+
+    const header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.justifyContent = 'space-between';
+    header.style.alignItems = 'center';
+    header.style.gap = '8px';
+    header.style.marginBottom = '6px';
+
+    const heading = document.createElement('div');
+    heading.style.fontWeight = '600';
+    heading.textContent = 'Commands';
+    header.appendChild(heading);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'ghost';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', () => copyTextToClipboard(String(text), copyBtn));
+    header.appendChild(copyBtn);
+
+    const block = document.createElement('pre');
+    block.textContent = String(text).trim() || '—';
+    block.style.background = '#f1f5f9';
+    block.style.border = '1px solid #e2e8f0';
+    block.style.borderRadius = '8px';
+    block.style.padding = '10px';
+    block.style.margin = '0';
+    block.style.whiteSpace = 'pre-wrap';
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(block);
+    el.boltzRunBody.appendChild(wrapper);
     return;
   }
   const lines = String(text).split('\n');
@@ -594,6 +641,95 @@ function epitopeLabel(cfg = {}, fallbackIndex = null) {
   if (cfg.epitope_id) return cfg.epitope_id;
   if (fallbackIndex !== null) return `Epitope ${fallbackIndex}`;
   return 'Epitope';
+}
+
+function normalizeEpitopeToken(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const match = raw.match(/epitope[_\-\s]*(\d+)/i);
+  if (match) return `epitope_${Number(match[1])}`;
+  if (/^\d+$/.test(raw)) return `epitope_${Number(raw)}`;
+  return raw.toLowerCase().replace(/\s+/g, '');
+}
+
+function epitopeKeysForConfig(cfg = {}, fallbackIndex = null) {
+  const keys = new Set();
+  const candidates = [
+    cfg.epitope_name,
+    cfg.epitope_id,
+    epitopeLabel(cfg, fallbackIndex),
+  ];
+  candidates.forEach((candidate) => {
+    const normalized = normalizeEpitopeToken(candidate);
+    if (normalized) keys.add(normalized);
+  });
+  return keys;
+}
+
+function parseEpitopeSelectionInput(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  return text
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const match = part.match(/^([0-9A-Za-z]{4})\s*[:/\-]\s*(.+)$/);
+      if (!match) return null;
+      return {
+        pdbId: (match[1] || '').trim().toUpperCase(),
+        epitope: (match[2] || '').trim(),
+        raw: part,
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseBinderExportSelections(raw) {
+  const tokens = String(raw || '')
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const entries = [];
+  const invalid = [];
+  tokens.forEach((token) => {
+    const match = token.match(/^([0-9A-Za-z]{4})\s*[:/\-]\s*(.+)$/);
+    if (!match) {
+      invalid.push(token);
+      return;
+    }
+    const pdbId = (match[1] || '').trim().toUpperCase();
+    const epRaw = (match[2] || '').trim();
+    const epitope = normalizeEpitopeToken(epRaw);
+    if (!pdbId || !epitope) {
+      invalid.push(token);
+      return;
+    }
+    entries.push({ pdbId, epitope, raw: token });
+  });
+  return { entries, invalid };
+}
+
+async function downloadNamedFile(name) {
+  if (!name) return;
+  const url = `/api/bulk/file?name=${encodeURIComponent(name)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Failed to download ${name} (${res.status})`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('content-disposition') || '';
+  const match = cd.match(/filename=\"?([^\";]+)\"?/i);
+  const filename = match?.[1] || name;
+  const objUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
 }
 
 function summarizeTargetStatus(target) {
@@ -1450,6 +1586,64 @@ async function downloadBinderCsv() {
     showAlert(err.message || 'Unable to download binder CSV.');
   } finally {
     if (el.binderDownload) el.binderDownload.disabled = false;
+  }
+}
+
+async function exportSelectedBinders() {
+  const selectionRaw = el.binderExportSelections?.value || '';
+  const { entries, invalid } = parseBinderExportSelections(selectionRaw);
+  if (!entries.length) {
+    showAlert('Enter at least one PDB:epitope selection to export.');
+    return;
+  }
+  if (invalid.length) {
+    showAlert(`Invalid selections skipped: ${invalid.join(', ')}`);
+  }
+  const seen = new Set();
+  const uniqueEntries = entries.filter((entry) => {
+    const key = `${entry.pdbId}:${entry.epitope}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const countRaw = Number(el.binderExportCount?.value || 0);
+  const perGroup = Number.isFinite(countRaw) && countRaw > 0 ? Math.floor(countRaw) : 0;
+  if (!perGroup) {
+    showAlert('Enter a valid number of binders per antigen:epitope.');
+    return;
+  }
+
+  if (el.binderExportConfirm) el.binderExportConfirm.disabled = true;
+  try {
+    const selections = uniqueEntries.map((entry) => `${entry.pdbId}:${entry.epitope}`);
+    const payload = {
+      selections,
+      per_group: perGroup,
+      include_summary: Boolean(el.binderExportSummary?.checked),
+    };
+    const res = await fetch('/api/bulk/boltzgen/binders/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Export failed (${res.status})`);
+    }
+    const body = await res.json();
+    if (!body.csv_name) {
+      showAlert(body.message || 'No binder export produced.');
+      return;
+    }
+    await downloadNamedFile(body.csv_name);
+    if (body.summary_csv_name) {
+      await downloadNamedFile(body.summary_csv_name);
+    }
+    showAlert(body.message || `Export ready: ${body.csv_name}`, false);
+  } catch (err) {
+    showAlert(err.message || 'Failed to export selected binders.');
+  } finally {
+    if (el.binderExportConfirm) el.binderExportConfirm.disabled = false;
   }
 }
 
@@ -2983,6 +3177,153 @@ function buildAllRunCommandsText(targets = []) {
   return lines.filter(Boolean).join('\n');
 }
 
+function buildSelectedRunCommandsText(selections = []) {
+  const {
+    remoteRoot,
+    targetRoot,
+    toolsRoot,
+    sshTarget,
+    condaActivate,
+    boltz,
+    localTargetsRoot,
+    localWorkspaceRoot,
+  } = clusterDefaults();
+  const envRoot = remoteRoot || '<remote_root>';
+  const envTargetRoot = targetRoot || `${envRoot}/targets`;
+  const pipelinePath = `${toolsRoot || '<remote_root>/lib'}/tools/boltzgen/pipeline.py`;
+  const condaLine = condaActivate ? condaActivate : '# conda activate bg';
+  const localTools = localWorkspaceRoot ? `${localWorkspaceRoot}/lib/tools` : 'lib/tools';
+
+  const grouped = new Map();
+  selections.forEach((sel) => {
+    const pdb = (sel?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const entry = grouped.get(pdb) || { pdbId: pdb, specs: new Set(), epitopeNames: new Set() };
+    if (sel?.configPath) entry.specs.add(sel.configPath);
+    if (sel?.epitopeName) entry.epitopeNames.add(sel.epitopeName);
+    grouped.set(pdb, entry);
+  });
+  const targets = Array.from(grouped.values());
+  if (!targets.length) {
+    return '# Manual BoltzGen submission (selection)\nNo matching targets.';
+  }
+
+  const designCount = getBoltzDesignCount() || 100;
+  const timeHours = getBoltzTimeHours() || boltz.time_hours || 12;
+  const partition = boltz.partition || '<partition>';
+  const gpus = boltz.gpus || '<gpus>';
+  const cpus = boltz.cpus || '<cpus>';
+  const memVal = boltz.mem_gb ?? '<mem>';
+  const memLabel = Number.isFinite(memVal) ? `${memVal}G` : `${memVal}`;
+  const cacheDir = boltz.cache_dir ? `${boltz.cache_dir}` : null;
+  const extraArgs = Array.isArray(boltz.extra_args) ? boltz.extra_args : (boltz.extra_args ? [boltz.extra_args] : []);
+
+  const lines = [
+    '# Manual BoltzGen submission (selection)',
+    '',
+    '# 1) Sync target configs + tools to cluster',
+  ];
+  targets.forEach((t) => {
+    const pdb = (t?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    lines.push(`rsync -az ${localTarget} ${sshTarget}:${targetRoot}`);
+  });
+  lines.push(`rsync -az ${localTools} ${sshTarget}:${toolsRoot || '<remote_root>/lib'}`);
+
+  lines.push('', '# 2) Verify boltzgen configs exist on cluster');
+  targets.forEach((t) => {
+    const pdb = (t?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
+    const specs = Array.from(t?.specs || []);
+    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
+      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
+    lines.push(`ssh ${sshTarget} "ls ${remoteSpecs.join(' ')}"`);
+  });
+
+  lines.push('', '# 3) Launch BoltzGen pipeline', condaLine);
+  lines.push(`export INITBINDER_ROOT=${envRoot}`);
+  lines.push(`export INITBINDER_TARGET_ROOT=${envTargetRoot}`);
+
+  const monitorLines = [];
+  const pullLines = [];
+  targets.forEach((t) => {
+    const pdb = (t?.pdbId || '').toUpperCase();
+    if (!pdb) return;
+    const epNames = Array.from(t?.epitopeNames || []).filter(Boolean);
+    if (epNames.length) {
+      lines.push('', `# ${pdb} (${epNames.join(', ')})`);
+    } else {
+      lines.push('', `# ${pdb}`);
+    }
+    const runLabel = runLabelFor(pdb);
+    const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
+    const outputRootBase = boltz.output_root
+      ? `${boltz.output_root}`.replace(/\/$/, '')
+      : `${remoteTarget}/designs/boltzgen`;
+    const outputRoot = outputRootFor(outputRootBase, runLabel);
+    const specs = Array.from(t?.specs || []);
+    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
+      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
+    const specLines = remoteSpecs.map((spec) => `  --spec ${spec} \\`);
+    const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
+    const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
+    const localTarget = localTargetsRoot ? `${localTargetsRoot}/${pdb}` : `targets/${pdb}`;
+    const localOutputDir = `${localTarget}/designs/boltzgen/${runLabel}`;
+
+    lines.push(
+      `python ${pipelinePath} pipeline ${pdb} \\`,
+      `  --run_label ${runLabel} \\`,
+      `  --num_designs ${designCount} \\`,
+      `  --output_root ${outputRoot} \\`,
+      `  --partition ${partition} --gpus ${gpus} --cpus ${cpus} --mem ${memLabel} --time_h ${timeHours} \\`,
+      ...specLines,
+      cacheLine,
+      extraLine,
+      '  --submit',
+    );
+
+    monitorLines.push(`ssh ${sshTarget} "squeue -u $USER | grep ${runLabel}"`);
+    monitorLines.push(`ssh ${sshTarget} "tail -f ${outputRoot}/launcher.log"`);
+    pullLines.push(`mkdir -p ${localOutputDir}`);
+    pullLines.push(`rsync -az ${sshTarget}:${outputRoot}/ ${localOutputDir}/`);
+  });
+
+  if (monitorLines.length) {
+    lines.push('', '# Monitor', ...monitorLines);
+  }
+  if (pullLines.length) {
+    lines.push('', '# Pull results back', ...pullLines);
+  }
+
+  return lines.filter(Boolean).join('\n');
+}
+
+function matchEpitopeConfig(target, epitopeToken) {
+  const configs = Array.isArray(target?.configs) ? target.configs : [];
+  if (!configs.length) return null;
+  const raw = String(epitopeToken || '').trim();
+  const normalized = normalizeEpitopeToken(raw);
+  const normalizedUpper = normalized ? normalized.toUpperCase() : '';
+  for (let idx = 0; idx < configs.length; idx += 1) {
+    const cfg = configs[idx];
+    const keys = epitopeKeysForConfig(cfg, idx + 1);
+    if (normalized && keys.has(normalized)) return cfg;
+    if (raw) {
+      const candidates = [
+        cfg?.epitope_name,
+        cfg?.epitope_id,
+        epitopeLabel(cfg, idx + 1),
+      ].map((val) => String(val || '').trim().toLowerCase());
+      if (candidates.includes(raw.toLowerCase())) return cfg;
+    }
+    const cfgPath = String(cfg?.config_path || '').toUpperCase();
+    if (normalizedUpper && cfgPath.includes(normalizedUpper)) return cfg;
+  }
+  return null;
+}
+
 async function showBoltzRunCommand(pdbId, configPath = null, epitopeName = null) {
   if (!pdbId) {
     showAlert('Missing PDB ID for manual command.');
@@ -3006,7 +3347,7 @@ async function showBoltzRunCommand(pdbId, configPath = null, epitopeName = null)
     specs = target.configs.map((cfg) => cfg.config_path).filter(Boolean);
   }
   const text = buildRunCommandText(pdbId, specs, epitopeName);
-  renderRunCommandBlocks(text);
+  renderRunCommandBlocks(text, { singleBlock: true });
 }
 
 async function showRfaRunCommand(pdbId) {
@@ -3119,6 +3460,82 @@ async function showRunCommandAll() {
     ? buildAllRunCommandsText(filteredTargets)
     : '# Manual BoltzGen submission\nNo targets passed filters.';
   renderRunCommandBlocks(prependRunCommandFilters(text, filters, targets.length, filteredTargets.length));
+}
+
+async function showRunCommandSelection() {
+  state.runContext = null;
+  state.runMode = 'selection';
+  const raw = (el.epitopeDiversitySelection?.value || '').trim();
+  if (!raw) {
+    showAlert('Enter selections like 5WT9:epitope_1, 3J8F:epitope_4.');
+    return;
+  }
+  const selections = parseEpitopeSelectionInput(raw);
+  if (!selections.length) {
+    showAlert('No valid selections found. Use PDB:epitope_#.');
+    return;
+  }
+  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  if (!targets.length) {
+    showAlert('No BoltzGen configs loaded.');
+    return;
+  }
+  const engine = getRunEngine();
+  if (engine === 'rfantibody') {
+    showAlert('Selection-based commands are only available for BoltzGen.');
+    return;
+  }
+
+  const targetMap = new Map(
+    targets.map((t) => [(t?.pdb_id || '').toUpperCase(), t]),
+  );
+  const matched = [];
+  const missingTargets = [];
+  const missingEpitopes = [];
+  selections.forEach((sel) => {
+    const target = targetMap.get(sel.pdbId);
+    if (!target) {
+      missingTargets.push(sel.raw);
+      return;
+    }
+    const cfg = matchEpitopeConfig(target, sel.epitope);
+    if (!cfg) {
+      missingEpitopes.push(sel.raw);
+      return;
+    }
+    matched.push({
+      pdbId: sel.pdbId,
+      configPath: cfg.config_path || '',
+      epitopeName: sel.epitope || epitopeLabel(cfg),
+    });
+  });
+
+  if (!matched.length) {
+    showAlert('No matching configs found for that selection.');
+    return;
+  }
+
+  if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
+  if (el.boltzRunTitle) {
+    el.boltzRunTitle.textContent = `Manual run · selection (${matched.length})`;
+  }
+  toggleModal(el.boltzRunModal, true);
+  if (!state.clusterStatus) {
+    await loadClusterStatus();
+  }
+
+  let text = buildSelectedRunCommandsText(matched);
+  const notes = [];
+  if (missingTargets.length) {
+    notes.push(`# Missing targets: ${missingTargets.join(', ')}`);
+  }
+  if (missingEpitopes.length) {
+    notes.push(`# Missing epitopes: ${missingEpitopes.join(', ')}`);
+  }
+  if (notes.length) {
+    text = `${notes.join('\n')}\n\n${text}`;
+  }
+  renderRunCommandBlocks(text, { singleBlock: true });
 }
 
 async function runBoltzTarget(pdbId, triggerEl = null) {
@@ -3764,6 +4181,7 @@ function init() {
   if (el.diversityDownloadHtml) el.diversityDownloadHtml.addEventListener('click', () => downloadDiversityFile('html'));
   if (el.boltzPlotDiversity) el.boltzPlotDiversity.addEventListener('click', () => plotBoltzAntigenDiversity());
   if (el.epitopeDiversityPlot) el.epitopeDiversityPlot.addEventListener('click', () => plotEpitopeDiversitySelection());
+  if (el.boltzShowRunSelection) el.boltzShowRunSelection.addEventListener('click', showRunCommandSelection);
   if (el.boltzShowRunAll) el.boltzShowRunAll.addEventListener('click', showRunCommandAll);
   if (el.boltzRerunRange) {
     el.boltzRerunRange.addEventListener('click', openPipelineRerunRangeModal);
@@ -3820,6 +4238,7 @@ function init() {
   if (el.binderTable) el.binderTable.addEventListener('click', handleBinderTableClick);
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
+  if (el.binderExportBtn) el.binderExportBtn.addEventListener('click', () => toggleModal(el.binderExportModal, true));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
   if (el.bulkAlgorithmBtn) el.bulkAlgorithmBtn.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, true));
   if (el.binderFilterPdb) {
@@ -3868,6 +4287,9 @@ function init() {
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
   if (el.bulkAlgorithmClose) el.bulkAlgorithmClose.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, false));
+  if (el.binderExportClose) el.binderExportClose.addEventListener('click', () => toggleModal(el.binderExportModal, false));
+  if (el.binderExportCancel) el.binderExportCancel.addEventListener('click', () => toggleModal(el.binderExportModal, false));
+  if (el.binderExportConfirm) el.binderExportConfirm.addEventListener('click', exportSelectedBinders);
   if (el.pipelineRerunClose) el.pipelineRerunClose.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
   if (el.pipelineRerunCancel) el.pipelineRerunCancel.addEventListener('click', () => toggleModal(el.pipelineRerunModal, false));
   if (el.pipelineRerunConfirm) el.pipelineRerunConfirm.addEventListener('click', () => submitPipelineRerun(el.pipelineRerunConfirm));
@@ -3884,6 +4306,7 @@ function init() {
     if (closeTarget === 'boltz-regenerate-range') toggleModal(el.boltzRegenerateRangeModal, false);
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
     if (closeTarget === 'bulk-algorithm') toggleModal(el.bulkAlgorithmModal, false);
+    if (closeTarget === 'binder-export') toggleModal(el.binderExportModal, false);
   });
 
   renderBoltzConfigs();
