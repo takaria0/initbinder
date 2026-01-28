@@ -387,6 +387,11 @@ class BoltzgenEpitopeConfig(BaseModel):
     binding_label: Optional[str] = None
     include_label: Optional[str] = None
     hotspot_count: Optional[int] = None
+    hotspot_surface_ok: Optional[bool] = None
+    hotspot_surface_exposed_count: Optional[int] = None
+    hotspot_surface_total: Optional[int] = None
+    hotspot_surface_missing: Optional[int] = None
+    hotspot_surface_cutoff: Optional[float] = None
     job_id: Optional[str] = None
     job_status: Optional[str] = None
     run_label: Optional[str] = None

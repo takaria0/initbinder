@@ -652,6 +652,32 @@ function normalizeEpitopeToken(value) {
   return raw.toLowerCase().replace(/\s+/g, '');
 }
 
+function isSurfaceAllowed(cfg) {
+  return cfg?.hotspot_surface_ok !== false;
+}
+
+function surfaceEpitopeLabel(cfg, fallbackIndex = null) {
+  const base = epitopeLabel(cfg, fallbackIndex);
+  if (cfg?.hotspot_surface_ok === false) {
+    return `${base} (SASA filtered)`;
+  }
+  return base;
+}
+
+function availableEpitopeLabels(configs = []) {
+  const labels = [];
+  const seen = new Set();
+  configs.forEach((cfg, idx) => {
+    if (!isSurfaceAllowed(cfg)) return;
+    const label = epitopeLabel(cfg, idx + 1);
+    const key = String(label || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    labels.push(label);
+  });
+  return labels;
+}
+
 function epitopeKeysForConfig(cfg = {}, fallbackIndex = null) {
   const keys = new Set();
   const candidates = [
@@ -2208,6 +2234,15 @@ function renderBoltzConfigs() {
     const key = (target.pdb_id || '').toUpperCase();
     const isExpanded = state.expandedTargets instanceof Set ? state.expandedTargets.has(key) : false;
     const hasPrep = Boolean(target.has_prep);
+    const availableLabels = availableEpitopeLabels(configs);
+    let epitopeCell = '—';
+    let epitopeTitle = '';
+    if (configs.length) {
+      epitopeCell = `${availableLabels.length} epitope${availableLabels.length === 1 ? '' : 's'}`;
+      if (availableLabels.length) {
+        epitopeTitle = availableLabels.join(', ');
+      }
+    }
     const tr = document.createElement('tr');
     tr.className = `target-row ${isExpanded ? 'expanded' : 'collapsed'}`;
     tr.dataset.pdbId = key;
@@ -2218,7 +2253,7 @@ function renderBoltzConfigs() {
       target.pdb_id || '',
       target.allowed_epitope_range || '—',
       allowedLength === null ? '—' : String(Math.round(allowedLength)),
-      'All epitopes',
+      epitopeCell,
     ];
     cells.forEach((val, cellIdx) => {
       const td = document.createElement('td');
@@ -2226,6 +2261,9 @@ function renderBoltzConfigs() {
         td.innerHTML = `<span class="toggle-icon">▸</span>${val}`;
       } else {
         td.textContent = val;
+      }
+      if (cellIdx === 5 && epitopeTitle) {
+        td.title = epitopeTitle;
       }
       tr.appendChild(td);
     });
@@ -2294,7 +2332,7 @@ function renderBoltzConfigs() {
         '',
         '',
         '',
-        epitopeLabel(cfg, cfgIdx + 1),
+        surfaceEpitopeLabel(cfg, cfgIdx + 1),
       ];
       epCells.forEach((val, cellIdx) => {
         const td = document.createElement('td');
@@ -2302,6 +2340,10 @@ function renderBoltzConfigs() {
         if (cellIdx === 5) td.style.paddingLeft = '14px';
         epRow.appendChild(td);
       });
+      if (cfg?.hotspot_surface_ok === false) {
+        epRow.style.opacity = '0.65';
+        epRow.title = 'Filtered: hotspot below SASA cutoff.';
+      }
       const epStatus = document.createElement('td');
       epStatus.className = 'boltz-status-cell';
       epStatus.appendChild(buildLocalResultBadge(getBoltzDesignTotalForSpec(target.pdb_id, cfg)));
@@ -2336,6 +2378,10 @@ function renderBoltzConfigs() {
       epManual.dataset.pdbId = target.pdb_id || '';
       epManual.dataset.configPath = cfg.config_path || '';
       epManual.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
+      if (cfg?.hotspot_surface_ok === false) {
+        epManual.disabled = true;
+        epManual.title = 'Filtered by SASA: hotspot not surface exposed.';
+      }
       epCmd.appendChild(epManual);
 
       const epPymol = document.createElement('button');
@@ -3118,10 +3164,17 @@ function buildAllRunCommandsText(targets = []) {
     const pdb = (t?.pdb_id || '').toUpperCase();
     if (!pdb) return;
     const remoteTarget = `${targetRoot || '<remote_root>/targets'}/${pdb}`.replace(/\/+/g, '/');
-    const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
-    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
-      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
-    lines.push(`ssh ${sshTarget} "ls ${remoteSpecs.join(' ')}"`);
+    const hasConfigs = Array.isArray(t?.configs) && t.configs.length > 0;
+    const allowedConfigs = hasConfigs ? t.configs.filter(isSurfaceAllowed) : [];
+    const specs = allowedConfigs.map((cfg) => cfg.config_path).filter(Boolean);
+    const remoteSpecs = specs.length
+      ? specs
+      : (hasConfigs ? [] : ['configs/*/boltzgen_config.yaml']);
+    if (!remoteSpecs.length) {
+      lines.push(`# ${pdb}: no surface-exposed epitopes (SASA filtered)`);
+      return;
+    }
+    lines.push(`ssh ${sshTarget} "ls ${remoteSpecs.map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/')).join(' ')}"`);
   });
 
   lines.push('', '# 3) Launch BoltzGen pipeline', condaLine);
@@ -3139,9 +3192,16 @@ function buildAllRunCommandsText(targets = []) {
       ? `${boltz.output_root}`.replace(/\/$/, '')
       : `${remoteTarget}/designs/boltzgen`;
     const outputRoot = outputRootFor(outputRootBase, runLabel);
-    const specs = Array.isArray(t?.configs) ? t.configs.map((cfg) => cfg.config_path).filter(Boolean) : [];
-    const remoteSpecs = (specs.length ? specs : ['configs/*/boltzgen_config.yaml'])
-      .map((spec) => `${remoteTarget}/${spec}`.replace(/\/+/g, '/'));
+    const hasConfigs = Array.isArray(t?.configs) && t.configs.length > 0;
+    const allowedConfigs = hasConfigs ? t.configs.filter(isSurfaceAllowed) : [];
+    const specs = allowedConfigs.map((cfg) => cfg.config_path).filter(Boolean);
+    const remoteSpecs = specs.length
+      ? specs
+      : (hasConfigs ? [] : ['configs/*/boltzgen_config.yaml']);
+    if (!remoteSpecs.length) {
+      lines.push('', `# ${pdb}: no surface-exposed epitopes (SASA filtered)`);
+      return;
+    }
     const specLines = remoteSpecs.map((spec) => `  --spec ${spec} \\`);
     const cacheLine = cacheDir ? `  --cache_dir ${cacheDir} \\` : null;
     const extraLine = extraArgs.length ? `  --extra_run_args ${extraArgs.join(' ')} \\` : null;
@@ -3342,9 +3402,20 @@ async function showBoltzRunCommand(pdbId, configPath = null, epitopeName = null)
   const target = (state.boltzConfigs || []).find((t) => (t.pdb_id || '').toUpperCase() === (pdbId || '').toUpperCase());
   let specs = [];
   if (configPath) {
+    if (target && Array.isArray(target.configs)) {
+      const cfg = target.configs.find((entry) => entry?.config_path === configPath);
+      if (cfg && cfg.hotspot_surface_ok === false) {
+        showAlert('Epitope filtered by SASA; no run command generated.');
+        return;
+      }
+    }
     specs = [configPath];
   } else if (target && Array.isArray(target.configs)) {
-    specs = target.configs.map((cfg) => cfg.config_path).filter(Boolean);
+    specs = target.configs.filter(isSurfaceAllowed).map((cfg) => cfg.config_path).filter(Boolean);
+    if (!specs.length) {
+      renderRunCommandBlocks('# No surface-exposed epitopes available for this target.');
+      return;
+    }
   }
   const text = buildRunCommandText(pdbId, specs, epitopeName);
   renderRunCommandBlocks(text, { singleBlock: true });
@@ -3492,6 +3563,7 @@ async function showRunCommandSelection() {
   const matched = [];
   const missingTargets = [];
   const missingEpitopes = [];
+  const filteredEpitopes = [];
   selections.forEach((sel) => {
     const target = targetMap.get(sel.pdbId);
     if (!target) {
@@ -3501,6 +3573,10 @@ async function showRunCommandSelection() {
     const cfg = matchEpitopeConfig(target, sel.epitope);
     if (!cfg) {
       missingEpitopes.push(sel.raw);
+      return;
+    }
+    if (cfg.hotspot_surface_ok === false) {
+      filteredEpitopes.push(sel.raw);
       return;
     }
     matched.push({
@@ -3531,6 +3607,9 @@ async function showRunCommandSelection() {
   }
   if (missingEpitopes.length) {
     notes.push(`# Missing epitopes: ${missingEpitopes.join(', ')}`);
+  }
+  if (filteredEpitopes.length) {
+    notes.push(`# SASA filtered epitopes: ${filteredEpitopes.join(', ')}`);
   }
   if (notes.length) {
     text = `${notes.join('\n')}\n\n${text}`;

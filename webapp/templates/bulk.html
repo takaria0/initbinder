@@ -546,6 +546,12 @@ for i = 1..n_eff:
             <p>When <code>--check</code> is enabled, restrict candidates to <code>A = { (chain, pos) : SASA(chain,pos) >= tau }</code> and sample evenly
               from <code>A</code>. If <code>L</code> is large, the algorithm probes up to <code>n_probe = min(200, max(20, 20*n))</code> ranks rather than
               expanding all positions (cap <code>MAX_EXPAND_POSITIONS = 20000</code>). If filtering yields no candidates, fall back to unfiltered picks.</p>
+            <p><strong>GUI SASA filtering (no regeneration).</strong> The bulk UI can optionally screen existing hotspot residues against a fresh SASA
+              calculation on the prepared/raw mmCIF without regenerating epitope definitions. For each epitope, the GUI checks the stored hotspot
+              residue list and flags the epitope when any hotspot falls below the SASA cutoff (default 20 Å<sup>2</sup>, or the value recorded under
+              <code>prep_target.sasa_cutoff</code> in <code>target.yaml</code> if present). Filtered epitopes are labeled “SASA filtered” in the BoltzGen
+              config table and are excluded from Run command generation. If SASA cannot be computed (missing structure or Biopython SASA), the UI
+              skips filtering and leaves all epitopes available.</p>
             <p><strong>Example (computed from code).</strong> Using <code>targets/8GYE/target.yaml</code>, epitope
               <code>N-terminal_Cysteine-rich_Domain_1</code> has span <code>B:2-16</code> (so <code>L=15</code>, <code>n=3</code>). The formula yields
               ranks <code>r = (4, 8, 12)</code>, mapping to hotspots <code>B:5</code>, <code>B:9</code>, <code>B:13</code>.</p>

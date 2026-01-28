@@ -221,6 +221,8 @@ KD_SCALE = {
     "Y": -1.3,
 }
 
+_HOTSPOT_SASA_CUTOFF_DEFAULT = 20.0
+
 
 def _parse_chain_res_token(token: object) -> Optional[Tuple[str, int, str]]:
     """Parse residue tokens like 'A35', 'A:35', 'A_35', 'A-35', or 'A35A'."""
@@ -938,6 +940,151 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
     if bundle_eps:
         return bundle_eps
     return _fallback_from_target_yaml()
+
+
+def _hotspot_sasa_cutoff_from_target(data: Optional[dict]) -> float:
+    if not data or not isinstance(data, dict):
+        return _HOTSPOT_SASA_CUTOFF_DEFAULT
+    prep = data.get("prep_target") or {}
+    if isinstance(prep, dict):
+        cutoff = prep.get("sasa_cutoff")
+        if cutoff is not None:
+            try:
+                return float(cutoff)
+            except (TypeError, ValueError):
+                return _HOTSPOT_SASA_CUTOFF_DEFAULT
+    return _HOTSPOT_SASA_CUTOFF_DEFAULT
+
+
+@lru_cache(maxsize=64)
+def _compute_sasa_map_for_path(path_str: str) -> Dict[Tuple[str, int], float]:
+    path = Path(path_str)
+    if not path.exists():
+        return {}
+    try:
+        from Bio.PDB import MMCIFParser  # type: ignore
+        from Bio.PDB.SASA import ShrakeRupley  # type: ignore
+    except Exception:
+        return {}
+    try:
+        parser = MMCIFParser(QUIET=True, auth_chains=False, auth_residues=False)
+    except TypeError:
+        parser = MMCIFParser(QUIET=True)
+    try:
+        structure = parser.get_structure("MMCIF_STRUCTURE", str(path))
+    except Exception:
+        return {}
+    sr = ShrakeRupley()
+    try:
+        sr.compute(structure, level="R")
+    except Exception:
+        return {}
+    sasa_map: Dict[Tuple[str, int], float] = {}
+    for model in structure:
+        for chain in model:
+            chain_id = (str(chain.id) or "").strip().upper()
+            if not chain_id:
+                continue
+            for residue in chain:
+                hetflag, resseq, _ = residue.get_id()
+                if hetflag != " ":
+                    continue
+                if resseq is None:
+                    continue
+                try:
+                    pos = int(resseq)
+                except Exception:
+                    continue
+                sasa = getattr(residue, "sasa", None)
+                if sasa is None:
+                    sasa = residue.xtra.get("EXP_SASA") or residue.xtra.get("sasa")
+                try:
+                    sasa_f = float(sasa)
+                except Exception:
+                    continue
+                sasa_map[(chain_id, pos)] = sasa_f
+        break
+    return sasa_map
+
+
+def _sasa_map_for_target(pdb_id: str) -> Dict[Tuple[str, int], float]:
+    path = _prepared_structure_path_for_target(pdb_id)
+    return _compute_sasa_map_for_path(str(path))
+
+
+def _epitope_hotspot_map(epitopes: Sequence[dict]) -> Dict[str, List[str]]:
+    mapping: Dict[str, List[str]] = {}
+    for ep in epitopes or []:
+        if not isinstance(ep, dict):
+            continue
+        hotspots = [str(h).strip() for h in (ep.get("hotspots") or []) if str(h).strip()]
+        candidates = [
+            ep.get("name"),
+            ep.get("display_name"),
+            ep.get("epitope_id"),
+        ]
+        for cand in candidates:
+            key = _normalize_epitope_token(cand)
+            if not key:
+                continue
+            if key not in mapping:
+                mapping[key] = list(hotspots)
+            elif hotspots:
+                existing = mapping[key]
+                for item in hotspots:
+                    if item not in existing:
+                        existing.append(item)
+    return mapping
+
+
+def _hotspot_surface_summary(
+    pdb_id: str,
+    hotspots: Sequence[str],
+    cutoff: float,
+) -> Dict[str, Optional[object]]:
+    total = len(list(hotspots))
+    summary: Dict[str, Optional[object]] = {
+        "hotspot_surface_ok": None,
+        "hotspot_surface_exposed_count": None,
+        "hotspot_surface_total": total,
+        "hotspot_surface_missing": None,
+        "hotspot_surface_cutoff": cutoff,
+    }
+    if total <= 0:
+        return summary
+    sasa_map = _sasa_map_for_target(pdb_id)
+    if not sasa_map:
+        return summary
+    exposed = 0
+    known = 0
+    missing = 0
+    below = 0
+    for token in hotspots:
+        parsed = _parse_chain_res_token(token)
+        if not parsed:
+            missing += 1
+            continue
+        chain_id, resnum, _ = parsed
+        sasa_val = sasa_map.get((chain_id.upper(), resnum))
+        if sasa_val is None:
+            missing += 1
+            continue
+        known += 1
+        if sasa_val >= cutoff:
+            exposed += 1
+        else:
+            below += 1
+    summary["hotspot_surface_exposed_count"] = exposed
+    summary["hotspot_surface_missing"] = missing
+    if known == 0:
+        summary["hotspot_surface_ok"] = None
+    elif below > 0:
+        summary["hotspot_surface_ok"] = False
+    elif missing > 0:
+        summary["hotspot_surface_ok"] = None
+    else:
+        summary["hotspot_surface_ok"] = True
+    return summary
 
 
 _RFA_EPITOPE_SANITIZE_RE = re.compile(r"[ /]+")
@@ -2176,6 +2323,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
         allowed_range = None
         allowed_length = None
         epitope_count = None
+        sasa_cutoff = _HOTSPOT_SASA_CUTOFF_DEFAULT
         try:
             cfg = load_config()
             target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb.upper() / "target.yaml"
@@ -2189,6 +2337,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 allowed_length = _allowed_range_length(allowed_raw)
                 expressed_range, expressed_length = _extract_expressed_range(data)
                 epitope_count = _epitope_count_from_yaml(data)
+                sasa_cutoff = _hotspot_sasa_cutoff_from_target(data)
         except Exception:
             antigen_url = None
             expressed_range = None
@@ -2196,8 +2345,10 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
             allowed_range = None
             allowed_length = None
             epitope_count = None
+            sasa_cutoff = _HOTSPOT_SASA_CUTOFF_DEFAULT
         has_prep = _has_pymol_assets(pdb)
         configs = _discover_boltzgen_configs(pdb)
+        epitope_hotspots = _epitope_hotspot_map(_load_epitopes_for_target(pdb))
         if not configs:
             targets.append(
                 BoltzgenTargetConfig(
@@ -2218,6 +2369,15 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
             key = (pdb.upper(), cfg_entry["config_path"])
             run_rec = latest_runs.get(key)
             status = _job_status_for(job_store, run_rec.get("job_id") if run_rec else None) if run_rec else None
+            ep_key = _normalize_epitope_token(cfg_entry.get("epitope_id") or cfg_entry.get("epitope_name") or "")
+            hotspots = epitope_hotspots.get(ep_key, []) if ep_key else []
+            surface_meta = _hotspot_surface_summary(pdb, hotspots, sasa_cutoff) if hotspots else {
+                "hotspot_surface_ok": None,
+                "hotspot_surface_exposed_count": None,
+                "hotspot_surface_total": len(hotspots),
+                "hotspot_surface_missing": None,
+                "hotspot_surface_cutoff": sasa_cutoff,
+            }
             enriched.append(
                 BoltzgenEpitopeConfig(
                     epitope_id=cfg_entry.get("epitope_id"),
@@ -2226,6 +2386,11 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                     binding_label=cfg_entry.get("binding_label"),
                     include_label=cfg_entry.get("include_label"),
                     hotspot_count=cfg_entry.get("hotspot_count"),
+                    hotspot_surface_ok=surface_meta.get("hotspot_surface_ok"),
+                    hotspot_surface_exposed_count=surface_meta.get("hotspot_surface_exposed_count"),
+                    hotspot_surface_total=surface_meta.get("hotspot_surface_total"),
+                    hotspot_surface_missing=surface_meta.get("hotspot_surface_missing"),
+                    hotspot_surface_cutoff=surface_meta.get("hotspot_surface_cutoff"),
                     job_id=run_rec.get("job_id") if run_rec else None,
                     job_status=status,
                     run_label=run_rec.get("run_label") if run_rec else None,
