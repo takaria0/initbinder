@@ -421,8 +421,13 @@
           <p class="help-text" id="boltz-run-range-filter-note" style="margin: 8px 0 0 0;">
             Filters applied to commands (target.yaml): allowed_epitope_range length &gt;= 50; epitopes selected &gt;= 10.
           </p>
-          <p class="help-text" id="boltz-run-range-allowed-note" style="margin: 6px 0 0 0;"></p>
-          <p class="help-text" id="boltz-run-range-count-note" style="margin: 6px 0 0 0;"></p>
+          <p class="help-text" id="boltz-run-range-allowed-note" style="margin: 6px 0 0 0;">
+            allowed_epitope_range is read from target.yaml (allowed_epitope_range or allowed_range). Length is computed by
+            summing inclusive residue spans per token (e.g. A:10-20,B:1-5 -&gt; 16).
+          </p>
+          <p class="help-text" id="boltz-run-range-count-note" style="margin: 6px 0 0 0;">
+            Enter a valid row range to preview retained targets.
+          </p>
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>
@@ -523,18 +528,25 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
                 range to obtain <code>S</code>. Extract each PDB chain sequence <code>C_j</code> and perform local alignment (biotite) between <code>S</code>
                 and every <code>C_j</code>. If target.yaml already lists chains, prefer those; otherwise select the best alignment by identity/coverage.
                 Write <code>targets/&lt;PDB&gt;/target.yaml</code> with chain IDs, sequence blocks, alignment summary, and
-                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_auth</code> in auth numbering when available).</li>
+                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_auth</code> in auth numbering when available).
+                <em>No SASA filtering is performed at this stage.</em></li>
               <li><strong>decide_scope.py (epitope proposal).</strong> When epitopes are absent (or forced), propose spans using LLM + rule-based
-                constraints, restricted to <code>allowed_epitope_range</code>. Write epitope spans and rationales back to target.yaml.</li>
+                constraints, restricted to <code>allowed_epitope_range</code>. Write epitope spans and rationales back to target.yaml.
+                <em>No SASA filtering is performed at this stage.</em></li>
               <li><strong>prep_target.py (epitope preparation).</strong> Expand spans into residue masks, validate against mmCIF coverage, and optionally
                 compute SASA (Shrake-Rupley) in <code>--check</code> mode to restrict candidates to solvent-exposed residues. Emit epitope
                 metadata under <code>prep/</code> and <code>configs/epitope_*/epitope_stats.json</code>. If no epitopes exist, create an
-                Epitope_1 placeholder from <code>allowed_epitope_range</code> or the first chain fallback.</li>
+                Epitope_1 placeholder from <code>allowed_epitope_range</code> or the first chain fallback. SASA filtering is applied to
+                hotspot <em>selection</em> (not epitope deletion): hotspots are chosen from residues with SASA &gt;= cutoff, with a fallback
+                to unfiltered picks if no residues pass.</li>
               <li><strong>Config + run.</strong> Generate BoltzGen configs (and optional RFAntibody scripts), submit jobs, and store designs under
                 <code>targets/&lt;PDB&gt;/designs/</code>.</li>
               <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> and RFAntibody produces
                 <code>af3_rankings.tsv</code>. Bulk diversity merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
             </ol>
+            <p><strong>SASA filtering by stage (summary).</strong> SASA is computed only during <code>prep_target.py --check</code>. The bulk UI can
+              optionally <em>remove</em> epitopes from manual run command generation if any stored hotspot falls below the SASA cutoff; this is a UI-level
+              filter and does not delete epitope spans from <code>target.yaml</code>.</p>
             <p><strong>Hotspot selection (prep_target.py).</strong> For an epitope with spans <code>E</code>, define total length
               <code>L = sum_k (end_k - start_k + 1)</code>. The default hotspot count is <code>n</code> (clamped 1..5; default 3). In minimal mode,
               select evenly spaced ranks:</p>

@@ -85,6 +85,7 @@ from datetime import datetime
 import time
 import logging
 from pprint import pformat
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 import requests
@@ -390,24 +391,44 @@ def _load_manual_antigen_file(file_path: str, default_species: str) -> List[Manu
 
 # -------------------- Body text extraction --------------------
 def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_selector: str = "#main_left") -> str:
+    return _extract_body_text_multi(html, max_chars=max_chars, selectors=[css_selector])
+
+
+def _extract_body_text_multi(html: str, max_chars: int, selectors: List[str]) -> str:
     sel_used = "body-fallback"
     soup = BeautifulSoup(html, "lxml")
     container = None
-    try: container = soup.select_one(css_selector)
-    except Exception: container = None
-    if container is None and css_selector.startswith("#"):
-        try: container = soup.find(id=css_selector.lstrip("#"))
-        except Exception: container = None
+
+    for css_selector in selectors:
+        if not css_selector:
+            continue
+        try:
+            candidate = soup.select_one(css_selector)
+        except Exception:
+            candidate = None
+        if candidate is None and css_selector.startswith("#"):
+            try:
+                candidate = soup.find(id=css_selector.lstrip("#"))
+            except Exception:
+                candidate = None
+        if candidate is None:
+            continue
+        if candidate.get_text(" ", strip=True):
+            container = candidate
+            sel_used = css_selector
+            break
+
     if container is None:
         container = soup.body or soup
-    else:
-        sel_used = css_selector
     try:
         for tag in container.find_all(["script", "style", "header", "footer", "nav", "noscript"]):
             tag.decompose()
-    except Exception: pass
-    try: text = container.get_text(separator="\n", strip=True)
-    except Exception: text = soup.get_text(separator="\n", strip=True)
+    except Exception:
+        pass
+    try:
+        text = container.get_text(separator="\n", strip=True)
+    except Exception:
+        text = soup.get_text(separator="\n", strip=True)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     text_norm = "\n".join(lines)
     effective_max = max(max_chars, 12000)
@@ -416,8 +437,33 @@ def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_
         text_norm = text_norm[:effective_max]
     try:
         log_debug(f"[_extract_body_text] selector_used={sel_used}  original_len={original_len}  effective_max={effective_max}  final_len={len(text_norm)}")
-    except Exception: pass
+    except Exception:
+        pass
     return text_norm
+
+
+def _extract_body_text_for_url(html: str, url: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE) -> str:
+    host = ""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        host = ""
+
+    selectors: List[str] = []
+    if "acrobiosystems.com" in host:
+        selectors = [
+            "div.info div.info",
+            "div.info",
+            ".product-detail",
+            "#productDetail",
+            "#product-detail",
+        ]
+    elif "sinobiological.com" in host:
+        selectors = ["#main_left", "#main_left_1", "#main_right"]
+
+    if selectors:
+        return _extract_body_text_multi(html, max_chars=max_chars, selectors=selectors)
+    return _extract_body_text(html, max_chars=max_chars)
 
 # -------------------- Vendor Page Caching & Fetching --------------------
 def _vendor_page_cache_path(url: str) -> Path:
@@ -783,7 +829,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
             opt.url = final_url
         opt.page_html_cache = html_path
         html_content = Path(html_path).read_text(encoding="utf-8", errors="ignore")
-        body = _extract_body_text(html_content, max_chars=MAX_BODY_CHARS_PER_PAGE)
+        body = _extract_body_text_for_url(html_content, opt.url or "", max_chars=MAX_BODY_CHARS_PER_PAGE)
         opt.body_text = body
         if total_chars + len(body) <= MAX_BODY_TOTAL_CHARS:
             items_for_prompt.append({"index": idx, "catalog": opt.catalog, "text": body})
