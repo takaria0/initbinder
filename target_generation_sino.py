@@ -21,9 +21,9 @@ python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_gen
 python3 /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation_sino.py \
   --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/webscraper/acrobio_biotinylated_unique.tsv \
   --species human \
---max_targets 5 \
+--max_targets 1000 \
   --prefer_tags biotin \
-      --out_prefix acrobio_biotinylated_unique_test
+      --out_prefix acrobio_biotinylated_unique_all
 """
 
 from __future__ import annotations
@@ -165,6 +165,18 @@ def build_candidate_from_accession(
 
     acc = uni_search["primaryAccession"]
     uni_full = tg.fetch_uniprot_entry(acc)
+    # If UniProt isoform entry lacks PDBs, fall back to canonical accession.
+    if "-" in acc:
+        base = acc.split("-", 1)[0]
+        if base and base != acc:
+            pdbs_iso = tg.pdb_list_from_uniprot_entry(uni_full)
+            if not pdbs_iso:
+                uni_full_base = tg.fetch_uniprot_entry(base)
+                pdbs_base = tg.pdb_list_from_uniprot_entry(uni_full_base)
+                if pdbs_base:
+                    tg.log_info(f"[info] Falling back to canonical UniProt accession {base} (isoform {acc} had no PDBs).")
+                    acc = base
+                    uni_full = uni_full_base
     gene_name = ((uni_search.get("genes", [{}])[0].get("geneName", {}) or {}).get("value") or "").strip() or None
     protein_name = (uni_search.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value", "") or "").strip()
 

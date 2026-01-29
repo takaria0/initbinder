@@ -166,7 +166,7 @@ class BulkCsvRow(BaseModel):
     antigen_url: Optional[str] = None
     protein_name: Optional[str] = None
     pdb_id: Optional[str] = Field(None, max_length=32)
-    accession: Optional[str] = Field(None, max_length=40)
+    accession: Optional[str] = Field(None, max_length=200)
     vendor_range: Optional[str] = Field(None, max_length=64)
     resolved_pdb_id: Optional[str] = None
     preset_id: Optional[str] = None
@@ -202,7 +202,7 @@ class BulkDesignSettings(BaseModel):
 
 
 class BulkPreviewRequest(BaseModel):
-    csv_text: str = Field(..., min_length=3, max_length=200000)
+    csv_text: str = Field(..., min_length=3, max_length=1000000)
     num_epitopes: Optional[int] = Field(None, ge=1, le=32)
     decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
 
@@ -216,7 +216,7 @@ class BulkPreviewResponse(BaseModel):
 
 
 class BulkRunRequest(BaseModel):
-    csv_text: str = Field(..., min_length=3, max_length=200000)
+    csv_text: str = Field(..., min_length=3, max_length=1000000)
     num_epitopes: Optional[int] = Field(None, ge=1, le=32)
     decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
     launch_pymol: bool = True
