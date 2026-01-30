@@ -17,6 +17,7 @@ import yaml
 
 AA_LIST = list("ACDEFGHIKLMNPQRSTVWY")
 AA_SET = set(AA_LIST)
+AA_INDEX = {aa: idx for idx, aa in enumerate(AA_LIST)}
 AA_GROUPS = {
     "Hydrophobic": set("AVILMFWY"),
     "Polar": set("STNQC"),
@@ -300,6 +301,312 @@ def _collect_chain_lengths(data: dict) -> list[int]:
         if isinstance(seq, str) and seq:
             lengths.append(len(seq))
     return lengths
+
+
+def _collect_chain_sequences(data: dict, pdb_id: str) -> list[dict]:
+    seq_block = data.get("sequences") or {}
+    seq_map = seq_block.get("pdb") or {}
+    if not isinstance(seq_map, dict) or not seq_map:
+        return []
+    target_chains = data.get("target_chains") or data.get("chains") or list(seq_map.keys())
+    rows: list[dict] = []
+    for chain_id in target_chains or []:
+        seq = seq_map.get(chain_id)
+        if not isinstance(seq, str) or not seq:
+            continue
+        clean = "".join([aa for aa in seq.upper() if aa in AA_SET])
+        if len(clean) < 2:
+            continue
+        rows.append(
+            {
+                "pdb_id": pdb_id,
+                "chain_id": str(chain_id).strip(),
+                "sequence": clean,
+                "length": len(clean),
+            }
+        )
+    return rows
+
+
+def _dipeptide_vector(seq: str) -> Optional[list[float]]:
+    if not seq or len(seq) < 2:
+        return None
+    counts = [0] * (len(AA_LIST) * len(AA_LIST))
+    total = 0
+    for left, right in zip(seq[:-1], seq[1:]):
+        if left not in AA_SET or right not in AA_SET:
+            continue
+        left_idx = AA_INDEX[left]
+        right_idx = AA_INDEX[right]
+        counts[left_idx * len(AA_LIST) + right_idx] += 1
+        total += 1
+    if total == 0:
+        return None
+    return [count / total for count in counts]
+
+
+def _plot_chain_sequence_embedding(
+    chain_rows: list[dict],
+    *,
+    plots: list[PlotResult],
+    out_dir: Path,
+    timestamp: str,
+    plt,
+) -> None:
+    if not chain_rows:
+        return
+    try:
+        import numpy as np
+    except Exception:
+        return
+
+    vectors: list[list[float]] = []
+    categories: list[str] = []
+    labels: list[str] = []
+    for row in chain_rows:
+        vec = _dipeptide_vector(row.get("sequence") or "")
+        if vec is None:
+            continue
+        vectors.append(vec)
+        categories.append(row.get("category") or "Uncategorized")
+        labels.append(f"{row.get('pdb_id', '')}:{row.get('chain_id', '')}")
+
+    if len(vectors) < 3:
+        return
+
+    data = np.array(vectors, dtype=float)
+    method = "PCA"
+    coords = None
+    explained = None
+    try:
+        import umap  # type: ignore
+
+        reducer = umap.UMAP(n_neighbors=20, min_dist=0.1, random_state=42)
+        coords = reducer.fit_transform(data)
+        method = "UMAP"
+    except Exception:
+        centered = data - np.mean(data, axis=0, keepdims=True)
+        u, s, _ = np.linalg.svd(centered, full_matrices=False)
+        coords = u[:, :2] * s[:2]
+        var = (s ** 2)
+        explained = var[:2] / var.sum() if var.sum() else None
+
+    if coords is None:
+        return
+
+    max_points = 4000
+    if coords.shape[0] > max_points:
+        step = max(1, coords.shape[0] // max_points)
+        coords = coords[::step]
+        categories = categories[::step]
+        labels = labels[::step]
+
+    unique_categories = sorted({c for c in categories})
+    palette = [
+        "#2563eb",
+        "#10b981",
+        "#f59e0b",
+        "#6366f1",
+        "#ef4444",
+        "#14b8a6",
+        "#e11d48",
+        "#84cc16",
+        "#f97316",
+        "#0ea5e9",
+        "#7c3aed",
+        "#a855f7",
+    ]
+    color_map = {cat: palette[idx % len(palette)] for idx, cat in enumerate(unique_categories)}
+    x_label = f"{method} 1"
+    y_label = f"{method} 2"
+    if explained is not None and len(explained) >= 2:
+        x_label = f"{x_label} ({explained[0] * 100:.1f}%)"
+        y_label = f"{y_label} ({explained[1] * 100:.1f}%)"
+
+    def _save_svg(fig, stem: str) -> Path:
+        path = out_dir / f"{stem}_{timestamp}.svg"
+        fig.savefig(path)
+        plt.close(fig)
+        return path
+
+    fig_scatter, ax_scatter = plt.subplots(figsize=(7, 6))
+    for cat in unique_categories:
+        idxs = [i for i, c in enumerate(categories) if c == cat]
+        if not idxs:
+            continue
+        pts = coords[idxs]
+        ax_scatter.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            s=14,
+            alpha=0.55,
+            color=color_map[cat],
+            label=cat,
+            edgecolors="none",
+        )
+    ax_scatter.set_xlabel(x_label)
+    ax_scatter.set_ylabel(y_label)
+    ax_scatter.set_title(f"Chain sequence embedding by category ({method})", fontsize=12, fontweight="semibold")
+    ax_scatter.grid(True, alpha=0.25, linewidth=0.6)
+    if len(unique_categories) <= 12:
+        ax_scatter.legend(loc="best", fontsize=8)
+    fig_scatter.text(
+        0.02,
+        0.02,
+        f"{method} input: normalized dipeptide frequencies (400D) per chain.",
+        fontsize=7,
+        color="#334155",
+        ha="left",
+        va="bottom",
+    )
+    fig_scatter.tight_layout(rect=(0, 0.06, 1, 1))
+    plots.append(PlotResult(name="chain_sequence_umap", svg_path=_save_svg(fig_scatter, "chain_sequence_umap")))
+
+
+def _pairwise_identity(seq_a: str, seq_b: str, alignment) -> float:
+    if not seq_a or not seq_b:
+        return 0.0
+    if alignment is not None:
+        match_count = getattr(alignment, "score", None)
+        aln_len = len(alignment.seqA) if getattr(alignment, "seqA", None) else None
+        if match_count is None:
+            try:
+                match_count = sum(1 for a, b in zip(alignment.seqA, alignment.seqB) if a == b)
+            except Exception:
+                match_count = None
+        if aln_len:
+            return float(match_count) / float(aln_len) if match_count is not None else 0.0
+    try:
+        from difflib import SequenceMatcher
+        return SequenceMatcher(None, seq_a, seq_b).ratio()
+    except Exception:
+        return 0.0
+
+
+def _plot_chain_identity_heatmap(
+    chain_rows: list[dict],
+    *,
+    plots: list[PlotResult],
+    out_dir: Path,
+    timestamp: str,
+    plt,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    if not chain_rows:
+        return
+    try:
+        import numpy as np
+    except Exception:
+        return
+
+    rows = chain_rows
+    if len(rows) < 3:
+        return
+
+    try:
+        from Bio import pairwise2
+
+        aligner = pairwise2.align.globalxx
+
+        def _align(a: str, b: str):
+            return aligner(a, b, one_alignment_only=True)[0] if a and b else None
+    except Exception:
+        _align = None
+
+    sequences = [row["sequence"] for row in rows]
+    labels = [f"{row.get('pdb_id', '')}:{row.get('chain_id', '')}" for row in rows]
+    categories = [row.get("category") or "Uncategorized" for row in rows]
+
+    n = len(sequences)
+    identity = np.zeros((n, n), dtype=float)
+    identity_pairs: list[tuple[int, int, float]] = []
+    for i in range(n):
+        identity[i, i] = 1.0
+        for j in range(i + 1, n):
+            seq_a = sequences[i]
+            seq_b = sequences[j]
+            aln = _align(seq_a, seq_b) if _align else None
+            ident = _pairwise_identity(seq_a, seq_b, aln)
+            identity[i, j] = ident
+            identity[j, i] = ident
+            if ident >= 0.70:
+                identity_pairs.append((i, j, ident))
+
+    order = list(range(n))
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import squareform
+
+        dist = 1.0 - identity
+        condensed = squareform(dist, checks=False)
+        linkage_mat = linkage(condensed, method="average")
+        order = list(leaves_list(linkage_mat))
+    except Exception:
+        mean_id = identity.mean(axis=1)
+        order = sorted(range(n), key=lambda idx: mean_id[idx], reverse=True)
+
+    identity = identity[np.ix_(order, order)]
+    labels = [labels[idx] for idx in order]
+    categories = [categories[idx] for idx in order]
+
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    im = ax.imshow(identity, vmin=0.0, vmax=1.0, cmap="viridis")
+    ax.set_title("Pairwise sequence identity (clustered chains)", fontsize=12, fontweight="semibold")
+    ax.set_xlabel("Chains")
+    ax.set_ylabel("Chains")
+    if len(labels) <= 40:
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=90, fontsize=6)
+        ax.set_yticklabels(labels, fontsize=6)
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Identity")
+    fig.text(0.02, 0.01, f"{len(labels)} chains plotted", fontsize=7, color="#334155")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+
+    def _save_svg(fig, stem: str) -> Path:
+        path = out_dir / f"{stem}_{timestamp}.svg"
+        fig.savefig(path)
+        plt.close(fig)
+        return path
+
+    plots.append(PlotResult(name="chain_identity_heatmap", svg_path=_save_svg(fig, "chain_identity_heatmap")))
+    if identity_pairs:
+        csv_path = out_dir / f"chain_identity_pairs_{timestamp}.csv"
+        try:
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([
+                    "pdb_id_a",
+                    "chain_id_a",
+                    "category_a",
+                    "pdb_id_b",
+                    "chain_id_b",
+                    "category_b",
+                    "identity",
+                ])
+                for i, j, ident in identity_pairs:
+                    row_a = rows[i]
+                    row_b = rows[j]
+                    writer.writerow([
+                        row_a.get("pdb_id"),
+                        row_a.get("chain_id"),
+                        row_a.get("category"),
+                        row_b.get("pdb_id"),
+                        row_b.get("chain_id"),
+                        row_b.get("category"),
+                        f"{ident:.4f}",
+                    ])
+        except Exception as exc:
+            if log:
+                log(f"[antigen-diversity] failed to write identity pairs CSV: {exc}")
+        else:
+            if log:
+                log(f"[antigen-diversity] wrote identity pairs CSV: {csv_path.name} ({len(identity_pairs)} pairs)")
+    if log:
+        log(f"[antigen-diversity] chain identity heatmap: {len(labels)} chains")
 
 
 def _collect_epitope_compositions(data: dict, pdb_id: str) -> list[dict]:
@@ -715,6 +1022,7 @@ def plot_antigen_diversity(
     category_labels: list[str] = []
     pdb_categories: dict[str, str] = {}
     chain_lengths: list[int] = []
+    chain_rows: list[dict] = []
     epitope_rows: list[dict] = []
     hotspot_rows: list[dict] = []
     epitope_lengths: list[int] = []
@@ -743,6 +1051,7 @@ def plot_antigen_diversity(
         category_labels.append(category)
         pdb_categories[pdb_id] = category
         chain_lengths.extend(_collect_chain_lengths(data))
+        chain_rows.extend(_collect_chain_sequences(data, pdb_id))
         epitope_rows.extend(_collect_epitope_compositions(data, pdb_id))
         hotspot_rows.extend(_collect_hotspot_compositions(data, pdb_id))
         epitope_lengths.extend(_collect_epitope_lengths(data))
@@ -788,6 +1097,25 @@ def plot_antigen_diversity(
         ax.grid(True, alpha=0.25, linewidth=0.6)
         fig.tight_layout()
         plots.append(PlotResult(name="chain_length_distribution", svg_path=_save_svg(fig, "chain_length_distribution")))
+
+    if chain_rows:
+        for row in chain_rows:
+            row["category"] = pdb_categories.get(row["pdb_id"], "Uncategorized")
+        _plot_chain_sequence_embedding(
+            chain_rows,
+            plots=plots,
+            out_dir=out_dir,
+            timestamp=timestamp,
+            plt=plt,
+        )
+        _plot_chain_identity_heatmap(
+            chain_rows,
+            plots=plots,
+            out_dir=out_dir,
+            timestamp=timestamp,
+            plt=plt,
+            log=log,
+        )
 
     if epitope_rows:
         for row in epitope_rows:
