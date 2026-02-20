@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import yaml  # type: ignore
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -619,6 +620,7 @@ def submit_pipeline_refresh(request: PipelineRefreshRequest, *, job_store: JobSt
                 force=bool(request.force),
                 num_epitopes=request.expected_epitopes,
                 decide_scope_attempts=request.decide_scope_attempts,
+                decide_scope_prompt=request.decide_scope_prompt,
                 target_accession=target_accession,
                 target_vendor_range=target_vendor_range,
                 design_count=request.design_count,

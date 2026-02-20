@@ -142,6 +142,7 @@ const el = {
   boltzRerunRangeExpected: document.querySelector('#boltz-rerun-range-expected'),
   boltzRerunRangeAttempts: document.querySelector('#boltz-rerun-range-attempts'),
   boltzRerunRangeForce: document.querySelector('#boltz-rerun-range-force'),
+  boltzRerunRangePrompt: document.querySelector('#boltz-rerun-range-prompt'),
   boltzRerunRangeConfirm: document.querySelector('#boltz-rerun-range-confirm'),
   boltzRerunRangeCancel: document.querySelector('#boltz-rerun-range-cancel'),
   boltzRerunRangeClose: document.querySelector('#boltz-rerun-range-close'),
@@ -203,6 +204,7 @@ const el = {
   pipelineRerunExpected: document.querySelector('#pipeline-rerun-expected'),
   pipelineRerunAttempts: document.querySelector('#pipeline-rerun-attempts'),
   pipelineRerunForce: document.querySelector('#pipeline-rerun-force'),
+  pipelineRerunPrompt: document.querySelector('#pipeline-rerun-prompt'),
   pipelineRerunConfirm: document.querySelector('#pipeline-rerun-confirm'),
   pipelineRerunCancel: document.querySelector('#pipeline-rerun-cancel'),
   pipelineRerunClose: document.querySelector('#pipeline-rerun-close'),
@@ -1757,10 +1759,11 @@ function openPipelineRerunModal(pdbId, antigenUrl = null) {
   } else {
     delete el.pipelineRerunModal.dataset.antigenUrl;
   }
-  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Select epitopes · ${pdbId}`;
+  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Select epitopes (LLM) · ${pdbId}`;
   if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
+  if (el.pipelineRerunPrompt) el.pipelineRerunPrompt.value = '';
   toggleModal(el.pipelineRerunModal, true);
 }
 
@@ -1775,11 +1778,12 @@ function openPipelineRerunModalBulk(targets = []) {
   el.pipelineRerunModal.dataset.pdbId = '';
   el.pipelineRerunModal.dataset.antigenUrl = '';
   if (el.pipelineRerunTitle) {
-    el.pipelineRerunTitle.textContent = `Select epitopes · ${ids.length} targets`;
+    el.pipelineRerunTitle.textContent = `Select epitopes (LLM) · ${ids.length} targets`;
   }
   if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
+  if (el.pipelineRerunPrompt) el.pipelineRerunPrompt.value = '';
   toggleModal(el.pipelineRerunModal, true);
 }
 
@@ -1839,8 +1843,10 @@ async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}
     const expectedRaw = overrides.expected ?? el.pipelineRerunExpected?.value;
     const attemptsRaw = overrides.attempts ?? el.pipelineRerunAttempts?.value;
     const force = typeof overrides.force === 'boolean' ? overrides.force : Boolean(el.pipelineRerunForce?.checked);
+    const promptRaw = overrides.prompt ?? el.pipelineRerunPrompt?.value ?? '';
     const expected = expectedRaw ? Number(expectedRaw) || null : null;
     const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+    const decideScopePrompt = String(promptRaw || '').trim() || null;
     const designCountRaw = overrides.designCount ?? getBoltzDesignCount();
     const designCount = designCountRaw ? Number(designCountRaw) || null : null;
     for (let i = 0; i < list.length; i += 1) {
@@ -1855,6 +1861,7 @@ async function queuePipelineRerunTargets(list, triggerBtn = null, overrides = {}
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
+        decide_scope_prompt: decideScopePrompt,
         design_count: designCount,
         antigen_url: antigenUrl,
         target_accession: row?.accession || fallback?.accession || null,
@@ -1891,6 +1898,7 @@ function openPipelineRerunRangeModal() {
   if (el.boltzRerunRangeExpected) el.boltzRerunRangeExpected.value = '10';
   if (el.boltzRerunRangeAttempts) el.boltzRerunRangeAttempts.value = '3';
   if (el.boltzRerunRangeForce) el.boltzRerunRangeForce.checked = true;
+  if (el.boltzRerunRangePrompt) el.boltzRerunRangePrompt.value = '';
   toggleModal(el.boltzRerunRangeModal, true);
 }
 
@@ -2041,10 +2049,12 @@ async function submitPipelineRerunRangeModal(triggerBtn = null) {
   const expectedOverride = el.boltzRerunRangeExpected?.value || null;
   const attemptsOverride = el.boltzRerunRangeAttempts?.value || null;
   const forceOverride = Boolean(el.boltzRerunRangeForce?.checked);
+  const promptOverride = String(el.boltzRerunRangePrompt?.value || '').trim() || null;
   await queuePipelineRerunTargets(slice, triggerBtn, {
     expected: expectedOverride,
     attempts: attemptsOverride,
     force: forceOverride,
+    prompt: promptOverride,
   });
   toggleModal(el.boltzRerunRangeModal, false);
 }
@@ -2143,13 +2153,14 @@ async function submitPipelineRerun(triggerBtn = null) {
   const attemptsRaw = el.pipelineRerunAttempts?.value;
   const expected = expectedRaw ? Number(expectedRaw) || null : null;
   const attempts = attemptsRaw ? Number(attemptsRaw) || 3 : 3;
+  const decideScopePrompt = String(el.pipelineRerunPrompt?.value || '').trim() || null;
   const designCount = getBoltzDesignCount();
   const force = Boolean(el.pipelineRerunForce?.checked);
   if (triggerBtn) triggerBtn.disabled = true;
   try {
     if (bulkIds) {
       const list = bulkIds.split(',').map((id) => id.trim()).filter(Boolean);
-      await queuePipelineRerunTargets(list);
+      await queuePipelineRerunTargets(list, null, { prompt: decideScopePrompt });
     } else if (pdbId) {
       const row = findBulkRowForPdb(pdbId);
       const fallback = row ? null : findAccessionsFromInput(pdbId);
@@ -2159,6 +2170,7 @@ async function submitPipelineRerun(triggerBtn = null) {
         force,
         expected_epitopes: expected,
         decide_scope_attempts: attempts,
+        decide_scope_prompt: decideScopePrompt,
         design_count: designCount,
         antigen_url: antigenUrl,
         target_accession: row?.accession || fallback?.accession || null,
@@ -2302,7 +2314,7 @@ function renderBoltzConfigs() {
 
     const rerunBtn = document.createElement('button');
     rerunBtn.type = 'button';
-    rerunBtn.textContent = 'Select epitopes';
+    rerunBtn.textContent = 'Select epitopes (LLM)';
     rerunBtn.className = 'ghost';
     rerunBtn.dataset.action = 'rerun-pipeline';
     rerunBtn.dataset.pdbId = target.pdb_id || '';

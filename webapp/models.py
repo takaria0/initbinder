@@ -364,6 +364,7 @@ class PipelineRefreshRequest(BaseModel):
     force: bool = True
     expected_epitopes: Optional[int] = 3
     decide_scope_attempts: int = Field(3, ge=1, le=5)
+    decide_scope_prompt: Optional[str] = Field(None, max_length=2000)
     antigen_url: Optional[str] = None
     target_accession: Optional[str] = Field(None, max_length=40)
     target_vendor_range: Optional[str] = Field(None, max_length=64)
