@@ -1757,7 +1757,7 @@ function openPipelineRerunModal(pdbId, antigenUrl = null) {
   } else {
     delete el.pipelineRerunModal.dataset.antigenUrl;
   }
-  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Re-run pipeline · ${pdbId}`;
+  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Select epitopes · ${pdbId}`;
   if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
@@ -1775,7 +1775,7 @@ function openPipelineRerunModalBulk(targets = []) {
   el.pipelineRerunModal.dataset.pdbId = '';
   el.pipelineRerunModal.dataset.antigenUrl = '';
   if (el.pipelineRerunTitle) {
-    el.pipelineRerunTitle.textContent = `Re-run pipeline · ${ids.length} targets`;
+    el.pipelineRerunTitle.textContent = `Select epitopes · ${ids.length} targets`;
   }
   if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
@@ -2220,7 +2220,7 @@ function renderBoltzConfigs() {
     const emptyCell = document.createElement('td');
     emptyCell.colSpan = 8;
     emptyCell.className = 'empty-note';
-    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV and click Preview CSV or Reload configs to load.';
+    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV/TSV above to auto-detect targets.';
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
     if (el.boltzSummary) el.boltzSummary.hidden = true;
@@ -2302,7 +2302,7 @@ function renderBoltzConfigs() {
 
     const rerunBtn = document.createElement('button');
     rerunBtn.type = 'button';
-    rerunBtn.textContent = 'Re-run pipeline';
+    rerunBtn.textContent = 'Select epitopes';
     rerunBtn.className = 'ghost';
     rerunBtn.dataset.action = 'rerun-pipeline';
     rerunBtn.dataset.pdbId = target.pdb_id || '';
@@ -4237,6 +4237,9 @@ function init() {
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
   if (el.bulkCsvInput) el.bulkCsvInput.addEventListener('input', scheduleBulkPreview);
+  if ((el.bulkCsvInput?.value || '').trim()) {
+    previewBulkCsv({ silent: true });
+  }
   if (el.bulkVisualizeEpitopes) el.bulkVisualizeEpitopes.addEventListener('click', handleVisualizeEpitopes);
   if (el.bulkRunBtn) el.bulkRunBtn.addEventListener('click', () => startBulkRun());
   if (el.snapshotDownloadPdf) el.snapshotDownloadPdf.addEventListener('click', downloadSnapshotPdf);

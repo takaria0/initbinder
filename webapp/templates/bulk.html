@@ -39,11 +39,6 @@
           <div>
             <h1>InitBinder</h1>
             <p>Run init/decide/prep, PyMOL exports, insights CSV, and design config exports across many targets.</p>
-            <nav class="page-nav">
-              <a href="/">Back to dashboard</a>
-              <a href="/target-generation">Target generation</a>
-              <a href="/antigen-dms">Antigen DMS</a>
-            </nav>
           </div>
           <div class="flex-row" style="gap: 8px; align-items: center;">
             <button type="button" id="bulk-algorithm-btn" class="ghost">Algorithm</button>
@@ -54,8 +49,8 @@
         <div class="bulk-layout">
           <div class="bulk-main">
             <section>
-              <h2>Epitope selection</h2>
-              <p class="help-text" style="margin-top: 0;">Paste TSV/CSV from target_generation (columns such as rank/selection/uniprot/gene/chosen_pdb/antigen_url) or your own CSV with Preset name, Antigen URL, and optional PDB ID.</p>
+              <h2>Input CSV / TSV</h2>
+              <p class="help-text" style="margin-top: 0;">Paste TSV/CSV from target_generation (columns such as rank/selection/uniprot/gene/chosen_pdb/antigen_url) or your own CSV with Preset name, Antigen URL, and optional PDB ID. Preview runs automatically as you paste/edit.</p>
               <div class="form-row">
                 <label>CSV / TSV rows
                   <textarea id="bulk-csv-input" rows="6" placeholder="rank	selection	uniprot	gene	...&#10;1	biotin	Q15116	PDCD1	..."></textarea>
@@ -74,9 +69,6 @@
                 <label class="checkbox-inline"><input type="checkbox" id="bulk-export-insights" checked> Export insights + alignment CSV</label>
                 <label class="checkbox-inline"><input type="checkbox" id="bulk-force-init"> Force init/decide/prep</label>
               </div>
-              <div class="flex-row" style="gap: 8px; margin-top: 8px;">
-                <button type="button" id="bulk-preview">Preview CSV</button>
-              </div>
             </section>
 
             <section id="bulk-preview-panel" class="table-scroll" hidden>
@@ -85,7 +77,6 @@
                   <div id="bulk-preview-summary" class="badge"></div>
                   <button type="button" id="bulk-visualize-epitopes" class="visualize-btn">Visualize epitopes</button>
                 </div>
-                <button type="button" id="bulk-preview-refresh" class="ghost">Refresh preview</button>
               </div>
               <h3 style="margin: 0 0 8px;">Detected targets</h3>
               <table id="bulk-preview-table">
@@ -102,14 +93,6 @@
                 </thead>
                 <tbody></tbody>
               </table>
-            </section>
-
-            <section id="snapshot-section" hidden>
-              <div class="table-toolbar" style="justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <h2 style="margin: 0;">Hotspot snapshots</h2>
-                <button type="button" id="snapshot-download-pdf" class="ghost" hidden>Download PDF</button>
-              </div>
-              <div id="snapshot-grid" class="catalog-viewer"></div>
             </section>
 
             <section id="epitope-plot-section" hidden>
@@ -143,9 +126,7 @@
                   </label>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
-                  <button type="button" id="boltz-show-run-all" class="ghost">Show run command (all)</button>
                   <button type="button" id="boltz-config-regenerate" class="ghost">Rebuild configs</button>
-                  <button type="button" id="boltz-config-refresh" class="ghost">Reload configs</button>
                   <button type="button" id="boltz-plot-diversity" class="ghost">Plot diversity</button>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
@@ -156,8 +137,8 @@
                   <button type="button" id="boltz-show-run-selection" class="ghost">Show run command (selection)</button>
                 </div>
                 <div class="flex-row" style="gap: 8px; align-items: center; flex-wrap: wrap;">
-                  <button type="button" id="boltz-show-run-range" class="ghost">Show run command (rows)</button>
-                  <button type="button" id="boltz-rerun-range" class="ghost">Re-run pipeline (rows)</button>
+                  <button type="button" id="boltz-show-run-range" class="ghost">Generate commands</button>
+                  <button type="button" id="boltz-rerun-range" class="ghost">Select epitopes</button>
                 </div>
               </div>
               <p class="help-text" style="margin-top: 0;">Detected <code>boltzgen_config.yaml</code> files under each target. Click a PDB row to reveal epitopes. Use Command for a copy-paste set of cluster steps.</p>
@@ -323,7 +304,7 @@
       <div class="modal-backdrop" data-close="pipeline-rerun"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3 id="pipeline-rerun-title">Re-run pipeline</h3>
+          <h3 id="pipeline-rerun-title">Select epitopes</h3>
           <button type="button" id="pipeline-rerun-close" class="ghost">Close</button>
         </div>
         <div style="padding: 12px 0;">
@@ -348,7 +329,7 @@
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
-          <button type="button" id="pipeline-rerun-confirm">Run pipeline</button>
+          <button type="button" id="pipeline-rerun-confirm">Select epitopes</button>
         </div>
       </div>
     </div>
@@ -357,7 +338,7 @@
       <div class="modal-backdrop" data-close="boltz-rerun-range"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3>Re-run pipeline · rows</h3>
+          <h3>Select epitopes · rows</h3>
           <button type="button" id="boltz-rerun-range-close" class="ghost">Close</button>
         </div>
         <div style="padding: 12px 0;">
@@ -388,7 +369,7 @@
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-rerun-range-cancel" class="ghost">Cancel</button>
-          <button type="button" id="boltz-rerun-range-confirm">Run pipeline</button>
+          <button type="button" id="boltz-rerun-range-confirm">Select epitopes</button>
         </div>
       </div>
     </div>
@@ -397,7 +378,7 @@
       <div class="modal-backdrop" data-close="boltz-run-range"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3>Show run command · rows</h3>
+          <h3>Generate commands · rows</h3>
           <button type="button" id="boltz-run-range-close" class="ghost">Close</button>
         </div>
         <div style="padding: 12px 0;">
@@ -431,7 +412,7 @@
         </div>
         <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
           <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>
-          <button type="button" id="boltz-run-range-confirm">Show commands</button>
+          <button type="button" id="boltz-run-range-confirm">Generate commands</button>
         </div>
       </div>
     </div>
