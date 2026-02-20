@@ -1,3 +1,0 @@
-rank	uniprot	gene	protein_name	subunit_name	organism	chosen_pdb	resolution_A	biotinylated	pdb_vendor_coverage	antigen_catalog	antigen_url
-1	P05113	IL5	Interleukin-5	Interleukin-5	Homo sapiens	3QT2	2.55	True	1.000	15673-H49H-B	https://www.sinobiological.com/recombinant-proteins/human-il-5-15673-h49h-b
-2	P05231	IL6	Interleukin-6	Interleukin-6	Homo sapiens	8QY5	3.10	True	1.000	10395-HNAH-B	https://www.sinobiological.com/recombinant-proteins/human-il-6-10395-hnah-b

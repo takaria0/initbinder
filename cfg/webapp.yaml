@@ -1,28 +1,35 @@
 paths:
   antigen_category_map: targets_catalog/antigen_category_map.tsv
+
 cluster:
+  # Public-safe defaults: offline/mock by default.
+  # Users can override via cfg/webapp.local.yaml or INITBINDER_* env vars.
+  mock: true
+  host: cluster.example.edu
   ssh_config_alias: null
-  remote_root: /pub/inagakit/Projects/initbinder
-  target_root: /pub/inagakit/Projects/initbinder/targets
+  remote_root: null
+  target_root: null
   control_path: null
   control_persist: 600000
-  conda_activate: "conda activate takashi"
+  ensure_master: false
+  conda_activate: null
   rsync_path: rsync
   sbatch_path: sbatch
   squeue_path: squeue
   sacct_path: sacct
   pymol_path: pymol
-  assess_partition: standard          # optional, match your CPU queue
-  assess_account: ccl_lab         # optional
-  assess_time_minutes: 600
-  assess_mem_gb: 4
-  assess_cpus: 1
+  assess_partition: null
+  assess_account: null
+  assess_time_minutes: 240
+  assess_mem_gb: 16
+  assess_cpus: 4
   debug: false
+
   boltzgen:
-    conda_activate: "conda activate bg"
-    partition: gpu
-    account: ccl_lab_gpu
-    gpus: A30:1
+    conda_activate: null
+    partition: null
+    account: null
+    gpus: A100:1
     cpus: 8
     mem_gb: 64
     time_hours: 12
@@ -36,17 +43,18 @@ cluster:
     default_num_designs: 1000
     default_budget: null
     slurm_log_dir: slurm_logs
+
   rfantibody:
-    slurm_partition: gpu
-    slurm_account: ccl_lab_gpu
-    slurm_gpu_type: A30:1
-    rfa_repo_path: /data/homezvol1/inagakit/Library/RFantibody
-    singularity_image: /pub/inagakit/rfa/rfantibody.sif
-    af3_singularity_image: /pub/inagakit/af3/alphafold3_40gb.sif
-    af3_model_params_dir: /pub/inagakit/af3/model_params
-    af3_databases_dir: /pub/inagakit/af3/databases
-    af3_run_script: /data/homezvol1/inagakit/Library/alphafold3/run_alphafold.py
-    framework_pdb: /data/homezvol1/inagakit/Library/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
+    slurm_partition: null
+    slurm_account: null
+    slurm_gpu_type: A100:1
+    rfa_repo_path: null
+    singularity_image: null
+    af3_singularity_image: null
+    af3_model_params_dir: null
+    af3_databases_dir: null
+    af3_run_script: null
+    framework_pdb: null
     designs_per_task: 200
     mpnn_num_seq: 1
     mpnn_temperature: 0.1

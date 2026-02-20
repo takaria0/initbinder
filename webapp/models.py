@@ -381,6 +381,28 @@ class PipelineRefreshResponse(BaseModel):
     message: str
 
 
+class BulkCommandBoltzgenDefaults(BaseModel):
+    partition: Optional[str] = None
+    account: Optional[str] = None
+    gpus: Optional[str] = None
+    cpus: Optional[int] = None
+    mem_gb: Optional[int] = None
+    time_hours: Optional[int] = None
+    cache_dir: Optional[str] = None
+    output_root: Optional[str] = None
+    conda_activate: Optional[str] = None
+    extra_args: List[str] = Field(default_factory=list)
+
+
+class BulkCommandDefaultsResponse(BaseModel):
+    ssh_target: Optional[str] = None
+    remote_root: Optional[str] = None
+    target_root: Optional[str] = None
+    local_root: Optional[str] = None
+    conda_activate: Optional[str] = None
+    boltzgen: BulkCommandBoltzgenDefaults = Field(default_factory=BulkCommandBoltzgenDefaults)
+
+
 class BoltzgenEpitopeConfig(BaseModel):
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None

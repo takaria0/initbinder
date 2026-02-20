@@ -1,2 +1,0 @@
-rank	uniprot	gene	protein_name	organism	chosen_pdb	resolution_A	easiness	impact	macs_ready	tm	signal_peptide	pdb_ids	preferred_vendor	preferred_catalog	preferred_url	preferred_tags	preferred_conjugation
-1	Q9HCE1	MOV10	Helicase MOV-10	Homo sapiens			0.00	0.30	False	False	False						

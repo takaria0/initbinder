@@ -7,7 +7,7 @@ const state = {
   epitopePlots: [],
   diversityPlots: [],
   lastJobStatus: null,
-  clusterStatus: null,
+  commandDefaults: null,
   boltzLocalRuns: {},
   boltzLocalRunsBySpec: {},
   expandedTargets: new Set(),
@@ -2127,9 +2127,7 @@ async function showRunCommandRange() {
     el.boltzRunTitle.textContent = `Manual run · rows ${start}-${end}${countLabel}`;
   }
   toggleModal(el.boltzRunModal, true);
-  if (!state.clusterStatus) {
-    await loadClusterStatus();
-  }
+  await loadCommandDefaults();
   const engine = getRunEngine();
   if (engine === 'rfantibody') {
     const entries = await fetchRfaLauncherEntries(filteredSlice);
@@ -2418,14 +2416,16 @@ function renderBoltzConfigs() {
   el.boltzPanel.hidden = false;
 }
 
-async function loadClusterStatus() {
+async function loadCommandDefaults() {
+  if (state.commandDefaults) return state.commandDefaults;
   try {
-    const res = await fetch('/api/cluster/status');
+    const res = await fetch('/api/bulk/command-defaults');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state.clusterStatus = await res.json();
+    state.commandDefaults = await res.json();
   } catch (err) {
-    state.clusterStatus = null;
+    state.commandDefaults = {};
   }
+  return state.commandDefaults;
 }
 
 async function loadBoltzRunStatuses(pdbIds = []) {
@@ -2894,7 +2894,7 @@ async function showBoltzLog(jobId, title = 'Job log') {
 }
 
 function clusterDefaults() {
-  const info = state.clusterStatus || {};
+  const info = state.commandDefaults || {};
   const boltz = info.boltzgen || {};
   const baseRootRaw = (info.target_root || info.remote_root || '<remote_root>').toString().replace(/\/$/, '');
   const workspaceRoot = baseRootRaw.toLowerCase().endsWith('/targets')
@@ -3408,9 +3408,7 @@ async function showBoltzRunCommand(pdbId, configPath = null, epitopeName = null)
       : `Manual run · ${pdbId}`;
   }
   toggleModal(el.boltzRunModal, true);
-  if (!state.clusterStatus) {
-    await loadClusterStatus();
-  }
+  await loadCommandDefaults();
   const target = (state.boltzConfigs || []).find((t) => (t.pdb_id || '').toUpperCase() === (pdbId || '').toUpperCase());
   let specs = [];
   if (configPath) {
@@ -3441,9 +3439,7 @@ async function showRfaRunCommand(pdbId) {
   if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing RFA pipeline commands...';
   if (el.boltzRunTitle) el.boltzRunTitle.textContent = `RFA pipeline · ${pdbId}`;
   toggleModal(el.boltzRunModal, true);
-  if (!state.clusterStatus) {
-    await loadClusterStatus();
-  }
+  await loadCommandDefaults();
   try {
     const target = await fetchRfaConfigs(pdbId, { force: true });
     const launcherPath = target?.launcher_path || '';
@@ -3520,9 +3516,7 @@ async function showRunCommandAll() {
   if (el.boltzRunBody) el.boltzRunBody.textContent = 'Preparing cluster commands...';
   if (el.boltzRunTitle) el.boltzRunTitle.textContent = 'Manual run · all targets';
   toggleModal(el.boltzRunModal, true);
-  if (!state.clusterStatus) {
-    await loadClusterStatus();
-  }
+  await loadCommandDefaults();
   const engine = getRunEngine();
   if (engine === 'rfantibody') {
     await showRfaRunCommandAll();
@@ -3608,9 +3602,7 @@ async function showRunCommandSelection() {
     el.boltzRunTitle.textContent = `Manual run · selection (${matched.length})`;
   }
   toggleModal(el.boltzRunModal, true);
-  if (!state.clusterStatus) {
-    await loadClusterStatus();
-  }
+  await loadCommandDefaults();
 
   let text = buildSelectedRunCommandsText(matched);
   const notes = [];
@@ -4244,7 +4236,7 @@ function setupExampleTabs() {
 }
 
 function init() {
-  loadClusterStatus();
+  loadCommandDefaults();
   setupExampleTabs();
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));

@@ -7,11 +7,12 @@ import json
 import re
 import base64
 import datetime
+import os
 from pathlib import Path
 import yaml
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,11 +51,13 @@ from .models import (
     BoltzgenConfigRunResponse,
     BoltzGenRunListResponse,
     BoltzGenSyncResponse,
+    BulkCommandDefaultsResponse,
     BulkDesignImportRequest,
     BulkPreviewRequest,
     BulkPreviewResponse,
     BulkRunRequest,
     BulkRunResponse,
+    BulkCommandBoltzgenDefaults,
     BoltzgenDiversityResponse,
     DesignEngineFieldInfo,
     DesignEngineInfo,
@@ -151,6 +154,42 @@ cfg = load_config()
 store = get_job_store(cfg.log_dir)
 
 _CATALOG_SUFFIXES = {".tsv", ".csv"}
+_ALLOW_REMOTE_ENV = "INITBINDER_ALLOW_REMOTE"
+_TRUTHY = {"1", "true", "yes", "y", "on"}
+_LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _remote_access_enabled() -> bool:
+    return os.getenv(_ALLOW_REMOTE_ENV, "false").strip().lower() in _TRUTHY
+
+
+def _is_local_client(host: str | None) -> bool:
+    if not host:
+        return True
+    normalized = host.strip().lower()
+    if normalized in _LOCAL_CLIENTS:
+        return True
+    if normalized.startswith("::ffff:"):
+        normalized = normalized.split("::ffff:", 1)[1]
+    return normalized.startswith("127.")
+
+
+@app.middleware("http")
+async def _local_only_guard(request: Request, call_next):
+    if _remote_access_enabled():
+        return await call_next(request)
+    client_host = request.client.host if request.client else None
+    if _is_local_client(client_host):
+        return await call_next(request)
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": (
+                "Remote access is disabled by default for local mode. "
+                f"Set {_ALLOW_REMOTE_ENV}=true to allow non-local clients."
+            )
+        },
+    )
 
 
 def _catalog_dir() -> Path:
@@ -1004,6 +1043,33 @@ async def api_boltzgen_binders_export(
     payload: BoltzgenBinderExportRequest,
 ) -> BoltzgenBinderExportResponse:
     return export_selected_binders(payload)
+
+
+@app.get("/api/bulk/command-defaults", response_model=BulkCommandDefaultsResponse)
+async def api_bulk_command_defaults() -> BulkCommandDefaultsResponse:
+    cfg_obj = load_config()
+    cluster_cfg = cfg_obj.cluster
+    boltz_cfg = cluster_cfg.boltzgen
+    extra_args = [str(arg) for arg in (boltz_cfg.extra_run_args or []) if str(arg).strip()]
+    return BulkCommandDefaultsResponse(
+        ssh_target=cluster_cfg.as_ssh_target(),
+        remote_root=str(cluster_cfg.remote_root) if cluster_cfg.remote_root else None,
+        target_root=str(cluster_cfg.target_root) if cluster_cfg.target_root else None,
+        local_root=str(cfg_obj.paths.workspace_root or cfg_obj.paths.project_root),
+        conda_activate=cluster_cfg.conda_activate,
+        boltzgen=BulkCommandBoltzgenDefaults(
+            partition=boltz_cfg.partition,
+            account=boltz_cfg.account,
+            gpus=boltz_cfg.gpus,
+            cpus=boltz_cfg.cpus,
+            mem_gb=boltz_cfg.mem_gb,
+            time_hours=boltz_cfg.time_hours,
+            cache_dir=str(boltz_cfg.cache_dir) if boltz_cfg.cache_dir else None,
+            output_root=str(boltz_cfg.output_root) if boltz_cfg.output_root else None,
+            conda_activate=boltz_cfg.conda_activate,
+            extra_args=extra_args,
+        ),
+    )
 
 
 @app.get("/api/bulk/boltzgen/configs", response_model=BoltzgenConfigListResponse)
