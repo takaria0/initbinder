@@ -921,6 +921,7 @@ async def api_boltzgen_diversity(
     filter_epitope: Optional[str] = Query(None),
     filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
+    epitope_min_designs: int = Query(100, ge=1),
 ) -> BoltzgenDiversityResponse:
     return build_boltzgen_diversity_report(
         include_binders=True,
@@ -930,6 +931,7 @@ async def api_boltzgen_diversity(
         binder_filter_epitope=filter_epitope,
         binder_filter_engine=filter_engine,
         binder_order_by=order_by,
+        epitope_min_designs=epitope_min_designs,
     )
 
 
@@ -941,6 +943,7 @@ async def api_boltzgen_diversity_refresh(
     filter_epitope: Optional[str] = Query(None),
     filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
+    epitope_min_designs: int = Query(100, ge=1),
 ) -> BoltzgenDiversityResponse:
     return build_boltzgen_diversity_report(
         include_binders=True,
@@ -951,6 +954,7 @@ async def api_boltzgen_diversity_refresh(
         binder_filter_engine=filter_engine,
         binder_order_by=order_by,
         force_refresh=True,
+        epitope_min_designs=epitope_min_designs,
     )
 
 

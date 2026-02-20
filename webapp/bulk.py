@@ -2839,7 +2839,7 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
-_DIVERSITY_CACHE_VERSION = 4
+_DIVERSITY_CACHE_VERSION = 5
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
 _BINDER_CACHE_VERSION = 5
 _DIVERSITY_SOURCE_FILES = (
@@ -3407,13 +3407,21 @@ def _collect_rfa_scatter_metrics(
     return metrics, run_labels
 
 
-def _diversity_cache_is_fresh(cache: dict, latest_mtime: float, source_count: int) -> bool:
+def _diversity_cache_is_fresh(
+    cache: dict,
+    latest_mtime: float,
+    source_count: int,
+    epitope_min_designs: int,
+) -> bool:
     if int(cache.get("cache_version") or 0) != _DIVERSITY_CACHE_VERSION:
         return False
     try:
         cached_mtime = float(cache.get("source_mtime") or 0)
         cached_count = int(cache.get("source_count") or 0)
+        cached_epitope_min_designs = int(cache.get("epitope_min_designs") or 100)
     except (TypeError, ValueError):
+        return False
+    if cached_epitope_min_designs != max(1, int(epitope_min_designs or 100)):
         return False
     if source_count != cached_count:
         return False
@@ -4064,11 +4072,13 @@ def build_boltzgen_diversity_report(
     binder_filter_engine: Optional[str] = None,
     binder_order_by: Optional[str] = None,
     force_refresh: bool = False,
+    epitope_min_designs: int = 100,
 ) -> BoltzgenDiversityResponse:
     """Aggregate BoltzGen metrics and render diversity plots."""
 
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    epitope_min_designs = max(1, int(epitope_min_designs or 100))
     print(f"[bulk-diversity] starting report; targets_dir={targets_dir}")
     if not targets_dir.exists():
         return BoltzgenDiversityResponse(
@@ -4087,7 +4097,12 @@ def build_boltzgen_diversity_report(
         cache = _load_diversity_cache(out_dir)
         if cache:
             scan_result = _scan_boltzgen_sources(targets_dir)
-            if _diversity_cache_is_fresh(cache, scan_result[0], scan_result[1]):
+            if _diversity_cache_is_fresh(
+                cache,
+                scan_result[0],
+                scan_result[1],
+                epitope_min_designs=epitope_min_designs,
+            ):
                 cached = _response_from_diversity_cache(
                     cache,
                     out_dir,
@@ -4372,6 +4387,7 @@ def build_boltzgen_diversity_report(
             "metrics_files": metrics_files,
             "message": message,
             "binder_counts": binder_counts,
+            "epitope_min_designs": epitope_min_designs,
             "source_mtime": source_mtime,
             "source_count": source_count,
             "generated_at": timestamp,
@@ -4504,6 +4520,7 @@ def build_boltzgen_diversity_report(
             "metrics_files": metrics_files,
             "message": message,
             "binder_counts": binder_counts,
+            "epitope_min_designs": epitope_min_designs,
             "source_mtime": source_mtime,
             "source_count": source_count,
             "generated_at": timestamp,
@@ -4759,7 +4776,7 @@ def build_boltzgen_diversity_report(
 
     top_inserted = 0
     # Scatter across all targets: per-epitope 1st percentile RMSD vs 99th percentile ipTM.
-    epitope_points: List[tuple[str, str, float, float, str]] = []
+    epitope_points: List[tuple[str, str, float, float, str, int]] = []
     target_rows = {pdb_id: idx + 1 for idx, pdb_id in enumerate(sorted(metrics.keys()))}
     for pdb_id, ep_data in metrics.items():
         row_idx = target_rows.get(pdb_id, 0)
@@ -4767,6 +4784,9 @@ def build_boltzgen_diversity_report(
         for ep_name, ep_vals in ep_data.items():
             rmsd_vals = [float(v) for v in (ep_vals.get("rmsd") or []) if v is not None]
             iptm_vals = [float(v) for v in (ep_vals.get("iptm") or []) if v is not None]
+            paired_count = len(
+                [(x, y) for x, y in (ep_vals.get("pairs") or []) if x is not None and y is not None]
+            )
             if not rmsd_vals or not iptm_vals:
                 continue
             ep_index = idx_map.get(ep_name)
@@ -4785,6 +4805,7 @@ def build_boltzgen_diversity_report(
                     _percentile(rmsd_vals, 1.0),
                     _percentile(iptm_vals, 99.0),
                     label,
+                    paired_count,
                 )
             )
 
@@ -4797,7 +4818,7 @@ def build_boltzgen_diversity_report(
         xs = [pt[2] for pt in epitope_points]
         ys = [pt[3] for pt in epitope_points]
         ax.scatter(xs, ys, s=60, alpha=0.55, color="#2563eb", edgecolors="none")
-        for _, _, x, y, label in epitope_points:
+        for _, _, x, y, label, _ in epitope_points:
             ax.text(x, y, label, fontsize=font_size, ha="center", va="center", color="#0f172a")
         ax.set_title(
             "1st percentile RMSD vs 99th percentile ipTM (one point per epitope, all targets)",
@@ -4846,6 +4867,74 @@ def build_boltzgen_diversity_report(
             )
         except Exception as exc:
             print(f"[boltzgen-diversity] failed to embed epitope percentile scatter into HTML: {epi_png}")
+            print(exc)
+            traceback.print_exc()
+
+    filtered_epitope_points = [pt for pt in epitope_points if pt[5] >= epitope_min_designs]
+    if filtered_epitope_points:
+        point_count = len(filtered_epitope_points)
+        fig_w = max(14, min(36, 10 + point_count * 0.01))
+        fig_h = max(12, min(30, 8 + point_count * 0.008))
+        font_size = 6 if point_count > 300 else 7
+        fig_epi_filtered, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+        xs = [pt[2] for pt in filtered_epitope_points]
+        ys = [pt[3] for pt in filtered_epitope_points]
+        ax.scatter(xs, ys, s=60, alpha=0.55, color="#1d4ed8", edgecolors="none")
+        for _, _, x, y, label, _ in filtered_epitope_points:
+            ax.text(x, y, label, fontsize=font_size, ha="center", va="center", color="#0f172a")
+        filtered_title = (
+            "1st percentile RMSD vs 99th percentile ipTM "
+            f"(one point per epitope, all targets; n>={epitope_min_designs})"
+        )
+        ax.set_title(filtered_title, fontsize=12, fontweight="semibold")
+        ax.set_xlabel("1st percentile RMSD (Å)")
+        ax.set_ylabel("99th percentile ipTM")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(left=0.0)
+        _style_scatter(ax)
+        plt.tight_layout()
+
+        epi_filtered_png = out_dir / f"boltzgen_global_epitope_p01_p99_n{epitope_min_designs}_{timestamp}.png"
+        epi_filtered_svg = out_dir / f"boltzgen_global_epitope_p01_p99_n{epitope_min_designs}_{timestamp}.svg"
+        saved_ok = True
+        try:
+            fig_epi_filtered.savefig(epi_filtered_png, dpi=220)
+            fig_epi_filtered.savefig(epi_filtered_svg)
+        except Exception as exc:
+            saved_ok = False
+            print(
+                "[boltzgen-diversity] failed to save filtered epitope percentile scatter plot: "
+                f"{epi_filtered_png} / {epi_filtered_svg}"
+            )
+            print(exc)
+            traceback.print_exc()
+        finally:
+            plt.close(fig_epi_filtered)
+
+        if saved_ok:
+            epi_filtered_plot = BoltzgenDiversityPlot(
+                pdb_id=f"Per-epitope p01/p99 scatter (all targets; n>={epitope_min_designs})",
+                png_name=epi_filtered_png.name,
+                png_path=str(epi_filtered_png),
+                svg_name=epi_filtered_svg.name,
+                svg_path=str(epi_filtered_svg),
+                epitope_colors={},
+            )
+            plot_entries.insert(top_inserted, epi_filtered_plot)
+            top_inserted += 1
+        try:
+            encoded = base64.b64encode(epi_filtered_png.read_bytes()).decode("ascii")
+            html_sections.insert(
+                top_inserted - 1,
+                f"<section><h2>{filtered_title}</h2>"
+                f"<p>Dots labeled as #PDB_id.epitope_index; included only when paired designs n&gt;={epitope_min_designs}.</p>"
+                f"<img alt='All targets epitope scatter n>={epitope_min_designs}' src='data:image/png;base64,{encoded}' style='max-width:100%; height:auto;'></section>"
+            )
+        except Exception as exc:
+            print(
+                "[boltzgen-diversity] failed to embed filtered epitope percentile scatter into HTML: "
+                f"{epi_filtered_png}"
+            )
             print(exc)
             traceback.print_exc()
 
@@ -5111,6 +5200,7 @@ def build_boltzgen_diversity_report(
         "metrics_files": metrics_files,
         "message": message,
         "binder_counts": binder_counts,
+        "epitope_min_designs": epitope_min_designs,
         "source_mtime": source_mtime,
         "source_count": source_count,
         "generated_at": timestamp,

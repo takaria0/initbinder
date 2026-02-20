@@ -523,6 +523,12 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
               <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
             <ol style="margin: 0 0 12px 18px; padding: 0;">
               <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters.</li>
+              <li><strong>target_generation.py (catalog PDB selection).</strong> For each antigen option with an accession and expressed range,
+                align the vendor sequence <code>S</code> (or expressed slice <code>S[a:b]</code>) to every PDB chain sequence <code>C_j</code>
+                (RCSB polymer entities). Keep matches with <code>identity &gt;= 0.95</code> and aligned length &gt;= 10. Each candidate match
+                receives a score:
+                <code>score = 100 * coverage + 10 * identity + (4.0 - resolution) / 2 + 1500 * I_biotin</code>.
+                The chosen PDB is the argmax score; two selections are stored: best biotin-only and best-any (no biotin filter).</li>
               <li><strong>init_target.py (target construction).</strong> Download mmCIF and parse the vendor product page (SinoBio) to recover
                 accession and expressed range, or accept an expressed-sequence override. Fetch the full NCBI sequence and slice to the expressed
                 range to obtain <code>S</code>. Extract each PDB chain sequence <code>C_j</code> and perform local alignment (biotite) between <code>S</code>
