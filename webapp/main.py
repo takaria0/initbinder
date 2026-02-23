@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .alignment import AlignmentNotFoundError, compute_alignment
 from .analysis import AnalysisGenerationError, generate_rankings_analysis
-from .config import load_config
+from .config import DEFAULT_LOCAL_CONFIG_PATH, load_config
 from .dms import (
     DMSLibraryGenerationError,
     DMSLibraryOptions,
@@ -59,6 +59,13 @@ from .models import (
     BulkRunResponse,
     BulkCommandBoltzgenDefaults,
     BoltzgenDiversityResponse,
+    BulkDefaultInputResponse,
+    BulkGuiReadmeResponse,
+    BulkUiConfigResponse,
+    BulkUiConfigUpdateRequest,
+    BulkUiBoltzgenConfig,
+    BulkUiClusterConfig,
+    BulkUiInputConfig,
     DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
@@ -172,6 +179,68 @@ def _is_local_client(host: str | None) -> bool:
     if normalized.startswith("::ffff:"):
         normalized = normalized.split("::ffff:", 1)[1]
     return normalized.startswith("127.")
+
+
+def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _load_local_config_mapping(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_local_config_mapping(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+
+
+def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
+    cluster_cfg = cfg_obj.cluster
+    boltz_cfg = cluster_cfg.boltzgen
+    bulk_cfg = cfg_obj.bulk
+    default_input_path = str(bulk_cfg.default_input_path) if bulk_cfg.default_input_path else None
+    return BulkUiConfigResponse(
+        local_config_path=str(DEFAULT_LOCAL_CONFIG_PATH.expanduser()),
+        cluster=BulkUiClusterConfig(
+            mock=bool(cluster_cfg.mock),
+            ssh_config_alias=cluster_cfg.ssh_config_alias,
+            remote_root=str(cluster_cfg.remote_root) if cluster_cfg.remote_root else None,
+            target_root=str(cluster_cfg.target_root) if cluster_cfg.target_root else None,
+            conda_activate=cluster_cfg.conda_activate,
+        ),
+        boltzgen=BulkUiBoltzgenConfig(
+            partition=boltz_cfg.partition,
+            account=boltz_cfg.account,
+            gpus=boltz_cfg.gpus,
+            cpus=boltz_cfg.cpus,
+            mem_gb=boltz_cfg.mem_gb,
+            time_hours=boltz_cfg.time_hours,
+            default_num_designs=boltz_cfg.default_num_designs,
+        ),
+        input=BulkUiInputConfig(
+            default_input_path=default_input_path,
+            auto_load_default_input=bool(bulk_cfg.auto_load_default_input),
+        ),
+    )
+
+
+def _path_within_roots(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 @app.middleware("http")
@@ -1043,6 +1112,112 @@ async def api_boltzgen_binders_export(
     payload: BoltzgenBinderExportRequest,
 ) -> BoltzgenBinderExportResponse:
     return export_selected_binders(payload)
+
+
+@app.get("/api/bulk/ui-config", response_model=BulkUiConfigResponse)
+async def api_bulk_ui_config() -> BulkUiConfigResponse:
+    cfg_obj = load_config()
+    return _build_bulk_ui_config_response(cfg_obj)
+
+
+@app.post("/api/bulk/ui-config", response_model=BulkUiConfigResponse)
+async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiConfigResponse:
+    local_path = DEFAULT_LOCAL_CONFIG_PATH.expanduser()
+    data = _load_local_config_mapping(local_path)
+
+    cluster_block = data.get("cluster")
+    if not isinstance(cluster_block, dict):
+        cluster_block = {}
+        data["cluster"] = cluster_block
+    cluster_block["mock"] = bool(payload.cluster.mock)
+    cluster_block["ssh_config_alias"] = _normalize_optional_text(payload.cluster.ssh_config_alias)
+    cluster_block["remote_root"] = _normalize_optional_text(payload.cluster.remote_root)
+    cluster_block["target_root"] = _normalize_optional_text(payload.cluster.target_root)
+    cluster_block["conda_activate"] = _normalize_optional_text(payload.cluster.conda_activate)
+
+    boltz_block = cluster_block.get("boltzgen")
+    if not isinstance(boltz_block, dict):
+        boltz_block = {}
+        cluster_block["boltzgen"] = boltz_block
+    boltz_block["partition"] = _normalize_optional_text(payload.boltzgen.partition)
+    boltz_block["account"] = _normalize_optional_text(payload.boltzgen.account)
+    boltz_block["gpus"] = _normalize_optional_text(payload.boltzgen.gpus)
+    boltz_block["cpus"] = payload.boltzgen.cpus
+    boltz_block["mem_gb"] = payload.boltzgen.mem_gb
+    boltz_block["time_hours"] = payload.boltzgen.time_hours
+    boltz_block["default_num_designs"] = payload.boltzgen.default_num_designs
+
+    bulk_block = data.get("bulk")
+    if not isinstance(bulk_block, dict):
+        bulk_block = {}
+        data["bulk"] = bulk_block
+    bulk_block["default_input_path"] = _normalize_optional_text(payload.input.default_input_path)
+    bulk_block["auto_load_default_input"] = bool(payload.input.auto_load_default_input)
+
+    _write_local_config_mapping(local_path, data)
+
+    global cfg
+    load_config.cache_clear()
+    cfg = load_config()
+
+    return _build_bulk_ui_config_response(cfg)
+
+
+@app.get("/api/bulk/default-input", response_model=BulkDefaultInputResponse)
+async def api_bulk_default_input() -> BulkDefaultInputResponse:
+    cfg_obj = load_config()
+    configured = cfg_obj.bulk.default_input_path
+    if not configured:
+        raise HTTPException(status_code=404, detail="No default_input_path configured under bulk in cfg/webapp.local.yaml")
+
+    project_root = Path(cfg_obj.paths.project_root).expanduser().resolve()
+    workspace_root = (
+        Path(cfg_obj.paths.workspace_root).expanduser().resolve()
+        if cfg_obj.paths.workspace_root
+        else None
+    )
+
+    raw_path = Path(configured).expanduser()
+    if raw_path.is_absolute():
+        resolved = raw_path.resolve()
+    else:
+        resolved = (project_root / raw_path).resolve()
+
+    allowed_roots = [project_root]
+    if workspace_root:
+        allowed_roots.append(workspace_root)
+    if not _path_within_roots(resolved, allowed_roots):
+        raise HTTPException(status_code=400, detail="default_input_path must be inside project/workspace root")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"Configured default input file not found: {resolved}")
+    if not resolved.is_file():
+        raise HTTPException(status_code=400, detail=f"Configured default input path is not a file: {resolved}")
+
+    max_bytes = max(1024, int(cfg_obj.bulk.max_default_input_bytes or 2_000_000))
+    size_bytes = resolved.stat().st_size
+    if size_bytes > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Configured default input is too large ({size_bytes} bytes > {max_bytes} bytes)",
+        )
+
+    text = resolved.read_text(encoding="utf-8", errors="ignore")
+    return BulkDefaultInputResponse(path=str(resolved), size_bytes=size_bytes, text=text)
+
+
+@app.get("/api/bulk/readme-gui", response_model=BulkGuiReadmeResponse)
+async def api_bulk_readme_gui() -> BulkGuiReadmeResponse:
+    cfg_obj = load_config()
+    project_root = Path(cfg_obj.paths.project_root).expanduser().resolve()
+    readme_path = (project_root / "README_GUI.md").resolve()
+    if not _path_within_roots(readme_path, [project_root]):
+        raise HTTPException(status_code=400, detail="Invalid README_GUI.md path")
+    if not readme_path.exists():
+        raise HTTPException(status_code=404, detail="README_GUI.md not found")
+    if not readme_path.is_file():
+        raise HTTPException(status_code=400, detail="README_GUI.md is not a file")
+    text = readme_path.read_text(encoding="utf-8", errors="ignore")
+    return BulkGuiReadmeResponse(path=str(readme_path), text=text)
 
 
 @app.get("/api/bulk/command-defaults", response_model=BulkCommandDefaultsResponse)

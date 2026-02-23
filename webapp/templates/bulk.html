@@ -30,6 +30,9 @@
       .bulk-example-tab.is-active { background: #ffffff; border-bottom-color: #ffffff; font-weight: 600; }
       .bulk-example-panel { display: none; }
       .bulk-example-panel.is-active { display: block; }
+      .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+      .settings-section { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+      .settings-section h4 { margin: 0 0 8px 0; font-size: 13px; color: #0f172a; }
     </style>
   </head>
   <body>
@@ -41,6 +44,8 @@
             <p>Run init/decide/prep, PyMOL exports, insights CSV, and design config exports across many targets.</p>
           </div>
           <div class="flex-row" style="gap: 8px; align-items: center;">
+            <button type="button" id="bulk-readme-btn" class="ghost">README</button>
+            <button type="button" id="bulk-settings-btn" class="ghost">Config</button>
             <button type="button" id="bulk-algorithm-btn" class="ghost">Algorithm</button>
             <div id="bulk-status" class="badge" hidden>Idle</div>
           </div>
@@ -50,10 +55,10 @@
           <div class="bulk-main">
             <section>
               <h2>Input CSV / TSV</h2>
-              <p class="help-text" style="margin-top: 0;">Recommended public default: use <code>targets_catalog/acrobio_plus_sino_biotin_merged.tsv</code> and paste it directly here. Preview runs automatically as you paste/edit and may take several seconds for larger tables.</p>
-              <p class="help-text" style="margin-top: 8px;">Accepted columns remain unchanged. Preferred fields are <code>chosen_pdb</code> (or <code>pdb_id</code>), <code>antigen_url</code>, and optional <code>vendor_accession</code>/<code>vendor_range</code>. Target-generation style TSVs (<code>rank/selection/uniprot/gene/chosen_pdb/antigen_url</code>) are supported.</p>
-              <p class="help-text" style="margin-top: 8px;">To regenerate the source catalogs, use scripts under <code>targets_catalog/webscraper/</code> (AcroBio scrape, Sino scrape, and merge).</p>
-              <p class="help-text" style="margin-top: 8px;"><strong>LLM note:</strong> actions like <code>Select epitopes (LLM)</code> require valid API keys in <code>cfg/env.py</code> (copy from <code>cfg/env.sample.py</code>).</p>
+              <p class="help-text" style="margin-top: 0;">Paste your CSV/TSV target list here. If you want a ready-to-use starting file, use <code>targets_catalog/acrobio_plus_sino_biotin_merged.tsv</code>. The preview updates automatically after edits, and large files may take a few seconds.</p>
+              <p class="help-text" style="margin-top: 8px;">Recommended columns are <code>chosen_pdb</code> (or <code>pdb_id</code>) and <code>antigen_url</code>. You can also include <code>vendor_accession</code> and <code>vendor_range</code> for better target initialization. Target-generation style TSVs are also supported.</p>
+              <p class="help-text" style="margin-top: 8px;">Need a refreshed merged catalog? Run the scraper/merge scripts in <code>targets_catalog/webscraper/</code>.</p>
+              <p class="help-text" style="margin-top: 8px;"><strong>LLM features:</strong> actions such as <code>Select epitopes (LLM)</code> require API keys in <code>cfg/env.py</code> (see <code>cfg/env.sample.py</code>).</p>
               <div class="form-row">
                 <label>CSV / TSV rows
                   <textarea id="bulk-csv-input" rows="6" placeholder="rank	selection	uniprot	gene	...&#10;1	biotin	Q15116	PDCD1	..."></textarea>
@@ -502,7 +507,7 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
               <code>C_j</code> be candidate PDB chains extracted from mmCIF. An epitope is a set of residue spans
               <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
             <ol style="margin: 0 0 12px 18px; padding: 0;">
-              <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters.</li>
+              <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters. Rows with multi-accession values in the accession field (for example containing <code>&amp;</code>, <code>,</code>, <code>;</code>, <code>/</code>, or <code>and</code>) are excluded from detected targets and execution.</li>
               <li><strong>target_generation.py (catalog PDB selection).</strong> For each antigen option with an accession and expressed range,
                 align the vendor sequence <code>S</code> (or expressed slice <code>S[a:b]</code>) to every PDB chain sequence <code>C_j</code>
                 (RCSB polymer entities). Keep matches with <code>identity &gt;= 0.95</code> and aligned length &gt;= 10. Each candidate match
@@ -1139,6 +1144,99 @@ top_exposed_residues:
             </p>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div id="bulk-settings-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-settings"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Bulk settings</h3>
+          <button type="button" id="bulk-settings-close" class="ghost">Close</button>
+        </div>
+        <div style="padding: 12px 0;">
+          <p class="help-text" id="bulk-settings-meta" style="margin-top: 0;">Edits are saved to <code>cfg/webapp.local.yaml</code>.</p>
+
+          <section class="settings-section">
+            <h4>Cluster base</h4>
+            <label class="help-text" style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
+              <input type="checkbox" id="bulk-settings-mock">
+              Use mock/offline cluster mode
+            </label>
+            <div class="settings-grid">
+              <label>SSH alias
+                <input type="text" id="bulk-settings-ssh-alias" placeholder="e.g. rfacluster">
+              </label>
+              <label>Remote root
+                <input type="text" id="bulk-settings-remote-root" placeholder="/pub/.../initbinder">
+              </label>
+              <label>Target root
+                <input type="text" id="bulk-settings-target-root" placeholder="/pub/.../initbinder/targets">
+              </label>
+              <label>Cluster conda (BoltzGen installed)
+                <input type="text" id="bulk-settings-conda" placeholder="conda activate ...">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>BoltzGen defaults</h4>
+            <div class="settings-grid">
+              <label>Partition
+                <input type="text" id="bulk-settings-boltz-partition" placeholder="gpu">
+              </label>
+              <label>Account
+                <input type="text" id="bulk-settings-boltz-account" placeholder="ccl_lab_gpu">
+              </label>
+              <label>GPUs
+                <input type="text" id="bulk-settings-boltz-gpus" placeholder="A30:1">
+              </label>
+              <label>CPUs
+                <input type="number" id="bulk-settings-boltz-cpus" min="1" max="256" placeholder="8">
+              </label>
+              <label>Memory (GB)
+                <input type="number" id="bulk-settings-boltz-mem" min="1" max="2048" placeholder="64">
+              </label>
+              <label>Time (hours)
+                <input type="number" id="bulk-settings-boltz-time" min="1" max="240" placeholder="12">
+              </label>
+              <label>Default designs/epitope
+                <input type="number" id="bulk-settings-boltz-designs" min="1" max="50000" placeholder="100">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>Input TSV defaults</h4>
+            <div class="settings-grid">
+              <label>Default input file path
+                <input type="text" id="bulk-settings-input-path" placeholder="targets_catalog/acrobio_plus_sino_biotin_merged.tsv">
+              </label>
+            </div>
+            <div class="flex-row" style="gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap;">
+              <label class="help-text" style="display:flex; gap:6px; align-items:center; margin:0;">
+                <input type="checkbox" id="bulk-settings-auto-load">
+                Auto-load this file on page open when input is empty
+              </label>
+              <button type="button" id="bulk-settings-load-default" class="ghost">Load default file now</button>
+            </div>
+          </section>
+        </div>
+        <div class="flex-row" style="gap: 8px; justify-content: flex-end;">
+          <button type="button" id="bulk-settings-cancel" class="ghost">Cancel</button>
+          <button type="button" id="bulk-settings-save">Save settings</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="bulk-readme-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-readme"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="bulk-readme-title">GUI README</h3>
+          <button type="button" id="bulk-readme-close" class="ghost">Close</button>
+        </div>
+        <pre id="bulk-readme-body" class="scrollable">Loading README...</pre>
       </div>
     </div>
 

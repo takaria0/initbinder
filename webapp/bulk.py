@@ -2638,10 +2638,23 @@ def run_boltzgen_config_jobs(
     )
 
 
-def _parse_bulk_csv(csv_text: str) -> List[dict]:
+_MULTI_ACCESSION_AND_RE = re.compile(r"\s+and\s+", flags=re.IGNORECASE)
+
+
+def _is_multi_accession_value(accession: Optional[str]) -> bool:
+    """Return True when a single accession field appears to contain multiple accessions."""
+    text = _normalize(accession)
+    if not text:
+        return False
+    if any(sep in text for sep in ("&", ",", ";", "/")):
+        return True
+    return bool(_MULTI_ACCESSION_AND_RE.search(text))
+
+
+def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
     body = csv_text.strip()
     if not body:
-        return []
+        return [], 0
     buffer = io.StringIO(body)
     first_line = body.splitlines()[0] if body.splitlines() else ""
     delimiter = "\t" if ("\t" in first_line and "," not in first_line) else None
@@ -2657,7 +2670,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
     reader = csv.reader(buffer, dialect)
     rows = list(reader)
     if not rows:
-        return []
+        return [], 0
     header = [cell.strip().lower() for cell in rows[0]]
     known_header_tokens = {
         "preset name",
@@ -2719,6 +2732,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         accession_idx = 3 if (rows and len(rows[0]) > 3) else None
 
     entries: List[dict] = []
+    skipped_multi_accession = 0
     for offset, row in enumerate(rows[start_index:]):
         raw_index = offset + 1
         preset_name = _normalize(row[preset_idx]) if preset_idx is not None and len(row) > preset_idx else None
@@ -2741,6 +2755,9 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
         if not vendor_range_raw and vendor_overlap_idx is not None and len(row) > vendor_overlap_idx:
             vendor_range_raw = _normalize(row[vendor_overlap_idx])
         protein_name = _normalize(row[protein_idx]) if protein_idx is not None and len(row) > protein_idx else None
+        if _is_multi_accession_value(accession_raw):
+            skipped_multi_accession += 1
+            continue
         if not preset_name and not antigen_url and not pdb_raw:
             continue
         entries.append({
@@ -2752,7 +2769,7 @@ def _parse_bulk_csv(csv_text: str) -> List[dict]:
             "accession": accession_raw,
             "vendor_range": vendor_range_raw,
         })
-    return entries
+    return entries, skipped_multi_accession
 
 
 def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
@@ -2804,7 +2821,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
 
 
 def preview_bulk_targets(request: BulkPreviewRequest) -> BulkPreviewResponse:
-    entries = _parse_bulk_csv(request.csv_text)
+    entries, skipped_multi_accession = _parse_bulk_csv(request.csv_text)
     if not entries:
         raise ValueError("No rows detected in the CSV payload.")
     planned = _apply_preset_matches(entries)
@@ -2813,6 +2830,11 @@ def preview_bulk_targets(request: BulkPreviewRequest) -> BulkPreviewResponse:
     message = f"Parsed {len(planned)} rows · {resolved} ready"
     if unresolved:
         message = f"{message} · {unresolved} need PDB IDs"
+    if skipped_multi_accession:
+        message = (
+            f"{message} · {skipped_multi_accession} skipped "
+            "(multi-accession accession field)"
+        )
     return BulkPreviewResponse(
         rows=planned,
         total_rows=len(planned),

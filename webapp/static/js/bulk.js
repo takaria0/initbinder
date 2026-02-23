@@ -33,6 +33,8 @@ const state = {
   configContext: null,
   runContext: null,
   runMode: null,
+  uiSettings: null,
+  guiReadme: null,
 };
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
@@ -84,6 +86,8 @@ function isBoltzEngine(engine) {
 
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
+  bulkReadmeBtn: document.querySelector('#bulk-readme-btn'),
+  bulkSettingsBtn: document.querySelector('#bulk-settings-btn'),
   bulkAlgorithmBtn: document.querySelector('#bulk-algorithm-btn'),
   bulkCsvInput: document.querySelector('#bulk-csv-input'),
   bulkEpitopes: document.querySelector('#bulk-epitopes'),
@@ -148,6 +152,30 @@ const el = {
   boltzRerunRangeClose: document.querySelector('#boltz-rerun-range-close'),
   bulkAlgorithmModal: document.querySelector('#bulk-algorithm-modal'),
   bulkAlgorithmClose: document.querySelector('#bulk-algorithm-close'),
+  bulkSettingsModal: document.querySelector('#bulk-settings-modal'),
+  bulkSettingsClose: document.querySelector('#bulk-settings-close'),
+  bulkSettingsCancel: document.querySelector('#bulk-settings-cancel'),
+  bulkSettingsSave: document.querySelector('#bulk-settings-save'),
+  bulkReadmeModal: document.querySelector('#bulk-readme-modal'),
+  bulkReadmeTitle: document.querySelector('#bulk-readme-title'),
+  bulkReadmeBody: document.querySelector('#bulk-readme-body'),
+  bulkReadmeClose: document.querySelector('#bulk-readme-close'),
+  bulkSettingsMeta: document.querySelector('#bulk-settings-meta'),
+  bulkSettingsMock: document.querySelector('#bulk-settings-mock'),
+  bulkSettingsSshAlias: document.querySelector('#bulk-settings-ssh-alias'),
+  bulkSettingsRemoteRoot: document.querySelector('#bulk-settings-remote-root'),
+  bulkSettingsTargetRoot: document.querySelector('#bulk-settings-target-root'),
+  bulkSettingsConda: document.querySelector('#bulk-settings-conda'),
+  bulkSettingsBoltzPartition: document.querySelector('#bulk-settings-boltz-partition'),
+  bulkSettingsBoltzAccount: document.querySelector('#bulk-settings-boltz-account'),
+  bulkSettingsBoltzGpus: document.querySelector('#bulk-settings-boltz-gpus'),
+  bulkSettingsBoltzCpus: document.querySelector('#bulk-settings-boltz-cpus'),
+  bulkSettingsBoltzMem: document.querySelector('#bulk-settings-boltz-mem'),
+  bulkSettingsBoltzTime: document.querySelector('#bulk-settings-boltz-time'),
+  bulkSettingsBoltzDesigns: document.querySelector('#bulk-settings-boltz-designs'),
+  bulkSettingsInputPath: document.querySelector('#bulk-settings-input-path'),
+  bulkSettingsAutoLoad: document.querySelector('#bulk-settings-auto-load'),
+  bulkSettingsLoadDefault: document.querySelector('#bulk-settings-load-default'),
   boltzRunRangeModal: document.querySelector('#boltz-run-range-modal'),
   boltzRunRangeStart: document.querySelector('#boltz-run-range-start'),
   boltzRunRangeEnd: document.querySelector('#boltz-run-range-end'),
@@ -2428,6 +2456,188 @@ async function loadCommandDefaults() {
   return state.commandDefaults;
 }
 
+function parseOptionalInteger(raw, { min = null, max = null } = {}) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const num = Number(text);
+  if (!Number.isFinite(num)) return null;
+  const rounded = Math.round(num);
+  if (min !== null && rounded < min) return null;
+  if (max !== null && rounded > max) return null;
+  return rounded;
+}
+
+function normalizeOptionalText(raw) {
+  const text = String(raw ?? '').trim();
+  return text || null;
+}
+
+function setTextInputValue(inputEl, value) {
+  if (!inputEl) return;
+  inputEl.value = value ?? '';
+}
+
+function applyBulkUiSettingsToForm(payload = {}) {
+  const cluster = payload.cluster || {};
+  const boltzgen = payload.boltzgen || {};
+  const input = payload.input || {};
+  if (el.bulkSettingsMock) el.bulkSettingsMock.checked = Boolean(cluster.mock);
+  setTextInputValue(el.bulkSettingsSshAlias, cluster.ssh_config_alias);
+  setTextInputValue(el.bulkSettingsRemoteRoot, cluster.remote_root);
+  setTextInputValue(el.bulkSettingsTargetRoot, cluster.target_root);
+  setTextInputValue(el.bulkSettingsConda, cluster.conda_activate);
+
+  setTextInputValue(el.bulkSettingsBoltzPartition, boltzgen.partition);
+  setTextInputValue(el.bulkSettingsBoltzAccount, boltzgen.account);
+  setTextInputValue(el.bulkSettingsBoltzGpus, boltzgen.gpus);
+  setTextInputValue(el.bulkSettingsBoltzCpus, boltzgen.cpus);
+  setTextInputValue(el.bulkSettingsBoltzMem, boltzgen.mem_gb);
+  setTextInputValue(el.bulkSettingsBoltzTime, boltzgen.time_hours);
+  setTextInputValue(el.bulkSettingsBoltzDesigns, boltzgen.default_num_designs);
+
+  setTextInputValue(el.bulkSettingsInputPath, input.default_input_path);
+  if (el.bulkSettingsAutoLoad) el.bulkSettingsAutoLoad.checked = Boolean(input.auto_load_default_input);
+
+  if (el.bulkSettingsMeta) {
+    const path = payload.local_config_path || 'cfg/webapp.local.yaml';
+    el.bulkSettingsMeta.innerHTML = `Edits are saved to <code>${path}</code>.`;
+  }
+
+  const defaultDesignCount = parseOptionalInteger(boltzgen.default_num_designs, { min: 1, max: 50000 });
+  if (defaultDesignCount && el.boltzDesignCount) {
+    el.boltzDesignCount.value = String(defaultDesignCount);
+  }
+  const defaultTimeHours = parseOptionalInteger(boltzgen.time_hours, { min: 1, max: 240 });
+  if (defaultTimeHours && el.boltzTimeHours) {
+    el.boltzTimeHours.value = String(defaultTimeHours);
+  }
+}
+
+function buildBulkUiSettingsPayload() {
+  return {
+    cluster: {
+      mock: Boolean(el.bulkSettingsMock?.checked),
+      ssh_config_alias: normalizeOptionalText(el.bulkSettingsSshAlias?.value),
+      remote_root: normalizeOptionalText(el.bulkSettingsRemoteRoot?.value),
+      target_root: normalizeOptionalText(el.bulkSettingsTargetRoot?.value),
+      conda_activate: normalizeOptionalText(el.bulkSettingsConda?.value),
+    },
+    boltzgen: {
+      partition: normalizeOptionalText(el.bulkSettingsBoltzPartition?.value),
+      account: normalizeOptionalText(el.bulkSettingsBoltzAccount?.value),
+      gpus: normalizeOptionalText(el.bulkSettingsBoltzGpus?.value),
+      cpus: parseOptionalInteger(el.bulkSettingsBoltzCpus?.value, { min: 1, max: 256 }),
+      mem_gb: parseOptionalInteger(el.bulkSettingsBoltzMem?.value, { min: 1, max: 2048 }),
+      time_hours: parseOptionalInteger(el.bulkSettingsBoltzTime?.value, { min: 1, max: 240 }),
+      default_num_designs: parseOptionalInteger(el.bulkSettingsBoltzDesigns?.value, { min: 1, max: 50000 }),
+    },
+    input: {
+      default_input_path: normalizeOptionalText(el.bulkSettingsInputPath?.value),
+      auto_load_default_input: Boolean(el.bulkSettingsAutoLoad?.checked),
+    },
+  };
+}
+
+async function loadBulkUiSettings({ autoLoadInput = true } = {}) {
+  try {
+    const res = await fetch('/api/bulk/ui-config');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    state.uiSettings = payload;
+    applyBulkUiSettingsToForm(payload);
+    if (autoLoadInput) {
+      const shouldAutoLoad = Boolean(payload?.input?.auto_load_default_input);
+      const hasInput = Boolean((el.bulkCsvInput?.value || '').trim());
+      if (shouldAutoLoad && !hasInput) {
+        await loadDefaultInputFile({ force: false, silent: true });
+      }
+    }
+  } catch (err) {
+    state.uiSettings = null;
+  }
+}
+
+async function saveBulkUiSettings(triggerEl = null) {
+  const payload = buildBulkUiSettingsPayload();
+  if (triggerEl) triggerEl.disabled = true;
+  try {
+    const res = await fetch('/api/bulk/ui-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const message = body?.detail || body?.message || `HTTP ${res.status}`;
+      throw new Error(message);
+    }
+    state.uiSettings = body;
+    applyBulkUiSettingsToForm(body);
+    state.commandDefaults = null;
+    await loadCommandDefaults();
+    showAlert('Bulk settings saved.', false);
+    toggleModal(el.bulkSettingsModal, false);
+  } catch (err) {
+    showAlert(`Failed to save settings: ${err.message || err}`);
+  } finally {
+    if (triggerEl) triggerEl.disabled = false;
+  }
+}
+
+async function loadDefaultInputFile({ force = false, silent = false } = {}) {
+  const hasInput = Boolean((el.bulkCsvInput?.value || '').trim());
+  if (!force && hasInput) return;
+  try {
+    const res = await fetch('/api/bulk/default-input');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const message = body?.detail || body?.message || `HTTP ${res.status}`;
+      throw new Error(message);
+    }
+    if (el.bulkCsvInput) el.bulkCsvInput.value = body.text || '';
+    state.bulkPreviewSig = null;
+    await previewBulkCsv({ silent: true });
+    if (!silent) {
+      const shownPath = body.path || 'configured default input';
+      showAlert(`Loaded default input from ${shownPath}.`, false);
+    }
+  } catch (err) {
+    if (!silent) showAlert(`Failed to load default input: ${err.message || err}`);
+  }
+}
+
+async function openBulkReadmeModal() {
+  if (el.bulkReadmeBody) {
+    el.bulkReadmeBody.textContent = 'Loading README...';
+  }
+  toggleModal(el.bulkReadmeModal, true);
+  try {
+    if (!state.guiReadme) {
+      const res = await fetch('/api/bulk/readme-gui');
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body?.detail || body?.message || `HTTP ${res.status}`);
+      }
+      state.guiReadme = body;
+    }
+    const path = state.guiReadme?.path || 'README_GUI.md';
+    const text = state.guiReadme?.text || 'README_GUI.md is empty.';
+    if (el.bulkReadmeTitle) {
+      el.bulkReadmeTitle.textContent = `GUI README · ${path.split('/').pop() || path}`;
+    }
+    if (el.bulkReadmeBody) {
+      el.bulkReadmeBody.textContent = text;
+    }
+  } catch (err) {
+    if (el.bulkReadmeTitle) {
+      el.bulkReadmeTitle.textContent = 'GUI README';
+    }
+    if (el.bulkReadmeBody) {
+      el.bulkReadmeBody.textContent = `Failed to load README: ${err.message || err}`;
+    }
+  }
+}
+
 async function loadBoltzRunStatuses(pdbIds = []) {
   const ids = Array.from(new Set(
     (pdbIds || []).map((id) => (id || '').toUpperCase()).filter(Boolean),
@@ -4237,6 +4447,7 @@ function setupExampleTabs() {
 
 function init() {
   loadCommandDefaults();
+  loadBulkUiSettings({ autoLoadInput: true });
   setupExampleTabs();
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
@@ -4326,7 +4537,19 @@ function init() {
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderExportBtn) el.binderExportBtn.addEventListener('click', () => toggleModal(el.binderExportModal, true));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
+  if (el.bulkReadmeBtn) el.bulkReadmeBtn.addEventListener('click', openBulkReadmeModal);
   if (el.bulkAlgorithmBtn) el.bulkAlgorithmBtn.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, true));
+  if (el.bulkSettingsBtn) {
+    el.bulkSettingsBtn.addEventListener('click', async () => {
+      await loadBulkUiSettings({ autoLoadInput: false });
+      toggleModal(el.bulkSettingsModal, true);
+    });
+  }
+  if (el.bulkSettingsLoadDefault) {
+    el.bulkSettingsLoadDefault.addEventListener('click', async () => {
+      await loadDefaultInputFile({ force: true, silent: false });
+    });
+  }
   if (el.binderFilterPdb) {
     el.binderFilterPdb.addEventListener('input', () => scheduleBinderRefresh({ silent: true }));
     el.binderFilterPdb.addEventListener('change', () => scheduleBinderRefresh({ silent: true }));
@@ -4373,6 +4596,22 @@ function init() {
   if (el.boltzLogClose) el.boltzLogClose.addEventListener('click', () => toggleModal(el.boltzLogModal, false));
   if (el.boltzRunClose) el.boltzRunClose.addEventListener('click', () => toggleModal(el.boltzRunModal, false));
   if (el.bulkAlgorithmClose) el.bulkAlgorithmClose.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, false));
+  if (el.bulkReadmeClose) el.bulkReadmeClose.addEventListener('click', () => toggleModal(el.bulkReadmeModal, false));
+  if (el.bulkSettingsClose) {
+    el.bulkSettingsClose.addEventListener('click', () => {
+      applyBulkUiSettingsToForm(state.uiSettings || {});
+      toggleModal(el.bulkSettingsModal, false);
+    });
+  }
+  if (el.bulkSettingsCancel) {
+    el.bulkSettingsCancel.addEventListener('click', () => {
+      applyBulkUiSettingsToForm(state.uiSettings || {});
+      toggleModal(el.bulkSettingsModal, false);
+    });
+  }
+  if (el.bulkSettingsSave) {
+    el.bulkSettingsSave.addEventListener('click', () => saveBulkUiSettings(el.bulkSettingsSave));
+  }
   if (el.binderExportClose) el.binderExportClose.addEventListener('click', () => toggleModal(el.binderExportModal, false));
   if (el.binderExportCancel) el.binderExportCancel.addEventListener('click', () => toggleModal(el.binderExportModal, false));
   if (el.binderExportConfirm) el.binderExportConfirm.addEventListener('click', exportSelectedBinders);
@@ -4392,6 +4631,11 @@ function init() {
     if (closeTarget === 'boltz-regenerate-range') toggleModal(el.boltzRegenerateRangeModal, false);
     if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
     if (closeTarget === 'bulk-algorithm') toggleModal(el.bulkAlgorithmModal, false);
+    if (closeTarget === 'bulk-readme') toggleModal(el.bulkReadmeModal, false);
+    if (closeTarget === 'bulk-settings') {
+      applyBulkUiSettingsToForm(state.uiSettings || {});
+      toggleModal(el.bulkSettingsModal, false);
+    }
     if (closeTarget === 'binder-export') toggleModal(el.binderExportModal, false);
   });
 

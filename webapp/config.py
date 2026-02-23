@@ -237,6 +237,25 @@ class AppPaths:
     antigen_category_map: Optional[Path] = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.project_root, str):
+            self.project_root = Path(self.project_root).expanduser()
+        if not isinstance(self.project_root, Path):
+            self.project_root = Path(self.project_root)
+        if not self.project_root.is_absolute():
+            self.project_root = (Path.cwd() / self.project_root).resolve()
+
+        if isinstance(self.workspace_root, str):
+            self.workspace_root = Path(self.workspace_root).expanduser()
+        if isinstance(self.workspace_root, Path) and not self.workspace_root.is_absolute():
+            self.workspace_root = (self.project_root / self.workspace_root).resolve()
+
+        if isinstance(self.targets_dir, str):
+            self.targets_dir = Path(self.targets_dir).expanduser()
+        if isinstance(self.cache_dir, str):
+            self.cache_dir = Path(self.cache_dir).expanduser()
+        if isinstance(self.static_dir, str):
+            self.static_dir = Path(self.static_dir).expanduser()
+
         if self.workspace_root is None:
             self.workspace_root = Path(self.project_root)
         if self.targets_dir is None:
@@ -245,6 +264,12 @@ class AppPaths:
             self.cache_dir = self.workspace_root / "cache"
         if self.static_dir is None:
             self.static_dir = self.workspace_root / "webapp" / "static"
+        if isinstance(self.targets_dir, Path) and not self.targets_dir.is_absolute():
+            self.targets_dir = (self.workspace_root / self.targets_dir).resolve()
+        if isinstance(self.cache_dir, Path) and not self.cache_dir.is_absolute():
+            self.cache_dir = (self.workspace_root / self.cache_dir).resolve()
+        if isinstance(self.static_dir, Path) and not self.static_dir.is_absolute():
+            self.static_dir = (self.workspace_root / self.static_dir).resolve()
         if isinstance(self.antigen_category_map, str) and self.antigen_category_map:
             self.antigen_category_map = Path(self.antigen_category_map).expanduser()
         if isinstance(self.antigen_category_map, Path) and not self.antigen_category_map.is_absolute():
@@ -252,9 +277,29 @@ class AppPaths:
 
 
 @dataclass(slots=True)
+class BulkUiConfig:
+    default_input_path: Optional[Path] = None
+    auto_load_default_input: bool = False
+    max_default_input_bytes: int = 2_000_000
+
+    def __post_init__(self) -> None:
+        if isinstance(self.default_input_path, str) and self.default_input_path.strip():
+            self.default_input_path = Path(self.default_input_path).expanduser()
+        elif isinstance(self.default_input_path, str):
+            self.default_input_path = None
+        if isinstance(self.auto_load_default_input, str):
+            self.auto_load_default_input = self.auto_load_default_input.lower() in {"1", "true", "yes"}
+        if isinstance(self.max_default_input_bytes, str) and self.max_default_input_bytes.strip():
+            self.max_default_input_bytes = int(self.max_default_input_bytes)
+        if not isinstance(self.max_default_input_bytes, int) or self.max_default_input_bytes < 1024:
+            self.max_default_input_bytes = 2_000_000
+
+
+@dataclass(slots=True)
 class WebAppConfig:
     paths: AppPaths = field(default_factory=AppPaths)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
+    bulk: BulkUiConfig = field(default_factory=BulkUiConfig)
     log_dir: Path = field(default_factory=lambda: Path.cwd() / "logs" / "webapp")
     background_concurrency: int = 16
 
@@ -285,10 +330,12 @@ def _load_yaml_config(path: Path) -> Dict[str, Any]:
 def _config_from_dict(data: Dict[str, Any]) -> WebAppConfig:
     cluster_dict = data.get("cluster", {}) if isinstance(data.get("cluster"), dict) else {}
     paths_dict = data.get("paths", {}) if isinstance(data.get("paths"), dict) else {}
+    bulk_dict = data.get("bulk", {}) if isinstance(data.get("bulk"), dict) else {}
 
     cluster = ClusterConfig(**cluster_dict)
     paths = AppPaths(**paths_dict)
-    cfg = WebAppConfig(paths=paths, cluster=cluster)
+    bulk = BulkUiConfig(**bulk_dict)
+    cfg = WebAppConfig(paths=paths, cluster=cluster, bulk=bulk)
     if "log_dir" in data and data["log_dir"]:
         cfg.log_dir = Path(data["log_dir"]).expanduser()
     if "background_concurrency" in data and data["background_concurrency"]:
@@ -305,6 +352,7 @@ def load_config() -> WebAppConfig:
             "project_root": str(Path(__file__).resolve().parents[1]),
         },
         "cluster": {},
+        "bulk": {},
     }
 
     cfg_path_env = os.getenv(CONFIG_ENV_VAR)
@@ -377,6 +425,7 @@ __all__ = [
     "AppPaths",
     "BoltzGenClusterConfig",
     "RfaPipelineConfig",
+    "BulkUiConfig",
     "load_config",
     "CONFIG_ENV_VAR",
     "DEFAULT_CONFIG_PATH",

@@ -403,6 +403,53 @@ class BulkCommandDefaultsResponse(BaseModel):
     boltzgen: BulkCommandBoltzgenDefaults = Field(default_factory=BulkCommandBoltzgenDefaults)
 
 
+class BulkUiClusterConfig(BaseModel):
+    mock: bool = False
+    ssh_config_alias: Optional[str] = None
+    remote_root: Optional[str] = None
+    target_root: Optional[str] = None
+    conda_activate: Optional[str] = None
+
+
+class BulkUiBoltzgenConfig(BaseModel):
+    partition: Optional[str] = None
+    account: Optional[str] = None
+    gpus: Optional[str] = None
+    cpus: Optional[int] = Field(None, ge=1, le=256)
+    mem_gb: Optional[int] = Field(None, ge=1, le=2048)
+    time_hours: Optional[int] = Field(None, ge=1, le=240)
+    default_num_designs: Optional[int] = Field(None, ge=1, le=50000)
+
+
+class BulkUiInputConfig(BaseModel):
+    default_input_path: Optional[str] = None
+    auto_load_default_input: bool = False
+
+
+class BulkUiConfigResponse(BaseModel):
+    local_config_path: str
+    cluster: BulkUiClusterConfig = Field(default_factory=BulkUiClusterConfig)
+    boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
+    input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
+
+
+class BulkUiConfigUpdateRequest(BaseModel):
+    cluster: BulkUiClusterConfig = Field(default_factory=BulkUiClusterConfig)
+    boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
+    input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
+
+
+class BulkDefaultInputResponse(BaseModel):
+    path: str
+    size_bytes: int
+    text: str
+
+
+class BulkGuiReadmeResponse(BaseModel):
+    path: str
+    text: str
+
+
 class BoltzgenEpitopeConfig(BaseModel):
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None
