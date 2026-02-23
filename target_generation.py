@@ -59,7 +59,7 @@ Tip: You can also include the biotin TSV in --avoid_tsv if desired:
     
 # latest run 2026-01-17:
 python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation.py \
-  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/Webscraper/sino_biotinylated_unique.tsv \
+  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/webscraper/sino_biotinylated_unique.tsv \
   --max_targets 1000 \
   --species human \
   --prefer_tags biotin \

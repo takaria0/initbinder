@@ -10,7 +10,7 @@ Flow:
 4) Match vendor sequences to PDB entities and write TSVs.
 
 python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation_sino.py \
-  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/Webscraper/sino_biotinylated_unique.tsv \
+  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/webscraper/sino_biotinylated_unique.tsv \
   --max_targets 1000 \
   --start_row 41 \
   --species human \
@@ -19,7 +19,7 @@ python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_gen
   --out_prefix sino_biotinylated_unique_new
   
 python3 /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation_sino.py \
-  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/webscraper/acrobio_biotinylated_unique.tsv \
+  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/webscraper/acrobio_biotinylated_unique.tsv \
   --species human \
 --max_targets 1000 \
   --prefer_tags biotin \

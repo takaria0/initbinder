@@ -33,6 +33,56 @@ Quickstart (macOS / Ubuntu)
 
 - `http://127.0.0.1:8000/bulk`
 
+Catalog Input Preparation (Public Workflow)
+-------------------------------------------
+
+Recommended quick path (default for public users):
+
+1) Use the prepared target table at:
+
+- `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`
+
+2) Open `http://127.0.0.1:8000/bulk` and paste TSV rows into **Input CSV / TSV**.
+
+Optional full regeneration path (AcroBio + Sino + merge):
+
+```bash
+# Sino biotin catalog (raw + unique + manual)
+python targets_catalog/webscraper/sino_biotin_pipeline.py
+
+# AcroBio biotin catalog
+python targets_catalog/webscraper/acrobio_biotin_pipeline.py \
+  --url "https://www.acrobiosystems.com/search?keywords=biotinylated" \
+  --mode playwright
+
+# Merge two catalog TSVs into one bulk-ready file
+python targets_catalog/webscraper/merge_target_catalogs.py \
+  --input1 targets_catalog/webscraper/sino_biotinylated_unique.tsv \
+  --input2 targets_catalog/webscraper/acrobio_biotinylated_unique.tsv \
+  --output targets_catalog/acrobio_plus_sino_biotin_merged.tsv \
+  --key uniprot
+```
+
+Notes on inputs/outputs:
+
+- Inputs for generation are in `targets_catalog/webscraper/` (vendor scrape artifacts).
+- Main merged output for bulk usage is `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`.
+
+LLM API Requirements
+--------------------
+
+Some features require LLM APIs (for example, **Select epitopes (LLM)** in Bulk).
+
+1) Create local config:
+
+```bash
+cp cfg/env.sample.py cfg/env.py
+```
+
+2) Set valid API keys in `cfg/env.py` (OpenAI/Groq/Google as needed) and enable LLM flags for your workflow.
+
+3) Non-LLM actions (bulk preview, command generation, and most local/offline UI interactions) can still run without LLM keys.
+
 
 Local-Safe Defaults
 -------------------

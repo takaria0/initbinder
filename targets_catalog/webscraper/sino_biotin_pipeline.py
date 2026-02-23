@@ -138,7 +138,7 @@ def write_outputs(df_raw: pd.DataFrame, df_unique: pd.DataFrame, args):
 
 
 def main():
-    default_root = Path.cwd() / "Webscraper"
+    default_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Collect and clean Sino biotinylated antigens.")
     parser.add_argument("--input_csv", type=str, default=None, help="Existing raw CSV to skip scraping.")
     parser.add_argument("--output_raw", type=str, default=default_root / "sino_biotinylated_full.csv", help="Path to write raw CSV.")

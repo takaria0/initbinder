@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Parse ACROBiosystems search results HTML and emit a TSV compatible with
-webscraper/acrobio_biotinylated_unique.tsv.
+targets_catalog/webscraper/acrobio_biotinylated_unique.tsv.
 
 Usage examples:
-  python webscraper/acrobio_biotin_pipeline.py --html "/Users/inagakit/Downloads/biotinylated _ ACROBiosystems.html"
-  python webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated"
-  python webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --page_param page
-  python webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --mode playwright --headed
+  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --html "/Users/inagakit/Downloads/biotinylated _ ACROBiosystems.html"
+  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated"
+  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --page_param page
+  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --mode playwright --headed
 """
 
 from __future__ import annotations
@@ -381,7 +381,7 @@ def build_dataframe(rows: List[Dict[str, str]], dedupe: bool) -> pd.DataFrame:
 
 
 def main() -> None:
-    default_root = Path("/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/webscraper")
+    default_root = Path(__file__).resolve().parent
     default_out = default_root / "acrobio_biotinylated_unique.tsv"
     default_raw = default_root / "acrobio_biotinylated_raw.csv"
     parser = argparse.ArgumentParser(description="Parse ACROBiosystems biotinylated search HTML.")
