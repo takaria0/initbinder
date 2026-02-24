@@ -330,6 +330,15 @@ def _load_yaml_config(path: Path) -> Dict[str, Any]:
     return _expand_env_in_value(data)
 
 
+def _path_matches(a: Path, b: Path) -> bool:
+    a_exp = a.expanduser()
+    b_exp = b.expanduser()
+    try:
+        return a_exp.resolve() == b_exp.resolve()
+    except Exception:
+        return str(a_exp) == str(b_exp)
+
+
 def _config_from_dict(data: Dict[str, Any]) -> WebAppConfig:
     cluster_dict = data.get("cluster", {}) if isinstance(data.get("cluster"), dict) else {}
     paths_dict = data.get("paths", {}) if isinstance(data.get("paths"), dict) else {}
@@ -359,7 +368,15 @@ def load_config() -> WebAppConfig:
     }
 
     cfg_path_env = os.getenv(CONFIG_ENV_VAR)
-    cfg_paths = [Path(cfg_path_env).expanduser()] if cfg_path_env else [DEFAULT_CONFIG_PATH, DEFAULT_LOCAL_CONFIG_PATH]
+    if not cfg_path_env:
+        cfg_paths = [DEFAULT_CONFIG_PATH, DEFAULT_LOCAL_CONFIG_PATH]
+    else:
+        env_path = Path(cfg_path_env).expanduser()
+        # Keep standard layered behavior when env points at the default/local UI config.
+        if _path_matches(env_path, DEFAULT_CONFIG_PATH) or _path_matches(env_path, DEFAULT_LOCAL_CONFIG_PATH):
+            cfg_paths = [DEFAULT_CONFIG_PATH, DEFAULT_LOCAL_CONFIG_PATH]
+        else:
+            cfg_paths = [env_path]
 
     merged = default
     for path in cfg_paths:
