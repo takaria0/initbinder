@@ -389,24 +389,6 @@ import numpy as np
 from collections import defaultdict
 
 from pathlib import Path
-from jsonschema import validate
-
-# --- BioPython/OpenMM Imports (for PDB parsing and manipulation) ---
-from Bio.PDB import (
-    PDBParser, PDBIO, Select, MMCIFParser, NeighborSearch,
-    Superimposer
-)
-from Bio.PDB.Polypeptide import three_to_index, index_to_one
-from pdbfixer import PDBFixer
-from simtk.openmm.app import PDBFile
-import freesasa
-
-# --- Optional LLM (comment out if not using) ---
-USE_LLM = True
-if USE_LLM:
-    from cfg.env import GOOGLE_API_KEY, MODEL
-    import google.generativeai as genai  # pip install google-generativeai
-    genai.configure(api_key=GOOGLE_API_KEY)
 
 from prep_target import prep_target
 from init_target import init_target

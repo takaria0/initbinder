@@ -12,7 +12,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "cfg" / "webapp.yaml"
-REQUIRED_MODULES = ("fastapi", "uvicorn", "yaml", "pandas", "numpy", "matplotlib", "requests", "Bio")
+REQUIRED_MODULES = (
+    "fastapi",
+    "uvicorn",
+    "yaml",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "requests",
+    "Bio",
+    "jsonschema",
+    "bs4",
+    "biotite",
+    "playwright",
+    "openai",
+)
 
 
 def _ok(msg: str) -> None:

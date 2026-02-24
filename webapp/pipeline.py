@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -58,7 +59,7 @@ def run_manage_rfa(subcommand: str, args: List[str], *, log: Optional[LogCallbac
     if not script.exists():
         raise FileNotFoundError(f"manage_rfa.py not found at {script}")
 
-    cmd = ["python", str(script), subcommand]
+    cmd = [sys.executable, str(script), subcommand]
     cmd.extend(args)
 
     # Ensure PYTHONPATH includes project root so modules resolve
