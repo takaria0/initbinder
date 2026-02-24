@@ -66,6 +66,7 @@ from .models import (
     BulkUiBoltzgenConfig,
     BulkUiClusterConfig,
     BulkUiInputConfig,
+    BulkUiLlmConfig,
     DesignEngineFieldInfo,
     DesignEngineInfo,
     DesignEngineListResponse,
@@ -229,6 +230,9 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
         input=BulkUiInputConfig(
             default_input_path=default_input_path,
             auto_load_default_input=bool(bulk_cfg.auto_load_default_input),
+        ),
+        llm=BulkUiLlmConfig(
+            openai_api_key=bulk_cfg.openai_api_key,
         ),
     )
 
@@ -1153,6 +1157,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
         data["bulk"] = bulk_block
     bulk_block["default_input_path"] = _normalize_optional_text(payload.input.default_input_path)
     bulk_block["auto_load_default_input"] = bool(payload.input.auto_load_default_input)
+    bulk_block["openai_api_key"] = _normalize_optional_text(payload.llm.openai_api_key)
 
     _write_local_config_mapping(local_path, data)
 

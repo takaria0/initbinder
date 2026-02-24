@@ -663,6 +663,39 @@ def _extract_yaml_block(text: str) -> Optional[str]:
         return None
     return m.group(1)
 
+
+def _normalize_api_key(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_placeholder_openai_key(value: str) -> bool:
+    normalized = value.strip().upper()
+    if not normalized:
+        return True
+    if normalized in {
+        "YOUR_OPENAI_KEY",
+        "YOUR_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "YOUR_KEY",
+        "CHANGE_ME",
+        "CHANGEME",
+    }:
+        return True
+    return normalized.startswith("YOUR_OPENAI") or normalized.startswith("YOUR_")
+
+
+def _resolve_openai_api_key(openai_key: Optional[str]) -> Optional[str]:
+    env_key = _normalize_api_key(os.getenv("OPENAI_API_KEY"))
+    cfg_key = _normalize_api_key(openai_key)
+    for candidate in (env_key, cfg_key):
+        if candidate and not _is_placeholder_openai_key(candidate):
+            return candidate
+    return None
+
+
 def _call_llm_provider_once(
     *,
     provider: str,
@@ -676,7 +709,7 @@ def _call_llm_provider_once(
     provider = (provider or "").lower().strip()
 
     if provider == "openai":
-        openai_api_key = openai_key or os.getenv("OPENAI_API_KEY")
+        openai_api_key = _resolve_openai_api_key(openai_key)
         if not openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is required for LLM_PROVIDER=openai")
 

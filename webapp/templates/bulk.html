@@ -58,7 +58,7 @@
               <p class="help-text" style="margin-top: 0;">Paste your CSV/TSV target list here. If you want a ready-to-use starting file, use <code>targets_catalog/acrobio_plus_sino_biotin_merged.tsv</code>. The preview updates automatically after edits, and large files may take a few seconds.</p>
               <p class="help-text" style="margin-top: 8px;">Recommended columns are <code>chosen_pdb</code> (or <code>pdb_id</code>) and <code>antigen_url</code>. You can also include <code>vendor_accession</code> and <code>vendor_range</code> for better target initialization. Target-generation style TSVs are also supported.</p>
               <p class="help-text" style="margin-top: 8px;">Need a refreshed merged catalog? Run the scraper/merge scripts in <code>targets_catalog/webscraper/</code>.</p>
-              <p class="help-text" style="margin-top: 8px;"><strong>LLM features:</strong> actions such as <code>Select epitopes (LLM)</code> require API keys in <code>cfg/env.py</code> (see <code>cfg/env.sample.py</code>).</p>
+              <p class="help-text" style="margin-top: 8px;"><strong>LLM features:</strong> actions such as <code>Select epitopes (LLM)</code> require an OpenAI API key. Set it in <code>Config</code> -> <code>LLM</code> (saved to <code>cfg/webapp.local.yaml</code>).</p>
               <div class="form-row">
                 <label>CSV / TSV rows
                   <textarea id="bulk-csv-input" rows="6" placeholder="rank	selection	uniprot	gene	...&#10;1	biotin	Q15116	PDCD1	..."></textarea>
@@ -1204,6 +1204,16 @@ top_exposed_residues:
                 <input type="number" id="bulk-settings-boltz-designs" min="1" max="50000" placeholder="100">
               </label>
             </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>LLM</h4>
+            <div class="settings-grid">
+              <label>OpenAI API key
+                <input type="password" id="bulk-settings-openai-key" placeholder="sk-...">
+              </label>
+            </div>
+            <p class="help-text" style="margin: 8px 0 0;">Saved to local config (<code>cfg/webapp.local.yaml</code>) so editor changes are not required.</p>
           </section>
 
           <section class="settings-section">

@@ -173,6 +173,7 @@ const el = {
   bulkSettingsBoltzMem: document.querySelector('#bulk-settings-boltz-mem'),
   bulkSettingsBoltzTime: document.querySelector('#bulk-settings-boltz-time'),
   bulkSettingsBoltzDesigns: document.querySelector('#bulk-settings-boltz-designs'),
+  bulkSettingsOpenaiKey: document.querySelector('#bulk-settings-openai-key'),
   bulkSettingsInputPath: document.querySelector('#bulk-settings-input-path'),
   bulkSettingsAutoLoad: document.querySelector('#bulk-settings-auto-load'),
   bulkSettingsLoadDefault: document.querySelector('#bulk-settings-load-default'),
@@ -2480,6 +2481,7 @@ function setTextInputValue(inputEl, value) {
 function applyBulkUiSettingsToForm(payload = {}) {
   const cluster = payload.cluster || {};
   const boltzgen = payload.boltzgen || {};
+  const llm = payload.llm || {};
   const input = payload.input || {};
   if (el.bulkSettingsMock) el.bulkSettingsMock.checked = Boolean(cluster.mock);
   setTextInputValue(el.bulkSettingsSshAlias, cluster.ssh_config_alias);
@@ -2495,6 +2497,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsBoltzTime, boltzgen.time_hours);
   setTextInputValue(el.bulkSettingsBoltzDesigns, boltzgen.default_num_designs);
 
+  setTextInputValue(el.bulkSettingsOpenaiKey, llm.openai_api_key);
   setTextInputValue(el.bulkSettingsInputPath, input.default_input_path);
   if (el.bulkSettingsAutoLoad) el.bulkSettingsAutoLoad.checked = Boolean(input.auto_load_default_input);
 
@@ -2530,6 +2533,9 @@ function buildBulkUiSettingsPayload() {
       mem_gb: parseOptionalInteger(el.bulkSettingsBoltzMem?.value, { min: 1, max: 2048 }),
       time_hours: parseOptionalInteger(el.bulkSettingsBoltzTime?.value, { min: 1, max: 240 }),
       default_num_designs: parseOptionalInteger(el.bulkSettingsBoltzDesigns?.value, { min: 1, max: 50000 }),
+    },
+    llm: {
+      openai_api_key: normalizeOptionalText(el.bulkSettingsOpenaiKey?.value),
     },
     input: {
       default_input_path: normalizeOptionalText(el.bulkSettingsInputPath?.value),

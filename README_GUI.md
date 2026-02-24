@@ -5,11 +5,12 @@ This guide is for first-time users of the Bulk page. It walks from input paste t
 ## Start Here (30 seconds)
 
 Use this page to process many targets at once: detect targets, prepare epitopes, generate BoltzGen/RFA run commands, then review diversity and binders.
+When started with `scripts/run_bulk_local.sh`, the UI defaults to port `8000` and automatically shifts to the next free local port if needed.
 
 Before starting, have these ready:
 - A CSV/TSV table of targets.
 - Working cluster settings (SSH alias, roots, conda command).
-- API keys in `cfg/env.py` if you will use `Select epitopes (LLM)` actions. See `cfg/env.sample.py`.
+- OpenAI API key if you will use `Select epitopes (LLM)` actions.
 
 Page map:
 - `Input CSV / TSV` -> `Detected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
@@ -22,6 +23,7 @@ Action:
 - Click `Config`.
 - In `Cluster base`, verify `SSH alias`, `Remote root`, `Target root`, and `Cluster conda (BoltzGen installed)`.
 - In `BoltzGen defaults`, verify partition/account/GPU/CPU/memory/time and default designs.
+- In `LLM`, set `OpenAI API key` if you plan to use LLM epitope selection.
 - Optional: in `Input TSV defaults`, set `Default input file path` and enable auto-load.
 - Click `Save settings`.
 
@@ -176,7 +178,7 @@ PyMOL caveat:
 
 `Select epitopes (LLM) fails`
 - Cause: missing/invalid API keys.
-- Fix: configure keys in `cfg/env.py` (template in `cfg/env.sample.py`), then retry.
+- Fix: set `OpenAI API key` in `Config` -> `LLM`, save, then retry.
 
 ## Quick Happy Path Checklist
 

@@ -67,6 +67,11 @@ def run_manage_rfa(subcommand: str, args: List[str], *, log: Optional[LogCallbac
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(cfg.paths.project_root), existing_path]))
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("INITBINDER_ROOT", str(cwd))
+    openai_api_key = str(getattr(cfg.bulk, "openai_api_key", "") or "").strip()
+    if openai_api_key:
+        env["OPENAI_API_KEY"] = openai_api_key
+        env["USE_LLM"] = "true"
+        env["LLM_PROVIDER"] = "openai"
 
     _run_command(cmd, cwd=cwd, env=env, log=log)
 

@@ -426,17 +426,23 @@ class BulkUiInputConfig(BaseModel):
     auto_load_default_input: bool = False
 
 
+class BulkUiLlmConfig(BaseModel):
+    openai_api_key: Optional[str] = None
+
+
 class BulkUiConfigResponse(BaseModel):
     local_config_path: str
     cluster: BulkUiClusterConfig = Field(default_factory=BulkUiClusterConfig)
     boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
     input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
+    llm: BulkUiLlmConfig = Field(default_factory=BulkUiLlmConfig)
 
 
 class BulkUiConfigUpdateRequest(BaseModel):
     cluster: BulkUiClusterConfig = Field(default_factory=BulkUiClusterConfig)
     boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
     input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
+    llm: BulkUiLlmConfig = Field(default_factory=BulkUiLlmConfig)
 
 
 class BulkDefaultInputResponse(BaseModel):

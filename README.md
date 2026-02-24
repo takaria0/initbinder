@@ -4,10 +4,10 @@ InitBinder Bulk (Local Laptop Mode)
 This repository includes the InitBinder web UI. For public GitHub usage, the recommended default is local laptop mode focused on:
 
 - `http://127.0.0.1:8000/`
+- If `8000` is already in use, `run_bulk_local.sh` automatically selects the next free local port
 - Copy/paste command generation (no live cluster probing required)
 - Optional advanced cluster execution handled by the user outside the app
-- Legacy dashboard remains available at `http://127.0.0.1:8000/dashboard`
-
+å
 
 Quickstart (macOS / Ubuntu)
 ---------------------------
@@ -34,7 +34,7 @@ Requires Python 3.10+.
 
 4) Open:
 
-- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:<selected_port>/` (defaults to `8000`, auto-shifts if occupied)
 
 Catalog Input Preparation (Public Workflow)
 -------------------------------------------
@@ -45,7 +45,7 @@ Recommended quick path (default for public users):
 
 - `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`
 
-2) Open `http://127.0.0.1:8000/` and paste TSV rows into **Input CSV / TSV**.
+2) Open `http://127.0.0.1:<selected_port>/` and paste TSV rows into **Input CSV / TSV**.
 
 Optional full regeneration path (AcroBio + Sino + merge):
 
@@ -77,15 +77,17 @@ LLM API Requirements
 
 Some features require LLM APIs (for example, **Select epitopes (LLM)** in Bulk).
 
-1) Create local config:
+1) Create local config for defaults (optional if you only use the UI modal key field):
 
 ```bash
 cp cfg/env.sample.py cfg/env.py
 ```
 
-2) Set valid API keys in `cfg/env.py` (OpenAI/Groq/Google as needed) and enable LLM flags for your workflow.
+2) Preferred for Bulk UI: open `Config` in the Bulk page and set `OpenAI API key` directly. This persists to `cfg/webapp.local.yaml`.
 
-3) Non-LLM actions (bulk preview, command generation, and most local/offline UI interactions) can still run without LLM keys.
+3) Optional/manual: set API keys in `cfg/env.py` (OpenAI/Groq/Google as needed) and enable LLM flags for non-UI workflows.
+
+4) Non-LLM actions (bulk preview, command generation, and most local/offline UI interactions) can still run without LLM keys.
 
 
 Local-Safe Defaults
@@ -138,5 +140,5 @@ Notes
 -----
 
 - Bulk UI can run without PyMOL and without remote cluster access.
-- LLM features require valid API keys. Copy `cfg/env.sample.py` to `cfg/env.py` and set keys.
+- LLM features require valid API keys. For Bulk UI, set OpenAI key in `Config` -> `LLM` (saved in `cfg/webapp.local.yaml`); `cfg/env.py` remains available for non-UI workflows.
 - Keep secrets and machine-specific overrides out of git (`cfg/env.py`, `cfg/webapp.local.yaml` are already ignored).
