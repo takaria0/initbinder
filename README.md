@@ -3,9 +3,10 @@ InitBinder Bulk (Local Laptop Mode)
 
 This repository includes the InitBinder web UI. For public GitHub usage, the recommended default is local laptop mode focused on:
 
-- `http://127.0.0.1:8000/bulk`
+- `http://127.0.0.1:8000/`
 - Copy/paste command generation (no live cluster probing required)
 - Optional advanced cluster execution handled by the user outside the app
+- Legacy dashboard remains available at `http://127.0.0.1:8000/dashboard`
 
 
 Quickstart (macOS / Ubuntu)
@@ -31,7 +32,7 @@ Quickstart (macOS / Ubuntu)
 
 4) Open:
 
-- `http://127.0.0.1:8000/bulk`
+- `http://127.0.0.1:8000/`
 
 Catalog Input Preparation (Public Workflow)
 -------------------------------------------
@@ -42,7 +43,7 @@ Recommended quick path (default for public users):
 
 - `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`
 
-2) Open `http://127.0.0.1:8000/bulk` and paste TSV rows into **Input CSV / TSV**.
+2) Open `http://127.0.0.1:8000/` and paste TSV rows into **Input CSV / TSV**.
 
 Optional full regeneration path (AcroBio + Sino + merge):
 

@@ -2061,6 +2061,11 @@ async def api_assess_run(pdb_id: str, payload: AssessmentRunRequest) -> Assessme
 
 @app.get("/")
 async def home() -> FileResponse:
+    return FileResponse(_template_path("bulk.html"))
+
+
+@app.get("/dashboard")
+async def dashboard_page() -> FileResponse:
     return FileResponse(_template_path("index.html"))
 
 
