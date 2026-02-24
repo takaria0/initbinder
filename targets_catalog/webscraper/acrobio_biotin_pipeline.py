@@ -4,7 +4,7 @@ Parse ACROBiosystems search results HTML and emit a TSV compatible with
 targets_catalog/webscraper/acrobio_biotinylated_unique.tsv.
 
 Usage examples:
-  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --html "/Users/inagakit/Downloads/biotinylated _ ACROBiosystems.html"
+  python targets_catalog/webscraper/acrobio_biotin_pipeline.py --html "/path/to/downloads/biotinylated _ ACROBiosystems.html"
   python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated"
   python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --page_param page
   python targets_catalog/webscraper/acrobio_biotin_pipeline.py --url "https://www.acrobiosystems.com/search?keywords=biotinylated" --mode playwright --headed

@@ -533,7 +533,7 @@ class RFAntibodyEngine(DesignEngine):
             or cluster.cfg.user
             or os.getenv("INITBINDER_CLUSTER_USER")
             or os.getenv("USER")
-            or "inagakit"
+            or "user"
         )
 
         tracked = [jid for jid in dict.fromkeys(tracked_ids) if jid]

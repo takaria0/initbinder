@@ -4,16 +4,16 @@ from __future__ import annotations
 hotspot_distance.py
 
 Example:
-  python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/scripts/hotspot_distance.py \
-    --pdb /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets/8YI7/designs/boltzgen/epitope_1/final_ranked_designs/final_30_designs/rank02_boltzgen_config_1.cif \
+  python <REPO_ROOT>/scripts/hotspot_distance.py \
+    --pdb <REPO_ROOT>/targets/8YI7/designs/boltzgen/epitope_1/final_ranked_designs/final_30_designs/rank02_boltzgen_config_1.cif \
     --binder-chain B \
     --target-chain A \
     --epitope-residues 33,37,42
     
 EVQLVESGGGLVQPGGSLRLSCAASGLSSSIYSMAWYRQAPGKGRELVAGISSSGRYKSYADSVKGRFTISRDNAKNTLYLQMNSLRPEDTAVYYCAASTSPSVGHTSPESDFDYWGQGTLVTVSS
 
-python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/scripts/hotspot_distance.py \
-  --pdb /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets/8YI7/designs/boltzgen/epitope_1/final_ranked_designs/final_30_designs/rank02_boltzgen_config_1.cif \
+python <REPO_ROOT>/scripts/hotspot_distance.py \
+  --pdb <REPO_ROOT>/targets/8YI7/designs/boltzgen/epitope_1/final_ranked_designs/final_30_designs/rank02_boltzgen_config_1.cif \
   --binder-seq EVQLVESGGGLVQPGGSLRLSCAASGLSSSIYSMAWYRQAPGKGRELVAGISSSGRYKSYADSVKGRFTISRDNAKNTLYLQMNSLRPEDTAVYYCAASTSPSVGHTSPESDFDYWGQGTLVTVSS \
   --target-chain A \
   --epitope-residues 33,37,42

@@ -8,10 +8,10 @@ Example:
     --input2 /path/to/b.tsv \
     --output /path/to/merged.tsv
     
-python3 /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/webscraper/merge_target_catalogs.py \
-  --input2 /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/acrobio_biotinylated_unique_all_sino_biotin.tsv \
-  --input1 /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/sino_biotinylated_unique_new_sino_biotin_plus_top_200_biotin.tsv \
-  --output /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/acrobio_plus_sino_biotin_merged.tsv \
+python3 <REPO_ROOT>/targets_catalog/webscraper/merge_target_catalogs.py \
+  --input2 <REPO_ROOT>/targets_catalog/acrobio_biotinylated_unique_all_sino_biotin.tsv \
+  --input1 <REPO_ROOT>/targets_catalog/sino_biotinylated_unique_new_sino_biotin_plus_top_200_biotin.tsv \
+  --output <REPO_ROOT>/targets_catalog/acrobio_plus_sino_biotin_merged.tsv \
     --key uniprot
 """
 

@@ -12,6 +12,8 @@ This repository includes the InitBinder web UI. For public GitHub usage, the rec
 Quickstart (macOS / Ubuntu)
 ---------------------------
 
+Requires Python 3.10+.
+
 1) Bootstrap a local environment:
 
 ```bash
@@ -21,7 +23,7 @@ Quickstart (macOS / Ubuntu)
 2) Optional preflight check:
 
 ```bash
-./scripts/doctor_bulk_local.py
+./.venv/bin/python ./scripts/doctor_bulk_local.py
 ```
 
 3) Run the server:
@@ -68,6 +70,7 @@ Notes on inputs/outputs:
 
 - Inputs for generation are in `targets_catalog/webscraper/` (vendor scrape artifacts).
 - Main merged output for bulk usage is `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`.
+- If you publish or redistribute scraped catalog data, verify vendor terms and applicable data-use policies first.
 
 LLM API Requirements
 --------------------

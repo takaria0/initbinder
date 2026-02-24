@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-conda activate takashi
+conda activate <env_name>
 
 Testing right now: 8AX9
 RBD: 6M17
@@ -15,7 +15,7 @@ Arms = Epitope@Variant (e.g., "RBM Core@A"). Results live in:
 1) Batch-process a TSV file from target-generation to prepare multiple targets at once.
 # This will run init-target, decide-scope, and prep-target for each PDB in the TSV.
 # It also creates a master PyMOL bundle to visualize all hotspots.
-python manage_rfa.py batch-prep --tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_100_proteins_we_should_targe_20250913_044100_biotin.tsv
+python manage_rfa.py batch-prep --tsv <REPO_ROOT>/targets_catalog/top_100_proteins_we_should_targe_20250913_044100_biotin.tsv
 
 0) (Optional) Discover targets + prefill target.yaml (run locally; uses Chromium)
 python manage_rfa.py target-generation \
@@ -93,15 +93,15 @@ python manage_rfa.py pipeline 6M17 \
   --run_tag 20250929_9k_runs
 
 python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250929_9k_runs --include_keyword "20250929_9k_runs"
-/pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv
+/path/to/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv
 # plot
 python plot_rankings.py \
-    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
+    --rankings_tsv /path/to/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
     --out_dir ./plots/6M17_20250929_9k_runs \
     --img_format pdf --dpi 300 \
     --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
     --topN 50 --max_categories 12
-python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
+python export_files.py --rankings_tsv /path/to/initbinder/targets/6M17/designs/_assessments/20250929_9k_runs/af3_rankings.tsv \
     --top_n 48 \
     --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA \
     --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
@@ -147,7 +147,7 @@ python manage_rfa.py pipeline 7FJD \
 python manage_rfa.py assess-rfa-all 7FJD --binder_chain_id H --run_label 20250926 --include_keyword "20250926"
 # plot
 python plot_rankings.py \
-    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/7FJD/designs/_assessments/20250926/af3_rankings.tsv \
+    --rankings_tsv /path/to/initbinder/targets/7FJD/designs/_assessments/20250926/af3_rankings.tsv \
     --out_dir ./plots/7FJD_20250926 \
     --img_format pdf --dpi 300 \
     --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
@@ -208,15 +208,15 @@ python manage_rfa.py assess-rfa-all 8SK7 --binder_chain_id H --run_label 2025090
 python manage_rfa.py assess-rfa-all 8ES8 --binder_chain_id H --run_label 20250910 --include_keyword "20250910"
 python manage_rfa.py assess-rfa-all 6M17 --binder_chain_id H --run_label 20250910 --include_keyword "design"
 
-/pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv
+/path/to/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv
 python plot_rankings.py \
-    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --rankings_tsv /path/to/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
     --out_dir ./results/8ES8_20250910 \
     --img_format pdf --dpi 300 \
     --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
     --topN 50 --max_categories 12
  
-python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+python export_files.py --rankings_tsv /path/to/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
     --top_n 48 \
     --prefix_raw TTCTATCGCTGCTAAGGAAGAAGGTGTTCAATTGGACAAGAGAGAAGCTGGGTCTCAACGCA
     --suffix_raw gGTTCagagaccCaaggacaatagctcgacgattgaaggtagatacccatacg \
@@ -224,13 +224,13 @@ python export_files.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/
     --gc_target 0.45 --gc_window 100   
 
 python plot_rankings.py \
-    --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+    --rankings_tsv /path/to/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
     --out_dir ./results/8ES8_20250910 \
     --img_format png --dpi 150 \
     --iptm_thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 \
     --topN 50 --max_categories 12
 python decide_go_no_go.py \
-  --rankings_tsv  /pub/inagakit/Projects/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
+  --rankings_tsv  /path/to/initbinder/targets/8ES8/designs/_assessments/20250910/af3_rankings.tsv \
   --out_dir ./out_passthrough \
   --passthrough --top_n 32 \
   --idt_template_xlsx "plate-upload-template (1).xlsx" \
@@ -243,16 +243,16 @@ python decide_go_no_go.py \
   
 
 python scripts/ipsae.py \
-    /dfs6/pub/inagakit/Projects/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_confidences.json \
-    /dfs6/pub/inagakit/Projects/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_model.cif 10 10  
+    /path/to/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_confidences.json \
+    /path/to/initbinder/targets/6M17/designs/RBM_Flank_and_Crest/hs-C/rfa_af3/design_1_59_dldesign_0/design_1_59_dldesign_0/design_1_59_dldesign_0_model.cif 10 10  
 
-/dfs6/pub/inagakit/Projects/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_model.cif
+/path/to/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_model.cif
 
 python scripts/ipsae.py \
-    /dfs6/pub/inagakit/Projects/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_confidences.json \
-    /dfs6/pub/inagakit/Projects/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_model.cif 10 10
+    /path/to/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_confidences.json \
+    /path/to/initbinder/targets/8SK7/designs/Conserved_Stem_Helix_Site/hs-C/rfa_af3/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0/20250904_900_runs_design_1_16_dldesign_0_model.cif 10 10
 
-python assess_rfa_design_hotspot.py --rankings_tsv /pub/inagakit/Projects/initbinder/targets/8SK7/designs/_assessments/v2/af3_rankings.tsv --out /pub/inagakit/Projects/initbinder/targets/8SK7/designs/_assessments/v2/af3_rankings_contact.tsv --dcut 25.0
+python assess_rfa_design_hotspot.py --rankings_tsv /path/to/initbinder/targets/8SK7/designs/_assessments/v2/af3_rankings.tsv --out /path/to/initbinder/targets/8SK7/designs/_assessments/v2/af3_rankings_contact.tsv --dcut 25.0
 
 python decide_go_no_go_hotspot.py \
     --rankings_tsv targets/8SK7/designs/_assessments/v4/af3_rankings.tsv \
@@ -280,7 +280,7 @@ NR==1{
   gsub(/^[ \t]+|[ \t]+$/,"",v)
   if(v ~ /^[A-Za-z0-9]{4}$/) print toupper(v)
 }
-' /pub/inagakit/Projects/initbinder/targets_catalog/checkpoint_blockade.tsv \
+' /path/to/initbinder/targets_catalog/checkpoint_blockade.tsv \
 | sort -u \
 | while read P; do
   echo "=== $P ==="
@@ -371,8 +371,8 @@ Notes:
 - Assessment TSV includes 'epitope', 'hotspot_variant', and 'arm' columns for follow-ups.
 =========================================================================================
 
-zip -r /pub/inagakit/Projects/initbinder/targets/6M17_snapshot.zip 6M17
-tar -czf /pub/inagakit/Projects/initbinder/targets/6M17_snapshot.tar.gz -C ~/.zfs/snapshot/zfs-auto-snap_daily-2025-08-24-1027/Projects/initbinder/targets 6M17
+zip -r /path/to/initbinder/targets/6M17_snapshot.zip 6M17
+tar -czf /path/to/initbinder/targets/6M17_snapshot.tar.gz -C ~/.zfs/snapshot/zfs-auto-snap_daily-2025-08-24-1027/Projects/initbinder/targets 6M17
 
 """
 

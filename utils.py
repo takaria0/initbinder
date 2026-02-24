@@ -48,7 +48,7 @@ UNIPROT_API = "https://rest.uniprot.org/uniprotkb/{accession}"
 # Absolute path to your RFAntibody singularity image file
 SINGULARITY_IMAGE_PATH = os.environ.get(
     "INITBINDER_SINGULARITY_IMAGE",
-    "/pub/inagakit/rfa/rfantibody.sif",
+    "/path/to/rfantibody.sif",
 )
 
 # --- RFAntibody & Framework Paths ---
@@ -56,7 +56,7 @@ SINGULARITY_IMAGE_PATH = os.environ.get(
 # It will be bound to /home inside the container.
 RFANTIBODY_REPO_PATH = os.environ.get(
     "INITBINDER_RFANTIBODY_REPO",
-    "/data/homezvol1/inagakit/Library/RFantibody",
+    "/path/to/RFantibody",
 )
 
 # Default Nanobody Framework. Ensure this is an HLT-formatted PDB file.
@@ -64,7 +64,7 @@ RFANTIBODY_REPO_PATH = os.environ.get(
 DEFAULT_NANOBODY_FRAMEWORK = os.path.join(
     RFANTIBODY_REPO_PATH, "scripts/examples/example_inputs/h-NbBCII10.pdb"
 )
-# /data/homezvol1/inagakit/Library/RFantibody/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
+# /path/to/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
 # --- SLURM Configuration ---
 # Default SLURM partition/queue for GPU jobs
 SLURM_GPU_PARTITION = "gpu"
@@ -82,21 +82,21 @@ SLURM_CPU_ACCOUNT = os.environ.get("SLURM_CPU_ACCOUNT", 'ccl_lab')
 # Absolute path to your AlphaFold 3 singularity image
 AF3_SINGULARITY_IMAGE = os.environ.get(
     "INITBINDER_AF3_SINGULARITY_IMAGE",
-    "/pub/inagakit/af3/alphafold3_40gb.sif",
+    "/path/to/alphafold3.sif",
 )
 # Path to the directory containing AF3 model parameters
 AF3_MODEL_PARAMS_DIR = os.environ.get(
     "INITBINDER_AF3_MODEL_PARAMS_DIR",
-    "/pub/inagakit/af3/model_params",
+    "/path/to/af3/model_params",
 )
 # Path to the directory containing AF3 databases (on SSD if possible)
 AF3_DATABASES_DIR = os.environ.get(
     "INITBINDER_AF3_DATABASES_DIR",
-    "/pub/inagakit/af3/databases",
+    "/path/to/af3/databases",
 )
 AF3_RUN_SCRIPT = os.environ.get(
     "INITBINDER_AF3_RUN_SCRIPT",
-    "/pub/inagakit/Library/alphafold3/run_alphafold.py",
+    "/path/to/alphafold3/run_alphafold.py",
 )
 
 

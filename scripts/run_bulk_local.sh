@@ -25,7 +25,7 @@ RELOAD="${INITBINDER_RELOAD:-true}"
 
 echo "Using config: ${INITBINDER_UI_CONFIG}"
 echo "Remote access enabled: ${INITBINDER_ALLOW_REMOTE}"
-echo "Starting InitBinder on http://127.0.0.1:${PORT}/bulk"
+echo "Starting InitBinder on http://127.0.0.1:${PORT}/"
 
 if [[ "${RELOAD}" == "true" ]]; then
   exec "${VENV_PYTHON}" -m uvicorn webapp.main:app --host 127.0.0.1 --port "${PORT}" --reload

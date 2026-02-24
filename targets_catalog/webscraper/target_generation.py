@@ -37,7 +37,7 @@ Usage (standalone):
 
 grow an existing catalog by excluding prior picks (avoid duplicates)
 Example: continue expanding the list that already exists here:
-/Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv
+<REPO_ROOT>/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv
 Use the same prefix to append to the same files, and pass the existing TSV to --avoid_tsv.
 (The prefix here is everything before the trailing _all.tsv/_biotin.tsv suffix.)
 
@@ -46,20 +46,20 @@ python target_generation.py \
     --instruction "top 200 targets we should target for antibody therapeutics with high unmet medical need (human proteins, viral targets, bacterial targets, etc, as long as they are relevant and can purchase recombinant proteins for experimental characterization)" \
     --max_targets 200 --species human --prefer_tags biotin \
     --out_prefix top_200_proteins_we_should_targe_20250915_142053 \
-    --avoid_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
+    --avoid_tsv <REPO_ROOT>/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
     --no_browser_popup
     
 
 Tip: You can also include the biotin TSV in --avoid_tsv if desired:
     ... --avoid_tsv \
-    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
-    /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_biotin.tsv
+    <REPO_ROOT>/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_all.tsv \
+    <REPO_ROOT>/targets_catalog/top_200_proteins_we_should_targe_20250915_142053_biotin.tsv
     
     
     
 # latest run 2026-01-17:
-python /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/target_generation.py \
-  --antigen_tsv /Users/inagakit/Documents/UCIrvine/ChangLiu/Scripts/initbinder/Webscraper/sino_biotinylated_unique.tsv \
+python <REPO_ROOT>/target_generation.py \
+  --antigen_tsv <REPO_ROOT>/Webscraper/sino_biotinylated_unique.tsv \
   --max_targets 1000 \
   --species human \
   --prefer_tags biotin \
