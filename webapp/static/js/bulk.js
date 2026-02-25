@@ -161,7 +161,6 @@ const el = {
   bulkReadmeBody: document.querySelector('#bulk-readme-body'),
   bulkReadmeClose: document.querySelector('#bulk-readme-close'),
   bulkSettingsMeta: document.querySelector('#bulk-settings-meta'),
-  bulkSettingsMock: document.querySelector('#bulk-settings-mock'),
   bulkSettingsSshAlias: document.querySelector('#bulk-settings-ssh-alias'),
   bulkSettingsRemoteRoot: document.querySelector('#bulk-settings-remote-root'),
   bulkSettingsTargetRoot: document.querySelector('#bulk-settings-target-root'),
@@ -2502,7 +2501,6 @@ function applyBulkUiSettingsToForm(payload = {}) {
   const boltzgen = payload.boltzgen || {};
   const llm = payload.llm || {};
   const input = payload.input || {};
-  if (el.bulkSettingsMock) el.bulkSettingsMock.checked = Boolean(cluster.mock);
   setTextInputValue(el.bulkSettingsSshAlias, cluster.ssh_config_alias);
   setTextInputValue(el.bulkSettingsRemoteRoot, cluster.remote_root);
   setTextInputValue(el.bulkSettingsTargetRoot, cluster.target_root);
@@ -2539,9 +2537,10 @@ function applyBulkUiSettingsToForm(payload = {}) {
 }
 
 function buildBulkUiSettingsPayload() {
+  const existingMock = Boolean(state.uiSettings?.cluster?.mock);
   return {
     cluster: {
-      mock: Boolean(el.bulkSettingsMock?.checked),
+      mock: existingMock,
       ssh_config_alias: normalizeOptionalText(el.bulkSettingsSshAlias?.value),
       remote_root: normalizeOptionalText(el.bulkSettingsRemoteRoot?.value),
       target_root: normalizeOptionalText(el.bulkSettingsTargetRoot?.value),
