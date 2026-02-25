@@ -9,6 +9,7 @@ source "${VENV_DIR}/bin/activate"
 
 python -m pip install --upgrade pip
 python -m pip install -r "${ROOT_DIR}/requirements-webapp.txt"
+python -m playwright install chromium
 
 echo "Bootstrap complete."
 echo "Next: ${ROOT_DIR}/scripts/run_bulk_local.sh"

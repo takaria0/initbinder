@@ -35,7 +35,26 @@ from utils import (
     UNIPROT_IDMAPPING_STATUS_API,
     UNIPROT_API,
 )
-from cfg.env import GOOGLE_API_KEY, MODEL, USE_LLM, GROQ_API_KEY, OPENAI_API_KEY
+
+
+def _normalize_optional_env(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = _normalize_optional_env(os.getenv(name))
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+MODEL = _normalize_optional_env(os.getenv("MODEL")) or _normalize_optional_env(os.getenv("OPENAI_MODEL")) or DEFAULT_OPENAI_MODEL
+OPENAI_API_KEY = _normalize_optional_env(os.getenv("OPENAI_API_KEY"))
+USE_LLM = _parse_bool_env("USE_LLM", default=bool(OPENAI_API_KEY))
 
 # =============================================================================
 # Helpers for entry.json (RCSB) and chain mapping
@@ -665,10 +684,7 @@ def _extract_yaml_block(text: str) -> Optional[str]:
 
 
 def _normalize_api_key(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+    return _normalize_optional_env(value)
 
 
 def _is_placeholder_openai_key(value: str) -> bool:
@@ -698,94 +714,41 @@ def _resolve_openai_api_key(openai_key: Optional[str]) -> Optional[str]:
 
 def _call_llm_provider_once(
     *,
-    provider: str,
     model: str,
     prompt: str,
     max_new_tokens: int,
-    groq_key: Optional[str],
     openai_key: Optional[str],
 ) -> str:
-    """One-shot provider call (no retries/validation)."""
-    provider = (provider or "").lower().strip()
+    """One-shot OpenAI call (no retries/validation)."""
+    openai_api_key = _resolve_openai_api_key(openai_key)
+    if not openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is required.")
 
-    if provider == "openai":
-        openai_api_key = _resolve_openai_api_key(openai_key)
-        if not openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for LLM_PROVIDER=openai")
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai package is required.") from exc
 
-        try:
-            from openai import OpenAI
-        except Exception as exc:
-            raise RuntimeError("openai package is required for LLM_PROVIDER=openai") from exc
-
-        client = OpenAI(api_key=openai_api_key)
-        completion = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            max_completion_tokens=max_new_tokens,
-            messages=[
-                {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        draft = (completion.choices[0].message.content or "").strip()
-        return draft.strip()
-
-    if provider == "groq":
-        groq_api_key = groq_key or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-        if not groq_api_key:
-            raise RuntimeError("GROQ_API_KEY is required for LLM_PROVIDER=groq")
-
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "temperature": 0.1,
-                "max_tokens": max_new_tokens,
-                "messages": [
-                    {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=120,
-        )
-        if resp.status_code == 429:
-            raise requests.exceptions.HTTPError("429 Too Many Requests", response=resp)
-        resp.raise_for_status()
-        data = resp.json()
-        draft = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
-        return draft.strip()
-
-    if provider == "gemini":
-        import google.generativeai as genai
-
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model_client = genai.GenerativeModel(
-            model_name=model,
-            system_instruction="You are a protein design assistant. Output exactly one YAML block.",
-        )
-        response = model_client.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.1),
-        )
-        return (response.text or "").strip()
-
-    # Preserve original behavior: unsupported providers are explicit errors.
-    raise RuntimeError(f"Unsupported LLM_PROVIDER '{provider}'. Use 'openai', 'groq', or 'gemini'.")
+    client = OpenAI(api_key=openai_api_key)
+    completion = client.chat.completions.create(
+        model=model,
+        temperature=0.1,
+        max_completion_tokens=max_new_tokens,
+        messages=[
+            {"role": "system", "content": "You are a protein design assistant. Output exactly one YAML block."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    draft = (completion.choices[0].message.content or "").strip()
+    return draft.strip()
 
 def _run_scope_llm_with_retries(
     compose_prompt: Callable[[str], str],
     *,
     tdir: Path,
     model: str,
-    provider: str,
     max_new_tokens: int,
     max_llm_retries: int,
-    groq_key: Optional[str],
     openai_key: Optional[str],
     schema: dict,
     expected_epitopes: Optional[int],
@@ -803,7 +766,7 @@ def _run_scope_llm_with_retries(
     draft = ""
     attempts_used = 0
 
-    print(f"[info] LLM provider: {provider} · model: {model}")
+    print(f"[info] LLM provider: openai · model: {model}")
 
     for attempt in range(max(0, max_llm_retries) + 1):
         attempts_used = attempt + 1
@@ -825,11 +788,9 @@ def _run_scope_llm_with_retries(
         # ---- API call with backoff on failure ----
         try:
             draft = _call_llm_provider_once(
-                provider=provider,
                 model=model,
                 prompt=final_prompt,
                 max_new_tokens=max_new_tokens,
-                groq_key=groq_key,
                 openai_key=openai_key,
             )
         except Exception as exc:
@@ -951,13 +912,10 @@ def llm_scope(
         return
 
     try:
-        import cfg.env as _env
-        _llm_provider = str(getattr(_env, "LLM_PROVIDER", "gpt-oss-local")).lower()
-        _max_new = int(getattr(_env, "MAX_NEW_TOKENS", "8000"))
-        _groq_key = GROQ_API_KEY
-        _openai_key = OPENAI_API_KEY
+        _max_new = int(str(os.getenv("MAX_NEW_TOKENS", "8000")).strip())
     except Exception:
-        _llm_provider, _max_new, _groq_key, _openai_key = "gpt-oss-local", 1024, None, None
+        _max_new = 8000
+    _openai_key = OPENAI_API_KEY
 
     print(f"--- Scoping with LLM for: {pdb_id.upper()} ---")
     tdir = TARGETS_ROOT_LOCAL / pdb_id.upper()
@@ -1049,10 +1007,8 @@ def llm_scope(
         _compose_prompt,
         tdir=tdir,
         model=MODEL,
-        provider=_llm_provider,
         max_new_tokens=_max_new,
         max_llm_retries=max_llm_retries,
-        groq_key=_groq_key,
         openai_key=_openai_key,
         schema=SCHEMA,
         expected_epitopes=expected_epitopes,

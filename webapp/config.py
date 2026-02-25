@@ -13,8 +13,9 @@ import yaml
 
 
 CONFIG_ENV_VAR = "INITBINDER_UI_CONFIG"
-DEFAULT_CONFIG_PATH = Path.cwd() / "cfg" / "webapp.yaml"
-DEFAULT_LOCAL_CONFIG_PATH = Path.cwd() / "cfg" / "webapp.local.yaml"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "cfg" / "webapp.yaml"
+DEFAULT_LOCAL_CONFIG_PATH = PROJECT_ROOT / "cfg" / "webapp.local.yaml"
 
 _ENV_VAR_RE = re.compile(r"\$(\w+)|\${([^}]+)}")
 
@@ -282,6 +283,7 @@ class BulkUiConfig:
     auto_load_default_input: bool = False
     max_default_input_bytes: int = 2_000_000
     openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.default_input_path, str) and self.default_input_path.strip():
@@ -296,6 +298,8 @@ class BulkUiConfig:
             self.max_default_input_bytes = 2_000_000
         if isinstance(self.openai_api_key, str):
             self.openai_api_key = self.openai_api_key.strip() or None
+        if isinstance(self.openai_model, str):
+            self.openai_model = self.openai_model.strip() or None
 
 
 @dataclass(slots=True)

@@ -217,6 +217,7 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
             remote_root=str(cluster_cfg.remote_root) if cluster_cfg.remote_root else None,
             target_root=str(cluster_cfg.target_root) if cluster_cfg.target_root else None,
             conda_activate=cluster_cfg.conda_activate,
+            pymol_path=cluster_cfg.pymol_path,
         ),
         boltzgen=BulkUiBoltzgenConfig(
             partition=boltz_cfg.partition,
@@ -233,6 +234,7 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
         ),
         llm=BulkUiLlmConfig(
             openai_api_key=bulk_cfg.openai_api_key,
+            openai_model=bulk_cfg.openai_model,
         ),
     )
 
@@ -1138,6 +1140,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     cluster_block["remote_root"] = _normalize_optional_text(payload.cluster.remote_root)
     cluster_block["target_root"] = _normalize_optional_text(payload.cluster.target_root)
     cluster_block["conda_activate"] = _normalize_optional_text(payload.cluster.conda_activate)
+    cluster_block["pymol_path"] = _normalize_optional_text(payload.cluster.pymol_path)
 
     boltz_block = cluster_block.get("boltzgen")
     if not isinstance(boltz_block, dict):
@@ -1158,6 +1161,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     bulk_block["default_input_path"] = _normalize_optional_text(payload.input.default_input_path)
     bulk_block["auto_load_default_input"] = bool(payload.input.auto_load_default_input)
     bulk_block["openai_api_key"] = _normalize_optional_text(payload.llm.openai_api_key)
+    bulk_block["openai_model"] = _normalize_optional_text(payload.llm.openai_model)
 
     _write_local_config_mapping(local_path, data)
 

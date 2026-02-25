@@ -166,6 +166,7 @@ const el = {
   bulkSettingsRemoteRoot: document.querySelector('#bulk-settings-remote-root'),
   bulkSettingsTargetRoot: document.querySelector('#bulk-settings-target-root'),
   bulkSettingsConda: document.querySelector('#bulk-settings-conda'),
+  bulkSettingsPymolPath: document.querySelector('#bulk-settings-pymol-path'),
   bulkSettingsBoltzPartition: document.querySelector('#bulk-settings-boltz-partition'),
   bulkSettingsBoltzAccount: document.querySelector('#bulk-settings-boltz-account'),
   bulkSettingsBoltzGpus: document.querySelector('#bulk-settings-boltz-gpus'),
@@ -174,6 +175,7 @@ const el = {
   bulkSettingsBoltzTime: document.querySelector('#bulk-settings-boltz-time'),
   bulkSettingsBoltzDesigns: document.querySelector('#bulk-settings-boltz-designs'),
   bulkSettingsOpenaiKey: document.querySelector('#bulk-settings-openai-key'),
+  bulkSettingsOpenaiModel: document.querySelector('#bulk-settings-openai-model'),
   bulkSettingsInputPath: document.querySelector('#bulk-settings-input-path'),
   bulkSettingsAutoLoad: document.querySelector('#bulk-settings-auto-load'),
   bulkSettingsLoadDefault: document.querySelector('#bulk-settings-load-default'),
@@ -2488,6 +2490,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsRemoteRoot, cluster.remote_root);
   setTextInputValue(el.bulkSettingsTargetRoot, cluster.target_root);
   setTextInputValue(el.bulkSettingsConda, cluster.conda_activate);
+  setTextInputValue(el.bulkSettingsPymolPath, cluster.pymol_path);
 
   setTextInputValue(el.bulkSettingsBoltzPartition, boltzgen.partition);
   setTextInputValue(el.bulkSettingsBoltzAccount, boltzgen.account);
@@ -2498,6 +2501,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsBoltzDesigns, boltzgen.default_num_designs);
 
   setTextInputValue(el.bulkSettingsOpenaiKey, llm.openai_api_key);
+  setTextInputValue(el.bulkSettingsOpenaiModel, llm.openai_model);
   setTextInputValue(el.bulkSettingsInputPath, input.default_input_path);
   if (el.bulkSettingsAutoLoad) el.bulkSettingsAutoLoad.checked = Boolean(input.auto_load_default_input);
 
@@ -2524,6 +2528,7 @@ function buildBulkUiSettingsPayload() {
       remote_root: normalizeOptionalText(el.bulkSettingsRemoteRoot?.value),
       target_root: normalizeOptionalText(el.bulkSettingsTargetRoot?.value),
       conda_activate: normalizeOptionalText(el.bulkSettingsConda?.value),
+      pymol_path: normalizeOptionalText(el.bulkSettingsPymolPath?.value),
     },
     boltzgen: {
       partition: normalizeOptionalText(el.bulkSettingsBoltzPartition?.value),
@@ -2536,6 +2541,7 @@ function buildBulkUiSettingsPayload() {
     },
     llm: {
       openai_api_key: normalizeOptionalText(el.bulkSettingsOpenaiKey?.value),
+      openai_model: normalizeOptionalText(el.bulkSettingsOpenaiModel?.value),
     },
     input: {
       default_input_path: normalizeOptionalText(el.bulkSettingsInputPath?.value),

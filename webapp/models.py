@@ -409,6 +409,7 @@ class BulkUiClusterConfig(BaseModel):
     remote_root: Optional[str] = None
     target_root: Optional[str] = None
     conda_activate: Optional[str] = None
+    pymol_path: Optional[str] = None
 
 
 class BulkUiBoltzgenConfig(BaseModel):
@@ -428,6 +429,7 @@ class BulkUiInputConfig(BaseModel):
 
 class BulkUiLlmConfig(BaseModel):
     openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
 
 
 class BulkUiConfigResponse(BaseModel):

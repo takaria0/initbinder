@@ -87,65 +87,39 @@ import logging
 from pprint import pformat
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
 import requests
 import yaml
+from bs4 import BeautifulSoup
 from sequence_alignment import AlignmentMutation, biotite_local_alignments, extract_subsequence
 from bioseq_fetcher import fetch_sequence
 from utils import ROOT, _ensure_dir, TARGETS_ROOT_LOCAL
 
-# --- LLM Configuration (Google Gemini) ---
-USE_LLM = True
-GEMINI_AVAILABLE = False
+# --- LLM Configuration (OpenAI-only) ---
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+SLEEP_PER_TARGET_SEC = 1
+MAX_BODY_CHARS_PER_PAGE = 10_000
+MAX_BODY_TOTAL_CHARS = 1_000_000
 BROWSER_HEADLESS = False
-try:
-    from cfg.env import GOOGLE_API_KEY
-    import google.generativeai as genai
-    from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
-    genai.configure(api_key=GOOGLE_API_KEY)
-    LLM_PRO_MODEL_NAME = "gemini-2.5-pro"
-    LLM_FLASH_MODEL_NAME = "gemini-2.5-flash-lite"
-    SLEEP_PER_TARGET_SEC = 1
-    MAX_BODY_CHARS_PER_PAGE = 10_000
-    MAX_BODY_TOTAL_CHARS = 1_000_000
-    print(f"[info] Google GenAI configured with models: PRO={LLM_PRO_MODEL_NAME}, FLASH={LLM_FLASH_MODEL_NAME}")
-except Exception as e:
-    print(f"[warn] Google GenAI not configured; LLM-based features will be disabled. Error: {e}")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+OPENAI_API_KEY = str(os.getenv("OPENAI_API_KEY", "") or "").strip() or None
+OPENAI_FLASH_MODEL_NAME = (
+    str(os.getenv("MODEL", "") or "").strip()
+    or str(os.getenv("OPENAI_MODEL", "") or "").strip()
+    or DEFAULT_OPENAI_MODEL
+)
+LLM_PRO_MODEL_NAME = OPENAI_FLASH_MODEL_NAME
+USE_LLM = _env_flag("USE_LLM", default=bool(OPENAI_API_KEY))
+if USE_LLM and not OPENAI_API_KEY:
+    print("[warn] USE_LLM=true but OPENAI_API_KEY is missing; LLM disabled.")
     USE_LLM = False
-    GEMINI_AVAILABLE = False
-    SLEEP_PER_TARGET_SEC = 0
-    MAX_BODY_CHARS_PER_PAGE = 10_000
-    MAX_BODY_TOTAL_CHARS = 1_000_000
-
-# OpenAI configuration (optional)
-try:
-    from cfg.env import OPENAI_API_KEY as _OPENAI_API_KEY, LLM_PROVIDER as _LLM_PROVIDER, MODEL
-except Exception:
-    _OPENAI_API_KEY = None
-    _LLM_PROVIDER = None
-OPENAI_API_KEY = _OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
-LLM_PROVIDER = str((_LLM_PROVIDER or os.getenv("LLM_PROVIDER", ""))).strip().lower()
-OPENAI_FLASH_MODEL_NAME = MODEL
-
-# Groq fallback for LLM Flash (vendor parsing)
-try:
-    from cfg.env import GROQ_API_KEY as _GROQ_API_KEY
-except Exception:
-    _GROQ_API_KEY = None
-GROQ_API_KEY = _GROQ_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-GROQ_FLASH_MODEL_NAME = os.getenv("GROQ_FLASH_MODEL_NAME", "openai/gpt-oss-20b")
-if not USE_LLM and GROQ_API_KEY:
-    # Even if Gemini is unavailable, allow runs when Groq credentials are present.
-    USE_LLM = True
-    GEMINI_AVAILABLE = False
-    print("[info] Google GenAI unavailable; falling back to Groq for vendor LLM parsing.")
-
-if LLM_PROVIDER == "openai":
-    if OPENAI_API_KEY:
-        USE_LLM = True
-    else:
-        USE_LLM = False
-        print("[warn] LLM_PROVIDER=openai but OPENAI_API_KEY is missing; LLM disabled.")
 
 # --- Vendor connectors ---
 try:
@@ -157,9 +131,6 @@ except Exception:
     except Exception as e:
         print(f"[warn] Could not import vendor connectors: {e}")
         SinoBioConnector = None
-
-# --- Playwright for page fetching ---
-from playwright.sync_api import sync_playwright
 
 # -------------------- Paths & Caching --------------------
 CACHE_DIR = ROOT / "cache" / "target_generation"
@@ -390,13 +361,20 @@ def _load_manual_antigen_file(file_path: str, default_species: str) -> List[Manu
     return manual_targets
 
 # -------------------- Body text extraction --------------------
+def _soup_from_html(html: str) -> BeautifulSoup:
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
 def _extract_body_text(html: str, max_chars: int = MAX_BODY_CHARS_PER_PAGE, css_selector: str = "#main_left") -> str:
     return _extract_body_text_multi(html, max_chars=max_chars, selectors=[css_selector])
 
 
 def _extract_body_text_multi(html: str, max_chars: int, selectors: List[str]) -> str:
     sel_used = "body-fallback"
-    soup = BeautifulSoup(html, "lxml")
+    soup = _soup_from_html(html)
     container = None
 
     for css_selector in selectors:
@@ -488,6 +466,11 @@ def fetch_product_html(url: str, timeout: int = 45) -> Tuple[Optional[str], Opti
         log_debug(f"[fetch] cache hit: {url} -> {out_path}")
         return str(out_path), final_url
     try:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:
+            log_info(f"[warn] playwright not available; cannot fetch vendor page ({exc})")
+            return None, None
         with sync_playwright() as pw:
             log_debug(f"[fetch] launching Playwright (headless={BROWSER_HEADLESS})")
             browser = pw.chromium.launch(headless=BROWSER_HEADLESS)
@@ -613,139 +596,10 @@ def _openai_flash_json(prompt: str) -> Optional[dict]:
         log_info(f"[error] OpenAI flash JSON parse failed: {e}")
         return None
 
-def _groq_flash_json(prompt: str) -> Optional[dict]:
-    """Fallback JSON extractor using Groq chat completions."""
-    groq_key = GROQ_API_KEY or os.getenv("GROQ_API_KEY") or os.getenv("GROQ_CLOUD_API_KEY")
-    if not groq_key:
-        return None
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {groq_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": GROQ_FLASH_MODEL_NAME,
-                "temperature": 0.1,
-                "max_tokens": 1024,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an extraction model. Reply with ONLY a valid JSON object matching the requested fields. No markdown, no prose.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=90,
-        )
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                wait_s = int(retry_after) if retry_after else 0
-            except (TypeError, ValueError):
-                wait_s = 0
-            wait_s = wait_s if wait_s > 0 else min(60, 10)
-            log_info(f"[warn] Groq flash fallback hit 429; backing off for {wait_s}s.")
-            time.sleep(wait_s)
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-        if not content:
-            return None
-        return _safe_json_loads(content)
-    except Exception as e:
-        log_info(f"[error] Groq flash JSON parse failed: {e}")
-        return None
-
-
 def _llm_flash_json(prompt: str):
     if not USE_LLM:
         return None
-
-    provider = (LLM_PROVIDER or "").lower().strip()
-    if provider == "openai":
-        return _openai_flash_json(prompt)
-    if provider == "groq":
-        return _groq_flash_json(prompt)
-
-    # Build schema/config when Gemini is available so we keep the stricter JSON contract.
-    SCHEMA_BATCH = None
-    GEN_CONFIG_JSON = None
-    if GEMINI_AVAILABLE:
-        try:
-            from google.generativeai import types as gmtypes
-            SCHEMA_BATCH = gmtypes.Schema(
-                type=gmtypes.Type.ARRAY,
-                items=gmtypes.Schema(
-                    type=gmtypes.Type.OBJECT,
-                    properties={
-                        "index": gmtypes.Schema(type=gmtypes.Type.INTEGER),
-                        "catalog": gmtypes.Schema(type=gmtypes.Type.STRING),
-                        "is_target_match": gmtypes.Schema(type=gmtypes.Type.BOOLEAN),
-                        "is_biotinylated": gmtypes.Schema(type=gmtypes.Type.BOOLEAN),
-                        # 文字列は短く・単一行に
-                        "biotin_evidence": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=120),
-                        "accession": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=40),
-                        "aa_start": gmtypes.Schema(type=gmtypes.Type.INTEGER, nullable=True),
-                        "aa_end": gmtypes.Schema(type=gmtypes.Type.INTEGER, nullable=True),
-                        "molecular_weight_kda": gmtypes.Schema(type=gmtypes.Type.NUMBER, nullable=True),
-                        "product_form": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=60),
-                        "expression_host": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=60),
-                        "tags": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=60),
-                        "buffer": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=120),
-                        "storage_temp": gmtypes.Schema(type=gmtypes.Type.STRING, nullable=True, max_length=40),
-                        "purity_percent": gmtypes.Schema(type=gmtypes.Type.NUMBER, nullable=True),
-                        "endotoxin_eu_per_mg": gmtypes.Schema(type=gmtypes.Type.NUMBER, nullable=True),
-                    },
-                    required=["index", "catalog", "is_target_match", "is_biotinylated"]
-                )
-            )
-            log_debug(f"[LLM FLASH] SCHEMA_BATCH: {SCHEMA_BATCH}")
-        except Exception:
-            SCHEMA_BATCH = None
-            log_info("[warn] Could not import google.generativeai.types; schema validation disabled.")
-
-        try:
-            GEN_CONFIG_JSON = GenerationConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                **({"response_schema": SCHEMA_BATCH} if SCHEMA_BATCH else {})
-            )
-        except Exception as e:
-            GEN_CONFIG_JSON = None
-            log_info(f"[warn] Could not build Gemini generation config: {e}")
-
-    gemini_error: Optional[Exception] = None
-    if GEMINI_AVAILABLE and GEN_CONFIG_JSON:
-        try:
-            model = genai.GenerativeModel(LLM_FLASH_MODEL_NAME)
-            log_debug("[LLM FLASH] PROMPT (JSON expected):\n" + prompt)
-            response = model.generate_content(
-                prompt,
-                generation_config=GEN_CONFIG_JSON,
-                safety_settings={
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                }
-            )
-            text = (getattr(response, "text", None) or "").strip()
-            log_debug("[LLM FLASH] RAW RESPONSE:\n" + text)
-            return _safe_json_loads(text)
-        except Exception as e:
-            gemini_error = e
-            log_info(f"[error] LLM Flash JSON parse failed: {e}")
-
-    groq_result = _groq_flash_json(prompt)
-    if groq_result is not None:
-        log_info(f"[info] Groq fallback ({GROQ_FLASH_MODEL_NAME}) used for Flash request.")
-        return groq_result
-    if gemini_error and not GROQ_API_KEY:
-        log_info("[warn] Groq fallback unavailable; set GROQ_API_KEY to enable.")
-    return None
+    return _openai_flash_json(prompt)
 
 def analyze_product_page_with_llm(body_text: str, target_gene: str, target_protein_name: str) -> LLMAnalysisResult:
     if not USE_LLM or not body_text:
@@ -1327,7 +1181,6 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
     try:
-        model = genai.GenerativeModel(LLM_PRO_MODEL_NAME)
         # Provide an exclusion list; ask for more than max to allow post-filtering
         max_request = min(max_targets * 2, max_targets + 20)
         exclusion_block = "\n".join(sorted(list(avoid_names))[:200]) if avoid_names else "(none)"
@@ -1345,8 +1198,23 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
             """
         ).strip()
         log_debug("[LLM PRO] expand_instruction_to_queries PROMPT:\n" + prompt)
-        response = model.generate_content(prompt, generation_config=GenerationConfig(temperature=0.1))
-        text = (getattr(response, "text", None) or "").strip()
+        from openai import OpenAI
+
+        api_key = OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+
+        client = OpenAI(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=LLM_PRO_MODEL_NAME,
+            temperature=0.1,
+            max_completion_tokens=1200,
+            messages=[
+                {"role": "system", "content": "Return plain text only. One target per line. No bullets or numbering."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        text = (completion.choices[0].message.content or "").strip()
         log_debug("[LLM PRO] expand_instruction_to_queries RAW:\n" + text)
         items = [s.strip() for s in text.splitlines() if s.strip()]
         # Post-filter against avoidance set (case-insensitive) and deduplicate

@@ -11,6 +11,7 @@ Before starting, have these ready:
 - A CSV/TSV table of targets.
 - Working cluster settings (SSH alias, roots, conda command).
 - OpenAI API key if you will use `Select epitopes (LLM)` actions.
+- Optional OpenAI model override (default is `gpt-4.1-mini`).
 
 Page map:
 - `Input CSV / TSV` -> `Detected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
@@ -22,9 +23,11 @@ Use `README` for this guide and `Algorithm` for deeper method details.
 Action:
 - Click `Config`.
 - In `Cluster base`, verify `SSH alias`, `Remote root`, `Target root`, and `Cluster conda (BoltzGen installed)`.
+- If PyMOL launch fails, set `PyMOL executable path` in `Cluster base` (for example `pymol` or `/Applications/PyMOL.app` on macOS).
 - In `BoltzGen defaults`, verify partition/account/GPU/CPU/memory/time and default designs.
-- In `LLM`, set `OpenAI API key` if you plan to use LLM epitope selection.
+- In `LLM`, set `OpenAI API key` (required) and `OpenAI model` (optional) if you plan to use LLM epitope selection.
 - Optional: in `Input TSV defaults`, set `Default input file path` and enable auto-load.
+- No `cfg/env.py` edit is required for GUI-driven workflows.
 - Click `Save settings`.
 
 Expect:
@@ -178,7 +181,7 @@ PyMOL caveat:
 
 `Select epitopes (LLM) fails`
 - Cause: missing/invalid API keys.
-- Fix: set `OpenAI API key` in `Config` -> `LLM`, save, then retry.
+- Fix: set `OpenAI API key` (and optional `OpenAI model`) in `Config` -> `LLM`, save, then retry.
 
 ## Quick Happy Path Checklist
 

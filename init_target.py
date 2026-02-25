@@ -21,6 +21,13 @@ from target_generation import (
 )
 
 
+def _soup_from_html(html: str) -> BeautifulSoup:
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
 def _normalize_chain_ids(chains: Iterable[str] | None) -> list[str]:
     out: list[str] = []
     if not chains:
@@ -674,7 +681,7 @@ def _map_label_span_to_auth_ranges(
 def _analyze_sino_product(url: str, gene_hint: Optional[str] = None, protein_name: Optional[str] = None):
     if not url:
         return None
-    html_path = fetch_product_html(url)
+    html_path, _final_url = fetch_product_html(url)
     if not html_path:
         return None
     try:
@@ -705,7 +712,7 @@ def _legacy_parse_sino_page(antigen_url: str) -> Optional[tuple[str, tuple[int, 
                 pass
             html_content = page.content()
             browser.close()
-        soup = BeautifulSoup(html_content, "lxml")
+        soup = _soup_from_html(html_content)
         pc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Protein Construction\s*'))
         acc_header = soup.find('div', class_='col-md-3', string=re.compile(r'\s*Accession#\s*'))
         if not pc_header or not acc_header:

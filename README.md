@@ -7,7 +7,6 @@ This repository includes the InitBinder web UI. For public GitHub usage, the rec
 - If `8000` is already in use, `run_bulk_local.sh` automatically selects the next free local port
 - Copy/paste command generation (no live cluster probing required)
 - Optional advanced cluster execution handled by the user outside the app
-å
 
 Quickstart (macOS / Ubuntu)
 ---------------------------
@@ -19,6 +18,8 @@ Requires Python 3.10+.
 ```bash
 ./scripts/bootstrap_local.sh
 ```
+
+This installs Python dependencies and Playwright Chromium used by vendor page parsing.
 
 2) Optional preflight check:
 
@@ -77,16 +78,11 @@ LLM API Requirements
 
 Some features require LLM APIs (for example, **Select epitopes (LLM)** in Bulk).
 
-1) Create local config for defaults (optional if you only use the UI modal key field):
-
-```bash
-cp cfg/env.sample.py cfg/env.py
-```
-
-2) Preferred for Bulk UI: open `Config` in the Bulk page and set `OpenAI API key` directly. This persists to `cfg/webapp.local.yaml`.
-
-3) Optional/manual: set API keys in `cfg/env.py` (OpenAI/Groq/Google as needed) and enable LLM flags for non-UI workflows.
-
+1) Open `Config` in the Bulk page.
+2) Under `LLM`, set:
+   - `OpenAI API key`
+   - `OpenAI model` (optional, defaults to `gpt-4.1-mini`)
+3) Save settings. These values persist to `cfg/webapp.local.yaml`.
 4) Non-LLM actions (bulk preview, command generation, and most local/offline UI interactions) can still run without LLM keys.
 
 
@@ -140,5 +136,6 @@ Notes
 -----
 
 - Bulk UI can run without PyMOL and without remote cluster access.
-- LLM features require valid API keys. For Bulk UI, set OpenAI key in `Config` -> `LLM` (saved in `cfg/webapp.local.yaml`); `cfg/env.py` remains available for non-UI workflows.
-- Keep secrets and machine-specific overrides out of git (`cfg/env.py`, `cfg/webapp.local.yaml` are already ignored).
+- LLM features require valid OpenAI credentials. For Bulk UI, set key/model in `Config` -> `LLM` (saved in `cfg/webapp.local.yaml`).
+- Keep secrets and machine-specific overrides out of git (`cfg/webapp.local.yaml` is ignored).
+- If any API key was committed or pasted into tracked files, rotate it immediately.

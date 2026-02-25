@@ -12,7 +12,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
-import json
 
 import yaml
 
@@ -69,8 +68,10 @@ def run_manage_rfa(subcommand: str, args: List[str], *, log: Optional[LogCallbac
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("INITBINDER_ROOT", str(cwd))
     openai_api_key = str(getattr(cfg.bulk, "openai_api_key", "") or "").strip()
+    openai_model = str(getattr(cfg.bulk, "openai_model", "") or "").strip()
     if openai_api_key:
         env["OPENAI_API_KEY"] = openai_api_key
+        env["MODEL"] = openai_model or os.getenv("MODEL", "gpt-4.1-mini")
         env["USE_LLM"] = "true"
         env["LLM_PROVIDER"] = "openai"
 
