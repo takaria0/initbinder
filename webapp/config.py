@@ -18,6 +18,12 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "cfg" / "webapp.yaml"
 DEFAULT_LOCAL_CONFIG_PATH = PROJECT_ROOT / "cfg" / "webapp.local.yaml"
 
 _ENV_VAR_RE = re.compile(r"\$(\w+)|\${([^}]+)}")
+DEFAULT_BOLTZGEN_NANOBODY_SCAFFOLDS = [
+    "nanobody_scaffolds/7eow.yaml",
+    "nanobody_scaffolds/7xl0.yaml",
+    "nanobody_scaffolds/8coh.yaml",
+    "nanobody_scaffolds/8z8v.yaml",
+]
 
 
 def _expand_env_vars(text: str) -> str:
@@ -56,7 +62,7 @@ class BoltzGenClusterConfig:
     launcher_dir: Optional[Path] = None
     protocol: Optional[str] = None
     extra_run_args: List[str] = field(default_factory=list)
-    nanobody_scaffolds: List[str] = field(default_factory=list)
+    nanobody_scaffolds: List[str] = field(default_factory=lambda: list(DEFAULT_BOLTZGEN_NANOBODY_SCAFFOLDS))
     default_num_designs: int = 1000
     default_budget: Optional[int] = None
     slurm_log_dir: Optional[Path] = None

@@ -420,6 +420,7 @@ class BulkUiBoltzgenConfig(BaseModel):
     mem_gb: Optional[int] = Field(None, ge=1, le=2048)
     time_hours: Optional[int] = Field(None, ge=1, le=240)
     default_num_designs: Optional[int] = Field(None, ge=1, le=50000)
+    nanobody_scaffolds: List[str] = Field(default_factory=list)
 
 
 class BulkUiInputConfig(BaseModel):

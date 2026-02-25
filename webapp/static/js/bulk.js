@@ -174,6 +174,7 @@ const el = {
   bulkSettingsBoltzMem: document.querySelector('#bulk-settings-boltz-mem'),
   bulkSettingsBoltzTime: document.querySelector('#bulk-settings-boltz-time'),
   bulkSettingsBoltzDesigns: document.querySelector('#bulk-settings-boltz-designs'),
+  bulkSettingsBoltzScaffolds: document.querySelector('#bulk-settings-boltz-scaffolds'),
   bulkSettingsOpenaiKey: document.querySelector('#bulk-settings-openai-key'),
   bulkSettingsOpenaiModel: document.querySelector('#bulk-settings-openai-model'),
   bulkSettingsInputPath: document.querySelector('#bulk-settings-input-path'),
@@ -2480,6 +2481,22 @@ function setTextInputValue(inputEl, value) {
   inputEl.value = value ?? '';
 }
 
+function normalizeTextList(rawList) {
+  if (!Array.isArray(rawList)) return [];
+  return rawList
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => item.length > 0);
+}
+
+function parseMultilineList(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return [];
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 function applyBulkUiSettingsToForm(payload = {}) {
   const cluster = payload.cluster || {};
   const boltzgen = payload.boltzgen || {};
@@ -2499,6 +2516,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsBoltzMem, boltzgen.mem_gb);
   setTextInputValue(el.bulkSettingsBoltzTime, boltzgen.time_hours);
   setTextInputValue(el.bulkSettingsBoltzDesigns, boltzgen.default_num_designs);
+  setTextInputValue(el.bulkSettingsBoltzScaffolds, normalizeTextList(boltzgen.nanobody_scaffolds).join('\n'));
 
   setTextInputValue(el.bulkSettingsOpenaiKey, llm.openai_api_key);
   setTextInputValue(el.bulkSettingsOpenaiModel, llm.openai_model);
@@ -2538,6 +2556,7 @@ function buildBulkUiSettingsPayload() {
       mem_gb: parseOptionalInteger(el.bulkSettingsBoltzMem?.value, { min: 1, max: 2048 }),
       time_hours: parseOptionalInteger(el.bulkSettingsBoltzTime?.value, { min: 1, max: 240 }),
       default_num_designs: parseOptionalInteger(el.bulkSettingsBoltzDesigns?.value, { min: 1, max: 50000 }),
+      nanobody_scaffolds: parseMultilineList(el.bulkSettingsBoltzScaffolds?.value),
     },
     llm: {
       openai_api_key: normalizeOptionalText(el.bulkSettingsOpenaiKey?.value),

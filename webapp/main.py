@@ -189,6 +189,17 @@ def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def _normalize_text_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for item in values:
+        text = _normalize_optional_text(item if isinstance(item, str) else str(item))
+        if text:
+            out.append(text)
+    return out
+
+
 def _load_local_config_mapping(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -227,6 +238,7 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
             mem_gb=boltz_cfg.mem_gb,
             time_hours=boltz_cfg.time_hours,
             default_num_designs=boltz_cfg.default_num_designs,
+            nanobody_scaffolds=[str(p).strip() for p in (boltz_cfg.nanobody_scaffolds or []) if str(p).strip()],
         ),
         input=BulkUiInputConfig(
             default_input_path=default_input_path,
@@ -1153,6 +1165,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     boltz_block["mem_gb"] = payload.boltzgen.mem_gb
     boltz_block["time_hours"] = payload.boltzgen.time_hours
     boltz_block["default_num_designs"] = payload.boltzgen.default_num_designs
+    boltz_block["nanobody_scaffolds"] = _normalize_text_list(payload.boltzgen.nanobody_scaffolds)
 
     bulk_block = data.get("bulk")
     if not isinstance(bulk_block, dict):

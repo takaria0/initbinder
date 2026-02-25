@@ -39,7 +39,11 @@ cluster:
     cache_dir: null
     output_root: null
     extra_run_args: []
-    nanobody_scaffolds: []
+    nanobody_scaffolds:
+      - nanobody_scaffolds/7eow.yaml
+      - nanobody_scaffolds/7xl0.yaml
+      - nanobody_scaffolds/8coh.yaml
+      - nanobody_scaffolds/8z8v.yaml
     default_num_designs: 1000
     default_budget: null
     slurm_log_dir: slurm_logs

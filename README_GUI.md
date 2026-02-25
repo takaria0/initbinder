@@ -25,6 +25,7 @@ Action:
 - In `Cluster base`, verify `SSH alias`, `Remote root`, `Target root`, and `Cluster conda (BoltzGen installed)`.
 - If PyMOL launch fails, set `PyMOL executable path` in `Cluster base` (for example `pymol` or `/Applications/PyMOL.app` on macOS).
 - In `BoltzGen defaults`, verify partition/account/GPU/CPU/memory/time and default designs.
+- For BoltzGen nanobody design mode, set `Nanobody scaffold paths` (one scaffold YAML path per line).
 - In `LLM`, set `OpenAI API key` (required) and `OpenAI model` (optional) if you plan to use LLM epitope selection.
 - Optional: in `Input TSV defaults`, set `Default input file path` and enable auto-load.
 - No `cfg/env.py` edit is required for GUI-driven workflows.
