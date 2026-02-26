@@ -20,6 +20,7 @@ from .job_store import JobStatus, JobStore, get_job_store
 from .models import (
     AssessmentRunRequest,
     BulkDesignImportRequest,
+    BulkLlmUnmatchedDiscoverRequest,
     BulkRunRequest,
     BoltzgenConfigRunRequest,
     PipelineRefreshRequest,
@@ -33,7 +34,12 @@ from .pipeline import PipelineError, init_decide_prep
 from .designs import run_design_workflow
 from .exporter import ExportError, run_export
 from .golden_gate import GoldenGateError, run_golden_gate_plan
-from .bulk import import_design_configs, run_boltzgen_config_jobs, run_bulk_workflow
+from .bulk import (
+    discover_unmatched_bulk_target,
+    import_design_configs,
+    run_boltzgen_config_jobs,
+    run_bulk_workflow,
+)
 
 
 _executor: ThreadPoolExecutor | None = None
@@ -386,6 +392,73 @@ def submit_target_generation(request: TargetGenerationRequest, *,
                 )
         except Exception as exc:  # pragma: no cover - defensive
             store.update(job.job_id, status=JobStatus.FAILED, message=str(exc))
+
+    executor = _get_executor()
+    executor.submit(_run)
+    return job.job_id
+
+
+def submit_bulk_llm_unmatched_discovery(
+    request: BulkLlmUnmatchedDiscoverRequest,
+    *,
+    job_store: JobStore | None = None,
+) -> str:
+    cfg = load_config()
+    store = job_store or get_job_store(cfg.log_dir)
+    label = f"LLM unmatched discovery ({request.unmatched_key})"
+    job = store.create_job("bulk_llm_unmatched_discovery", label, details=request.dict())
+
+    def _run() -> None:
+        try:
+            store.append_log(job.job_id, "[discover] Workflow start: unmatched discovery queued job is now running.")
+            store.update(
+                job.job_id,
+                status=JobStatus.RUNNING,
+                message="Running unmatched target discovery",
+                details={
+                    "unmatched_key": request.unmatched_key,
+                    "catalog_name": request.catalog_name,
+                },
+            )
+            result = discover_unmatched_bulk_target(
+                request,
+                job_id=job.job_id,
+                log_hook=lambda line: store.append_log(job.job_id, line),
+            )
+            matched_row = result.get("matched_row")
+            match = result.get("match")
+            details = {
+                "unmatched_key": request.unmatched_key,
+                "catalog_name": result.get("catalog_name") or request.catalog_name,
+                "catalog_appended": bool(result.get("catalog_appended")),
+                "generated_file": result.get("generated_file"),
+            }
+            if matched_row is not None and hasattr(matched_row, "dict"):
+                details["matched_row"] = matched_row.dict()
+            if match is not None and hasattr(match, "dict"):
+                details["match"] = match.dict()
+            store.update(
+                job.job_id,
+                status=JobStatus.SUCCESS,
+                message=str(result.get("message") or "Unmatched discovery completed."),
+                details=details,
+            )
+            store.append_log(
+                job.job_id,
+                f"[discover] Workflow success: appended={details.get('catalog_appended')} generated_file={details.get('generated_file')}",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            store.update(
+                job.job_id,
+                status=JobStatus.FAILED,
+                message=str(exc),
+                details={
+                    "unmatched_key": request.unmatched_key,
+                    "catalog_name": request.catalog_name,
+                    "failure_reason": str(exc),
+                },
+            )
+            store.append_log(job.job_id, f"[discover] Workflow failed: {exc}")
 
     executor = _get_executor()
     executor.submit(_run)

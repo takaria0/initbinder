@@ -215,6 +215,79 @@ class BulkPreviewResponse(BaseModel):
     message: str
 
 
+class BulkLlmMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class BulkLlmCandidate(BaseModel):
+    target_name: Optional[str] = Field(None, max_length=240)
+    protein_name: Optional[str] = Field(None, max_length=240)
+    gene: Optional[str] = Field(None, max_length=80)
+    uniprot: Optional[str] = Field(None, max_length=80)
+    pdb_id: Optional[str] = Field(None, max_length=32)
+    antigen_catalog: Optional[str] = Field(None, max_length=120)
+    accession: Optional[str] = Field(None, max_length=120)
+    rationale: Optional[str] = Field(None, max_length=500)
+
+
+class BulkCatalogMatch(BaseModel):
+    candidate: BulkLlmCandidate
+    row: BulkCsvRow
+    match_type: str = Field(..., max_length=64)
+    matched_field: Optional[str] = Field(None, max_length=64)
+    matched_value: Optional[str] = Field(None, max_length=240)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class BulkUnmatchedSuggestion(BaseModel):
+    candidate: BulkLlmCandidate
+    reason: str = Field(..., max_length=240)
+    nearest: List[BulkCatalogMatch] = Field(default_factory=list)
+
+
+class BulkLlmTargetSuggestRequest(BaseModel):
+    catalog_name: str = Field(..., min_length=3, max_length=255)
+    prompt: str = Field(..., min_length=3, max_length=4000)
+    history: List[BulkLlmMessage] = Field(default_factory=list)
+    max_candidates: int = Field(24, ge=1, le=200)
+
+
+class BulkLlmTargetSuggestResponse(BaseModel):
+    catalog_name: str
+    assistant_message: str
+    candidates: List[BulkLlmCandidate] = Field(default_factory=list)
+    matched_rows: List[BulkCsvRow] = Field(default_factory=list)
+    matches: List[BulkCatalogMatch] = Field(default_factory=list)
+    unmatched: List[BulkUnmatchedSuggestion] = Field(default_factory=list)
+    message: str
+
+
+class BulkLlmUnmatchedDiscoverRequest(BaseModel):
+    catalog_name: str = Field(..., min_length=3, max_length=255)
+    unmatched_key: str = Field(..., min_length=3, max_length=160)
+    candidate: BulkLlmCandidate
+    max_targets: int = Field(3, ge=1, le=10)
+    launch_browser: bool = True
+
+
+class BulkLlmUnmatchedDiscoverResponse(BaseModel):
+    job_id: str
+    unmatched_key: str
+    message: str
+
+
+class BulkLlmUnmatchedDiscoverStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["pending", "running", "success", "failed", "canceled"]
+    message: Optional[str] = None
+    unmatched_key: Optional[str] = None
+    catalog_name: Optional[str] = None
+    matched_row: Optional[BulkCsvRow] = None
+    match: Optional[BulkCatalogMatch] = None
+    failure_reason: Optional[str] = None
+
+
 class BulkRunRequest(BaseModel):
     csv_text: str = Field(..., min_length=3, max_length=1000000)
     num_epitopes: Optional[int] = Field(None, ge=1, le=32)

@@ -14,7 +14,7 @@ Before starting, have these ready:
 - Optional OpenAI model override (default is `gpt-4.1-mini`).
 
 Page map:
-- `Input CSV / TSV` -> `Detected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
+- `LLM Target Discovery` -> `Input CSV / TSV` -> `Detected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
 
 Use `README` for this guide and `Algorithm` for deeper method details.
 
@@ -41,8 +41,18 @@ If not:
 ## Step 1: Load Input
 
 Action:
-- Paste your table into `Input CSV / TSV`.
-- Optional: use `Load default file now` from `Config` if you configured a default path.
+- The `Input CSV / TSV` editor is hidden in this workflow.
+- Set `Config` -> `Input TSV defaults` -> `Default input file path` to your catalog TSV/CSV.
+- The app auto-loads that configured file on page load and after settings save.
+
+LLM-first option:
+- Use `LLM Target Discovery` at the top of the page.
+- Pick or create a `Conversation` to keep separate target discussions.
+- Set `Config` -> `Input TSV defaults` -> `Default input file path` to your catalog TSV/CSV in `targets_catalog/`.
+- Enter a prompt, and click `Suggest targets`.
+- Continue chatting in the same conversation to accumulate additional target suggestions.
+- In `Matched targets`, use per-target `Delete` / `Undelete` to curate the active list.
+- Switch `View mode` between `LLM-picked` and `All targets`.
 
 Recommended columns:
 - `chosen_pdb` or `pdb_id`

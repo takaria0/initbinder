@@ -16,12 +16,13 @@ import math
 import sys
 import subprocess
 import importlib.util
+import threading
 from functools import lru_cache
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -56,9 +57,16 @@ from .models import (
     BoltzgenDiversityPlot,
     BulkCsvRow,
     BulkDesignImportRequest,
+    BulkCatalogMatch,
+    BulkLlmCandidate,
+    BulkLlmMessage,
+    BulkLlmUnmatchedDiscoverRequest,
+    BulkLlmTargetSuggestRequest,
+    BulkLlmTargetSuggestResponse,
     BulkPreviewRequest,
     BulkPreviewResponse,
     BulkRunRequest,
+    BulkUnmatchedSuggestion,
     DesignRunRequest,
     EpitopeDiversityPlot,
     EpitopeDiversityResponse,
@@ -2842,6 +2850,980 @@ def preview_bulk_targets(request: BulkPreviewRequest) -> BulkPreviewResponse:
         unresolved=unresolved,
         message=message,
     )
+
+
+_CATALOG_SUFFIXES = {".tsv", ".csv"}
+_LLM_MATCH_MIN_SCORE = 0.74
+_LLM_NEAREST_MIN_SCORE = 0.58
+_LLM_DISCOVERY_DEFAULT_MAX_TARGETS = 3
+_LLM_DISCOVERY_MIN_ROW_SCORE = 3.0
+_CATALOG_APPEND_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _CatalogRecord:
+    row: BulkCsvRow
+    values: Dict[str, str]
+    name_key: str
+
+
+@dataclass(frozen=True)
+class _CatalogLookup:
+    records: List[_CatalogRecord]
+    by_pdb: Dict[str, List[int]]
+    by_uniprot: Dict[str, List[int]]
+    by_gene: Dict[str, List[int]]
+    by_catalog: Dict[str, List[int]]
+    by_accession: Dict[str, List[int]]
+    names: List[Tuple[int, str]]
+
+
+def _catalog_dir() -> Path:
+    cfg = load_config()
+    path = Path(cfg.paths.project_root) / "targets_catalog"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_catalog_path(name: str) -> Path:
+    safe_name = Path(name).name
+    suffix = Path(name).suffix.lower()
+    if not safe_name or safe_name != name or suffix not in _CATALOG_SUFFIXES:
+        raise ValueError("Invalid catalog file name. Use a .csv or .tsv in targets_catalog/.")
+    root = _catalog_dir().resolve()
+    candidate = (root / safe_name).resolve()
+    if not str(candidate).startswith(str(root)):
+        raise ValueError("Invalid catalog file path.")
+    if not candidate.exists() or not candidate.is_file():
+        raise ValueError(f"Catalog file not found: {safe_name}")
+    return candidate
+
+
+def _catalog_delimiter(path: Path) -> str:
+    return "," if path.suffix.lower() == ".csv" else "\t"
+
+
+def _normalize_lookup_key(value: Optional[str]) -> Optional[str]:
+    text = _normalize(value)
+    if not text:
+        return None
+    key = re.sub(r"[^a-z0-9]+", "", text.lower())
+    return key or None
+
+
+def _normalize_name_key(value: Optional[str]) -> Optional[str]:
+    text = _normalize(value)
+    if not text:
+        return None
+    key = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
+    return key or None
+
+
+def _first_catalog_value(values: Dict[str, str], keys: Sequence[str]) -> Optional[str]:
+    for key in keys:
+        val = _normalize(values.get(key))
+        if val:
+            return val
+    return None
+
+
+def _catalog_row_to_entry(raw_index: int, values: Dict[str, str]) -> Dict[str, object]:
+    preset_name = (
+        _first_catalog_value(values, ("target_name", "protein_name", "gene", "selection", "catalog", "antigen_catalog"))
+        or f"Row {raw_index}"
+    )
+    protein_name = _first_catalog_value(values, ("protein_name", "target_name", "description"))
+    antigen_url = _first_catalog_value(values, ("antigen_url", "url", "antigen catalog url", "vendor url"))
+    pdb_id = _first_catalog_value(values, ("chosen_pdb", "pdb_id", "pdb", "pdbid", "resolved_pdb_id"))
+    accession = _first_catalog_value(values, ("vendor_accession", "vendor_product_accession", "accession", "uniprot"))
+    vendor_range = _first_catalog_value(values, ("vendor_range", "expressed_range", "pdb_vendor_intersection"))
+    return {
+        "raw_index": raw_index,
+        "preset_name": preset_name,
+        "antigen_url": antigen_url,
+        "protein_name": protein_name,
+        "pdb_id": _clean_pdb_id(pdb_id),
+        "accession": accession,
+        "vendor_range": vendor_range,
+    }
+
+
+def _load_catalog_records(path: Path) -> List[_CatalogRecord]:
+    delimiter = _catalog_delimiter(path)
+    rows: List[Dict[str, str]] = []
+    entries: List[Dict[str, object]] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        if not reader.fieldnames:
+            return []
+        headers = [str(name or "").strip().lower() for name in reader.fieldnames]
+        for row_index, row in enumerate(reader, start=1):
+            values: Dict[str, str] = {}
+            for idx, header in enumerate(headers):
+                if not header:
+                    continue
+                source_key = reader.fieldnames[idx]
+                raw_val = row.get(source_key) if source_key is not None else None
+                text = _normalize(raw_val)
+                if text:
+                    values[header] = text
+            entry = _catalog_row_to_entry(row_index, values)
+            has_any_value = bool(
+                entry.get("preset_name")
+                or entry.get("protein_name")
+                or entry.get("antigen_url")
+                or entry.get("pdb_id")
+                or entry.get("accession")
+            )
+            if not has_any_value:
+                continue
+            rows.append(values)
+            entries.append(entry)
+
+    if not entries:
+        return []
+    parsed_rows = _apply_preset_matches(entries)
+    records: List[_CatalogRecord] = []
+    for idx, parsed in enumerate(parsed_rows):
+        values = rows[idx]
+        name_key = (
+            _normalize_name_key(parsed.protein_name)
+            or _normalize_name_key(parsed.preset_name)
+            or _normalize_name_key(values.get("target_name"))
+            or ""
+        )
+        records.append(_CatalogRecord(row=parsed, values=values, name_key=name_key))
+    return records
+
+
+def _append_lookup(index: Dict[str, List[int]], key: Optional[str], record_idx: int) -> None:
+    if not key:
+        return
+    bucket = index.setdefault(key, [])
+    if record_idx not in bucket:
+        bucket.append(record_idx)
+
+
+def _build_catalog_lookup(records: List[_CatalogRecord]) -> _CatalogLookup:
+    by_pdb: Dict[str, List[int]] = {}
+    by_uniprot: Dict[str, List[int]] = {}
+    by_gene: Dict[str, List[int]] = {}
+    by_catalog: Dict[str, List[int]] = {}
+    by_accession: Dict[str, List[int]] = {}
+    names: List[Tuple[int, str]] = []
+
+    for idx, rec in enumerate(records):
+        row = rec.row
+        vals = rec.values
+        _append_lookup(by_pdb, _normalize_lookup_key(row.resolved_pdb_id or row.pdb_id), idx)
+        _append_lookup(by_pdb, _normalize_lookup_key(vals.get("chosen_pdb")), idx)
+        _append_lookup(by_uniprot, _normalize_lookup_key(vals.get("uniprot")), idx)
+        _append_lookup(by_gene, _normalize_lookup_key(vals.get("gene")), idx)
+        _append_lookup(by_gene, _normalize_lookup_key(vals.get("gene_symbol")), idx)
+        _append_lookup(by_catalog, _normalize_lookup_key(vals.get("antigen_catalog")), idx)
+        _append_lookup(by_catalog, _normalize_lookup_key(vals.get("catalog")), idx)
+        _append_lookup(by_catalog, _normalize_lookup_key(vals.get("sku")), idx)
+        _append_lookup(by_accession, _normalize_lookup_key(row.accession or vals.get("vendor_accession")), idx)
+        _append_lookup(by_accession, _normalize_lookup_key(vals.get("vendor_product_accession")), idx)
+        if rec.name_key:
+            names.append((idx, rec.name_key))
+
+    return _CatalogLookup(
+        records=records,
+        by_pdb=by_pdb,
+        by_uniprot=by_uniprot,
+        by_gene=by_gene,
+        by_catalog=by_catalog,
+        by_accession=by_accession,
+        names=names,
+    )
+
+
+def _llm_message_text(message: object) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+            if isinstance(item, dict):
+                text = _normalize(item.get("text") or item.get("content"))
+                if text:
+                    parts.append(text)
+                continue
+            text = _normalize(getattr(item, "text", None))
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    return _normalize(str(content)) or ""
+
+
+def _call_openai_for_bulk_candidates(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    history: Sequence[BulkLlmMessage],
+    max_candidates: int,
+) -> Dict[str, object]:
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:  # pragma: no cover - dependency import
+        raise ValueError(f"openai package is unavailable: {exc}") from exc
+
+    client = OpenAI(api_key=api_key)
+    history_lines: List[str] = []
+    for msg in list(history or [])[-16:]:
+        role = "User" if msg.role == "user" else "Assistant"
+        text = _normalize(msg.content) or ""
+        if text:
+            history_lines.append(f"{role}: {text}")
+    history_block = "\n".join(history_lines) if history_lines else "(no prior history)"
+    user_block = (
+        "Conversation history:\n"
+        f"{history_block}\n\n"
+        "Latest user request:\n"
+        f"{prompt.strip()}\n\n"
+        f"Return at most {max_candidates} candidates."
+    )
+    system_prompt = (
+        "You help scientists identify likely antigen targets. "
+        "Return a JSON object with keys: assistant_message, candidates. "
+        "candidates must be an array of objects with optional keys: "
+        "target_name, protein_name, gene, uniprot, pdb_id, antigen_catalog, accession, rationale. "
+        "Use concise, practical suggestions and avoid duplicates."
+    )
+    base_messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_block},
+    ]
+
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        kwargs: Dict[str, object] = {
+            "model": model,
+            "messages": base_messages,
+            "temperature": 0.2,
+        }
+        if attempt == 0:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            msg = completion.choices[0].message if completion.choices else None
+            text = _llm_message_text(msg).strip()
+            if not text:
+                raise ValueError("LLM response was empty.")
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("LLM response is not a JSON object.")
+            return data
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise ValueError(f"LLM response could not be parsed as JSON: {last_error}")
+
+
+def _coerce_candidate(item: object) -> Optional[BulkLlmCandidate]:
+    if not isinstance(item, dict):
+        return None
+    candidate = BulkLlmCandidate(
+        target_name=_normalize(item.get("target_name") or item.get("name")),
+        protein_name=_normalize(item.get("protein_name")),
+        gene=_normalize(item.get("gene")),
+        uniprot=_normalize(item.get("uniprot") or item.get("uniprot_id")),
+        pdb_id=_clean_pdb_id(item.get("pdb_id") or item.get("chosen_pdb")),
+        antigen_catalog=_normalize(item.get("antigen_catalog") or item.get("catalog")),
+        accession=_normalize(item.get("accession") or item.get("vendor_accession")),
+        rationale=_normalize(item.get("rationale")),
+    )
+    if not any(
+        (
+            candidate.target_name,
+            candidate.protein_name,
+            candidate.gene,
+            candidate.uniprot,
+            candidate.pdb_id,
+            candidate.antigen_catalog,
+            candidate.accession,
+        )
+    ):
+        return None
+    return candidate
+
+
+def _candidate_label(candidate: BulkLlmCandidate) -> str:
+    return (
+        candidate.target_name
+        or candidate.protein_name
+        or candidate.gene
+        or candidate.uniprot
+        or candidate.pdb_id
+        or candidate.antigen_catalog
+        or "target"
+    )
+
+
+def _pick_record_index(candidates: Sequence[int], used: set[int]) -> Optional[int]:
+    if not candidates:
+        return None
+    for idx in candidates:
+        if idx not in used:
+            return idx
+    return candidates[0]
+
+
+def _fuzzy_find_record(
+    lookup: _CatalogLookup,
+    text: Optional[str],
+    *,
+    used: set[int],
+    min_score: float,
+) -> Tuple[Optional[int], float]:
+    query = _normalize_name_key(text)
+    if not query:
+        return None, 0.0
+    best_idx: Optional[int] = None
+    best_score = 0.0
+    fallback_idx: Optional[int] = None
+    fallback_score = 0.0
+    for idx, cand_name in lookup.names:
+        if not cand_name:
+            continue
+        score = SequenceMatcher(None, query, cand_name).ratio()
+        if idx not in used and score > best_score:
+            best_score = score
+            best_idx = idx
+        if score > fallback_score:
+            fallback_score = score
+            fallback_idx = idx
+    if best_idx is not None and best_score >= min_score:
+        return best_idx, best_score
+    if fallback_idx is not None and fallback_score >= min_score:
+        return fallback_idx, fallback_score
+    return None, max(best_score, fallback_score)
+
+
+def _nearest_name_matches(
+    lookup: _CatalogLookup,
+    candidate: BulkLlmCandidate,
+    *,
+    limit: int = 3,
+) -> List[BulkCatalogMatch]:
+    query = _normalize_name_key(candidate.target_name or candidate.protein_name or candidate.gene)
+    if not query:
+        return []
+    scored: List[Tuple[float, int]] = []
+    for idx, name in lookup.names:
+        if not name:
+            continue
+        score = SequenceMatcher(None, query, name).ratio()
+        if score >= _LLM_NEAREST_MIN_SCORE:
+            scored.append((score, idx))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    out: List[BulkCatalogMatch] = []
+    seen: set[int] = set()
+    for score, idx in scored:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        rec = lookup.records[idx]
+        out.append(
+            BulkCatalogMatch(
+                candidate=candidate,
+                row=rec.row,
+                match_type="nearest_name",
+                matched_field="protein_name",
+                matched_value=rec.row.protein_name or rec.row.preset_name,
+                confidence=max(0.01, min(0.99, score)),
+            )
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _match_candidates_to_catalog(
+    lookup: _CatalogLookup,
+    candidates: Sequence[BulkLlmCandidate],
+) -> Tuple[List[BulkCatalogMatch], List[BulkUnmatchedSuggestion], List[BulkCsvRow]]:
+    matches: List[BulkCatalogMatch] = []
+    unmatched: List[BulkUnmatchedSuggestion] = []
+    matched_rows: List[BulkCsvRow] = []
+    matched_row_keys: set[str] = set()
+    used_record_indices: set[int] = set()
+
+    for candidate in candidates:
+        record_idx: Optional[int] = None
+        match_type = ""
+        matched_field: Optional[str] = None
+        matched_value: Optional[str] = None
+        confidence = 0.0
+
+        exact_checks: List[Tuple[str, Optional[str], Dict[str, List[int]], str, float]] = [
+            ("pdb_id", candidate.pdb_id, lookup.by_pdb, "exact_pdb", 0.99),
+            ("uniprot", candidate.uniprot, lookup.by_uniprot, "exact_uniprot", 0.98),
+            ("gene", candidate.gene, lookup.by_gene, "exact_gene", 0.97),
+            ("antigen_catalog", candidate.antigen_catalog, lookup.by_catalog, "exact_catalog", 0.97),
+            ("accession", candidate.accession, lookup.by_accession, "exact_accession", 0.96),
+        ]
+        for field_name, raw_value, index_map, mtype, score in exact_checks:
+            key = _normalize_lookup_key(raw_value)
+            if not key:
+                continue
+            idx = _pick_record_index(index_map.get(key, []), used_record_indices)
+            if idx is None:
+                continue
+            record_idx = idx
+            match_type = mtype
+            matched_field = field_name
+            matched_value = raw_value
+            confidence = score
+            break
+
+        if record_idx is None:
+            fuzzy_source = candidate.target_name or candidate.protein_name or candidate.gene
+            idx, score = _fuzzy_find_record(
+                lookup,
+                fuzzy_source,
+                used=used_record_indices,
+                min_score=_LLM_MATCH_MIN_SCORE,
+            )
+            if idx is not None:
+                record_idx = idx
+                match_type = "fuzzy_name"
+                matched_field = "protein_name"
+                matched_value = fuzzy_source
+                confidence = max(0.70, min(0.95, score))
+
+        if record_idx is None:
+            nearest = _nearest_name_matches(lookup, candidate, limit=3)
+            reason = f"No catalog match for '{_candidate_label(candidate)}'."
+            unmatched.append(BulkUnmatchedSuggestion(candidate=candidate, reason=reason, nearest=nearest))
+            continue
+
+        used_record_indices.add(record_idx)
+        row = lookup.records[record_idx].row
+        row_key = f"{(row.resolved_pdb_id or row.pdb_id or '').upper()}::{row.raw_index}"
+        if row_key not in matched_row_keys:
+            matched_rows.append(row)
+            matched_row_keys.add(row_key)
+        matches.append(
+            BulkCatalogMatch(
+                candidate=candidate,
+                row=row,
+                match_type=match_type,
+                matched_field=matched_field,
+                matched_value=matched_value,
+                confidence=max(0.0, min(1.0, confidence)),
+            )
+        )
+
+    return matches, unmatched, matched_rows
+
+
+def suggest_bulk_targets_with_llm(request: BulkLlmTargetSuggestRequest) -> BulkLlmTargetSuggestResponse:
+    cfg = load_config()
+    api_key = _normalize(cfg.bulk.openai_api_key)
+    if not api_key:
+        raise ValueError("OpenAI API key is missing. Set it in Config -> LLM before using target discovery.")
+    model = _normalize(cfg.bulk.openai_model) or "gpt-4.1-mini"
+    catalog_path = _resolve_catalog_path(request.catalog_name)
+    records = _load_catalog_records(catalog_path)
+    if not records:
+        raise ValueError(f"No usable rows found in catalog: {catalog_path.name}")
+    lookup = _build_catalog_lookup(records)
+
+    data = _call_openai_for_bulk_candidates(
+        api_key=api_key,
+        model=model,
+        prompt=request.prompt,
+        history=request.history,
+        max_candidates=request.max_candidates,
+    )
+    assistant_message = _normalize(str(data.get("assistant_message") or "")) or "Suggested targets are ready."
+    raw_candidates = data.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("LLM response did not include a valid candidates array.")
+
+    candidates: List[BulkLlmCandidate] = []
+    seen_signatures: set[str] = set()
+    for raw_item in raw_candidates:
+        candidate = _coerce_candidate(raw_item)
+        if candidate is None:
+            continue
+        signature = "|".join(
+            [
+                _normalize_lookup_key(candidate.target_name) or "",
+                _normalize_lookup_key(candidate.protein_name) or "",
+                _normalize_lookup_key(candidate.gene) or "",
+                _normalize_lookup_key(candidate.uniprot) or "",
+                _normalize_lookup_key(candidate.pdb_id) or "",
+                _normalize_lookup_key(candidate.antigen_catalog) or "",
+                _normalize_lookup_key(candidate.accession) or "",
+            ]
+        )
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        candidates.append(candidate)
+    if not candidates:
+        raise ValueError("LLM returned no structured candidates. Try a more specific prompt.")
+
+    matches, unmatched, matched_rows = _match_candidates_to_catalog(lookup, candidates)
+    msg = (
+        f"Matched {len(matched_rows)} of {len(candidates)} suggested targets "
+        f"using {catalog_path.name}."
+    )
+    if not matched_rows:
+        msg = (
+            f"No catalog matches found in {catalog_path.name}. "
+            "Review unmatched suggestions or switch to All targets."
+        )
+
+    return BulkLlmTargetSuggestResponse(
+        catalog_name=catalog_path.name,
+        assistant_message=assistant_message,
+        candidates=candidates,
+        matched_rows=matched_rows,
+        matches=matches,
+        unmatched=unmatched,
+        message=msg,
+    )
+
+
+def _emit_discovery_log(log_hook: Optional[Callable[[str], None]], line: str) -> None:
+    if not log_hook:
+        return
+    try:
+        log_hook(line)
+    except Exception:
+        pass
+
+
+def _build_discovery_instruction(candidate: BulkLlmCandidate) -> str:
+    label = _candidate_label(candidate)
+    fields: List[str] = []
+    if _normalize(candidate.gene):
+        fields.append(f"gene symbol: {candidate.gene}")
+    if _normalize(candidate.uniprot):
+        fields.append(f"uniprot accession: {candidate.uniprot}")
+    if _normalize(candidate.accession):
+        fields.append(f"vendor/ref accession: {candidate.accession}")
+    if _normalize(candidate.pdb_id):
+        fields.append(f"known pdb hint: {candidate.pdb_id}")
+    if _normalize(candidate.antigen_catalog):
+        fields.append(f"catalog hint: {candidate.antigen_catalog}")
+    if _normalize(candidate.protein_name):
+        fields.append(f"protein name: {candidate.protein_name}")
+    if _normalize(candidate.target_name):
+        fields.append(f"target label: {candidate.target_name}")
+    context_block = "; ".join(fields) if fields else f"target label: {label}"
+    return (
+        "Find purchasable recombinant antigens for antibody discovery that best match this target. "
+        f"Prioritize exact biological identity and commercially available proteins. Context: {context_block}. "
+        "Return high-confidence candidates with structured vendor metadata."
+    )
+
+
+def _discovery_prefix(unmatched_key: str, job_id: Optional[str]) -> str:
+    raw = f"{job_id or unmatched_key or 'candidate'}"
+    slug = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    if not slug:
+        slug = "candidate"
+    return f"bulk_llm_discover_{slug[:48]}"
+
+
+def _run_target_generation_discovery(
+    *,
+    instruction: str,
+    out_prefix: str,
+    max_targets: int,
+    launch_browser: bool = True,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> None:
+    cfg = load_config()
+    project_root = Path(cfg.paths.project_root)
+    script_path = project_root / "target_generation.py"
+    if not script_path.exists():
+        raise ValueError(f"target_generation.py not found: {script_path}")
+
+    python_exe = sys.executable or "python3"
+    clamped_max_targets = max(1, min(int(max_targets), 10))
+    cmd = [
+        python_exe,
+        str(script_path),
+        "--instruction",
+        instruction,
+        "--max_targets",
+        str(clamped_max_targets),
+        "--species",
+        "human",
+        "--prefer_tags",
+        "biotin",
+        "--out_prefix",
+        out_prefix,
+    ]
+    if not launch_browser:
+        cmd.append("--no_browser_popup")
+    _emit_discovery_log(log_hook, "[discover] Step 1/6: starting target generation subprocess.")
+    _emit_discovery_log(log_hook, f"[discover] Working directory: {project_root}")
+    _emit_discovery_log(log_hook, f"[discover] Output prefix: {out_prefix}")
+    _emit_discovery_log(
+        log_hook,
+        f"[discover] max_targets={clamped_max_targets} browser_mode={'visible' if launch_browser else 'headless'}",
+    )
+    display_cmd = " ".join(cmd)
+    _emit_discovery_log(log_hook, f"[discover] {display_cmd}")
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(project_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        _emit_discovery_log(log_hook, line.rstrip())
+    rc = process.wait()
+    _emit_discovery_log(log_hook, f"[discover] target_generation.py finished with exit code {rc}.")
+    if rc != 0:
+        raise ValueError(f"target_generation.py exited with status {rc}")
+
+
+def _normalize_row_mapping(row: Dict[str, object]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key, value in row.items():
+        k = str(key or "").strip().lower()
+        if not k:
+            continue
+        out[k] = _normalize(str(value)) or ""
+    return out
+
+
+def _load_generated_candidate_rows(
+    out_prefix: str,
+    *,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> Tuple[List[Dict[str, str]], Path]:
+    root = _catalog_dir()
+    candidates = [
+        root / f"{out_prefix}_all.tsv",
+        root / f"{out_prefix}_biotin.tsv",
+    ]
+    _emit_discovery_log(log_hook, "[discover] Step 2/6: loading generated candidate files.")
+    for path in candidates:
+        if not path.exists():
+            _emit_discovery_log(log_hook, f"[discover] Missing generated file: {path.name}")
+            continue
+        rows: List[Dict[str, str]] = []
+        delimiter = _catalog_delimiter(path)
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for raw in reader:
+                if not raw:
+                    continue
+                row = _normalize_row_mapping(raw)
+                if row:
+                    rows.append(row)
+        if rows:
+            _emit_discovery_log(log_hook, f"[discover] Loaded {len(rows)} generated rows from {path.name}.")
+            return rows, path
+        _emit_discovery_log(log_hook, f"[discover] Generated file was empty after normalization: {path.name}")
+    raise ValueError(
+        f"No generated candidate rows found for prefix '{out_prefix}'. "
+        "Discovery completed but produced no usable rows."
+    )
+
+
+def _generated_value(values: Dict[str, str], *keys: str) -> Optional[str]:
+    for key in keys:
+        val = _normalize(values.get(key))
+        if val:
+            return val
+    return None
+
+
+def _summarize_generated_row(values: Dict[str, str]) -> str:
+    pdb = _generated_value(values, "chosen_pdb", "pdb_id", "pdb", "resolved_pdb_id") or "?"
+    gene = _generated_value(values, "gene") or "?"
+    uniprot = _generated_value(values, "uniprot", "vendor_accession", "accession") or "?"
+    catalog = _generated_value(values, "antigen_catalog", "catalog", "sku") or "?"
+    return f"pdb={pdb} gene={gene} uniprot={uniprot} catalog={catalog}"
+
+
+def _score_generated_row(candidate: BulkLlmCandidate, values: Dict[str, str]) -> float:
+    score = 0.0
+    cand_uniprot = _normalize_lookup_key(candidate.uniprot or candidate.accession)
+    row_uniprot = _normalize_lookup_key(
+        _generated_value(values, "uniprot", "vendor_accession", "accession")
+    )
+    if cand_uniprot and row_uniprot and cand_uniprot == row_uniprot:
+        score += 8.0
+
+    cand_gene = _normalize_lookup_key(candidate.gene)
+    row_gene = _normalize_lookup_key(_generated_value(values, "gene"))
+    if cand_gene and row_gene and cand_gene == row_gene:
+        score += 6.0
+
+    cand_pdb = _normalize_lookup_key(candidate.pdb_id)
+    row_pdb = _normalize_lookup_key(_generated_value(values, "chosen_pdb", "pdb_id", "pdb"))
+    if cand_pdb and row_pdb and cand_pdb == row_pdb:
+        score += 6.0
+
+    cand_catalog = _normalize_lookup_key(candidate.antigen_catalog)
+    row_catalog = _normalize_lookup_key(_generated_value(values, "antigen_catalog", "catalog", "sku"))
+    if cand_catalog and row_catalog and cand_catalog == row_catalog:
+        score += 4.0
+
+    cand_name = _normalize_name_key(candidate.target_name or candidate.protein_name)
+    row_name = _normalize_name_key(_generated_value(values, "protein_name", "target_name", "gene"))
+    if cand_name and row_name:
+        score += 4.0 * SequenceMatcher(None, cand_name, row_name).ratio()
+
+    if _normalize(_generated_value(values, "chosen_pdb", "pdb_id", "pdb")):
+        score += 1.0
+    if _normalize(_generated_value(values, "vendor_accession", "accession", "uniprot")):
+        score += 1.0
+    return score
+
+
+def _select_best_generated_row(
+    candidate: BulkLlmCandidate,
+    rows: Sequence[Dict[str, str]],
+    *,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> Dict[str, str]:
+    if not rows:
+        raise ValueError("No discovery rows available to evaluate.")
+
+    _emit_discovery_log(log_hook, "[discover] Step 3/6: ranking generated rows against unmatched candidate.")
+    scored: List[Tuple[float, int, Dict[str, str]]] = []
+    for idx, row in enumerate(rows):
+        score = _score_generated_row(candidate, row)
+        scored.append((score, idx, row))
+    scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    for rank, (score, _, row) in enumerate(scored[:3], start=1):
+        _emit_discovery_log(
+            log_hook,
+            f"[discover] Candidate rank {rank}: score={score:.2f} {_summarize_generated_row(row)}",
+        )
+    best_score, _, best_row = scored[0]
+    if best_score < _LLM_DISCOVERY_MIN_ROW_SCORE:
+        raise ValueError(
+            f"Discovery results were too weak for '{_candidate_label(candidate)}' "
+            f"(best score={best_score:.2f})."
+        )
+    _emit_discovery_log(
+        log_hook,
+        f"[discover] Selected best generated row (score={best_score:.2f}): {_summarize_generated_row(best_row)}",
+    )
+    return best_row
+
+
+def _row_signatures(values: Dict[str, str]) -> Tuple[Tuple[str, str, str], Tuple[str, str, str]]:
+    pdb = _normalize_lookup_key(_generated_value(values, "chosen_pdb", "pdb_id", "pdb", "resolved_pdb_id")) or ""
+    accession = _normalize_lookup_key(
+        _generated_value(values, "vendor_accession", "vendor_product_accession", "accession", "uniprot")
+    ) or ""
+    catalog = _normalize_lookup_key(_generated_value(values, "antigen_catalog", "catalog", "sku")) or ""
+    primary = (pdb, accession, catalog)
+
+    uniprot = _normalize_lookup_key(_generated_value(values, "uniprot", "vendor_accession", "accession")) or ""
+    gene = _normalize_lookup_key(_generated_value(values, "gene")) or ""
+    url = _normalize_lookup_key(_generated_value(values, "antigen_url", "url", "vendor url")) or ""
+    fallback = (uniprot, gene, url)
+    return primary, fallback
+
+
+def _row_matches_signature(
+    left: Tuple[Tuple[str, str, str], Tuple[str, str, str]],
+    right: Tuple[Tuple[str, str, str], Tuple[str, str, str]],
+) -> bool:
+    left_primary, left_fallback = left
+    right_primary, right_fallback = right
+    if any(left_primary) and any(right_primary) and left_primary == right_primary:
+        return True
+    if any(left_fallback) and any(right_fallback) and left_fallback == right_fallback:
+        return True
+    return False
+
+
+def _next_rank(existing_rows: Sequence[Dict[str, str]]) -> int:
+    best = 0
+    for row in existing_rows:
+        raw = _normalize(row.get("rank"))
+        if not raw:
+            continue
+        match = re.search(r"\d+", raw)
+        if not match:
+            continue
+        try:
+            best = max(best, int(match.group()))
+        except Exception:
+            continue
+    if best > 0:
+        return best + 1
+    return len(existing_rows) + 1
+
+
+def _catalog_column_value(column: str, source: Dict[str, str], rank_value: int) -> str:
+    key = column.strip().lower()
+    direct = _normalize(source.get(key))
+    if key == "rank":
+        return direct or str(rank_value)
+    if direct:
+        return direct
+    aliases: Dict[str, Tuple[str, ...]] = {
+        "selection": ("selection",),
+        "uniprot": ("uniprot", "vendor_accession", "accession"),
+        "gene": ("gene", "target_name", "protein_name"),
+        "protein_name": ("protein_name", "target_name", "gene"),
+        "chosen_pdb": ("chosen_pdb", "pdb_id", "pdb", "resolved_pdb_id"),
+        "pdb_id": ("chosen_pdb", "pdb_id", "pdb", "resolved_pdb_id"),
+        "resolved_pdb_id": ("chosen_pdb", "pdb_id", "pdb", "resolved_pdb_id"),
+        "vendor_accession": ("vendor_accession", "accession", "uniprot"),
+        "vendor_product_accession": ("vendor_accession", "accession", "uniprot"),
+        "accession": ("vendor_accession", "accession", "uniprot"),
+        "antigen_catalog": ("antigen_catalog", "catalog", "sku"),
+        "catalog": ("antigen_catalog", "catalog", "sku"),
+        "sku": ("antigen_catalog", "catalog", "sku"),
+        "antigen_url": ("antigen_url", "url"),
+        "url": ("antigen_url", "url"),
+    }
+    for alias in aliases.get(key, ()):
+        val = _normalize(source.get(alias))
+        if val:
+            return val
+    return ""
+
+
+def _append_generated_row_to_catalog(
+    catalog_path: Path,
+    generated_row: Dict[str, str],
+    *,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> bool:
+    delimiter = _catalog_delimiter(catalog_path)
+    _emit_discovery_log(log_hook, "[discover] Step 4/6: dedupe and append selected row into active catalog.")
+    with _CATALOG_APPEND_LOCK:
+        with catalog_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle, delimiter=delimiter)
+            header = next(reader, [])
+            if not header:
+                raise ValueError(f"Catalog has no header: {catalog_path.name}")
+        existing_rows: List[Dict[str, str]] = []
+        with catalog_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for raw in reader:
+                if not raw:
+                    continue
+                existing_rows.append(_normalize_row_mapping(raw))
+        _emit_discovery_log(
+            log_hook,
+            f"[discover] Active catalog {catalog_path.name} currently has {len(existing_rows)} rows.",
+        )
+
+        incoming = _normalize_row_mapping(generated_row)
+        incoming_sig = _row_signatures(incoming)
+        for row in existing_rows:
+            if _row_matches_signature(_row_signatures(row), incoming_sig):
+                _emit_discovery_log(
+                    log_hook,
+                    f"[discover] Existing catalog row already matches candidate signature in {catalog_path.name}; skip append.",
+                )
+                return False
+
+        rank_value = _next_rank(existing_rows)
+        _emit_discovery_log(log_hook, f"[discover] Appending generated row with computed rank={rank_value}.")
+        row_values = [_catalog_column_value(col, incoming, rank_value) for col in header]
+        with catalog_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter=delimiter)
+            writer.writerow(row_values)
+        _emit_discovery_log(log_hook, f"[discover] Appended one row to {catalog_path.name}.")
+        return True
+
+
+def discover_unmatched_bulk_target(
+    request: BulkLlmUnmatchedDiscoverRequest,
+    *,
+    job_id: Optional[str] = None,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> Dict[str, object]:
+    _emit_discovery_log(log_hook, "[discover] Unmatched discovery job accepted.")
+    _emit_discovery_log(log_hook, f"[discover] job_id={job_id or 'n/a'} unmatched_key={request.unmatched_key}")
+    catalog_path = _resolve_catalog_path(request.catalog_name)
+    _emit_discovery_log(log_hook, f"[discover] Active catalog resolved to {catalog_path}.")
+    candidate = request.candidate
+    if not any(
+        _normalize(value)
+        for value in [
+            candidate.target_name,
+            candidate.protein_name,
+            candidate.gene,
+            candidate.uniprot,
+            candidate.pdb_id,
+            candidate.accession,
+            candidate.antigen_catalog,
+        ]
+    ):
+        raise ValueError("Candidate is empty; provide at least one target identifier before discovery.")
+
+    instruction = _build_discovery_instruction(candidate)
+    out_prefix = _discovery_prefix(request.unmatched_key, job_id)
+    _emit_discovery_log(log_hook, f"[discover] Candidate summary: {_candidate_label(candidate)}")
+    _emit_discovery_log(log_hook, f"[discover] Discovery instruction: {instruction}")
+    _emit_discovery_log(
+        log_hook,
+        f"[discover] Running discovery for '{_candidate_label(candidate)}' using {catalog_path.name}.",
+    )
+    _run_target_generation_discovery(
+        instruction=instruction,
+        out_prefix=out_prefix,
+        max_targets=request.max_targets or _LLM_DISCOVERY_DEFAULT_MAX_TARGETS,
+        launch_browser=bool(request.launch_browser),
+        log_hook=log_hook,
+    )
+    generated_rows, generated_path = _load_generated_candidate_rows(out_prefix, log_hook=log_hook)
+    selected_row = _select_best_generated_row(candidate, generated_rows, log_hook=log_hook)
+    appended = _append_generated_row_to_catalog(catalog_path, selected_row, log_hook=log_hook)
+
+    _emit_discovery_log(log_hook, "[discover] Step 5/6: rebuilding catalog match index and rematching.")
+    records = _load_catalog_records(catalog_path)
+    if not records:
+        raise ValueError(f"Catalog became empty after discovery: {catalog_path.name}")
+    _emit_discovery_log(log_hook, f"[discover] Reloaded catalog rows: {len(records)}")
+    lookup = _build_catalog_lookup(records)
+    matches, unmatched, matched_rows = _match_candidates_to_catalog(lookup, [candidate])
+    _emit_discovery_log(
+        log_hook,
+        f"[discover] Rematch result: matches={len(matches)} unmatched={len(unmatched)} matched_rows={len(matched_rows)}",
+    )
+    if unmatched or not matches or not matched_rows:
+        raise ValueError(
+            "Discovery completed but the candidate is still unmatched in the active catalog."
+        )
+
+    match = matches[0]
+    _emit_discovery_log(log_hook, "[discover] Step 6/6: discovery workflow completed successfully.")
+    message = (
+        f"Discovered and matched '{_candidate_label(candidate)}' using {generated_path.name}. "
+        f"{'Appended new row to active catalog.' if appended else 'Catalog already contained an equivalent row.'}"
+    )
+    return {
+        "catalog_name": catalog_path.name,
+        "matched_row": match.row,
+        "match": match,
+        "message": message,
+        "catalog_appended": appended,
+        "generated_file": generated_path.name,
+    }
 
 
 def _output_dir() -> Path:

@@ -53,6 +53,11 @@ from .models import (
     BoltzGenSyncResponse,
     BulkCommandDefaultsResponse,
     BulkDesignImportRequest,
+    BulkLlmUnmatchedDiscoverRequest,
+    BulkLlmUnmatchedDiscoverResponse,
+    BulkLlmUnmatchedDiscoverStatusResponse,
+    BulkLlmTargetSuggestRequest,
+    BulkLlmTargetSuggestResponse,
     BulkPreviewRequest,
     BulkPreviewResponse,
     BulkRunRequest,
@@ -125,6 +130,7 @@ from .bulk import (
     list_rfa_pipeline_configs,
     load_rfa_pipeline_script_content,
     preview_bulk_targets,
+    suggest_bulk_targets_with_llm,
 )
 from .pymol import (
     PyMolLaunchError,
@@ -146,6 +152,7 @@ from .result_collectors import (
 from .workflows import (
     submit_assessment_run,
     submit_bulk_design_import,
+    submit_bulk_llm_unmatched_discovery,
     submit_bulk_run,
     submit_boltzgen_config_run,
     submit_pipeline_refresh,
@@ -1006,6 +1013,67 @@ async def api_bulk_preview(payload: BulkPreviewRequest) -> BulkPreviewResponse:
         return preview_bulk_targets(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/bulk/llm-targets/suggest", response_model=BulkLlmTargetSuggestResponse)
+async def api_bulk_llm_target_suggest(
+    payload: BulkLlmTargetSuggestRequest,
+) -> BulkLlmTargetSuggestResponse:
+    try:
+        return suggest_bulk_targets_with_llm(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/bulk/llm-targets/unmatched/discover",
+    response_model=BulkLlmUnmatchedDiscoverResponse,
+)
+async def api_bulk_llm_unmatched_discover(
+    payload: BulkLlmUnmatchedDiscoverRequest,
+) -> BulkLlmUnmatchedDiscoverResponse:
+    try:
+        # Validate catalog path early for immediate UX feedback.
+        _resolve_catalog_file(payload.catalog_name)
+    except HTTPException:
+        raise
+    job_id = submit_bulk_llm_unmatched_discovery(payload, job_store=store)
+    return BulkLlmUnmatchedDiscoverResponse(
+        job_id=job_id,
+        unmatched_key=payload.unmatched_key,
+        message="Queued unmatched discovery job",
+    )
+
+
+@app.get(
+    "/api/bulk/llm-targets/unmatched/discover/{job_id}",
+    response_model=BulkLlmUnmatchedDiscoverStatusResponse,
+)
+async def api_bulk_llm_unmatched_discover_status(
+    job_id: str,
+) -> BulkLlmUnmatchedDiscoverStatusResponse:
+    try:
+        record = store.get(job_id)
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    if record.kind != "bulk_llm_unmatched_discovery":
+        raise HTTPException(status_code=404, detail="Unmatched discovery job not found")
+
+    details = record.details if isinstance(record.details, dict) else {}
+    failure_reason = details.get("failure_reason")
+    if not failure_reason and record.status == JobStatus.FAILED:
+        failure_reason = record.message
+
+    return BulkLlmUnmatchedDiscoverStatusResponse(
+        job_id=record.job_id,
+        status=record.status.value,
+        message=record.message,
+        unmatched_key=details.get("unmatched_key"),
+        catalog_name=details.get("catalog_name"),
+        matched_row=details.get("matched_row"),
+        match=details.get("match"),
+        failure_reason=failure_reason,
+    )
 
 
 @app.post("/api/bulk/run", response_model=BulkRunResponse)

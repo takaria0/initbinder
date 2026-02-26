@@ -28,6 +28,7 @@ const state = {
   boltzDesignCounts: {},
   bulkPreviewTimer: null,
   bulkPreviewSig: null,
+  bulkPreviewMessage: null,
   binderFilterTimer: null,
   rfaConfigs: {},
   configContext: null,
@@ -35,9 +36,24 @@ const state = {
   runMode: null,
   uiSettings: null,
   guiReadme: null,
+  llmConversations: [],
+  activeConversationId: null,
+  llmHistory: [],
+  llmMatchedRows: [],
+  llmUnmatched: [],
+  llmUnmatchedActions: {},
+  llmPickedPdbIds: [],
+  llmDeletedPdbIds: [],
+  llmSuggestPending: false,
+  llmUnmatchedPoller: null,
+  llmViewMode: 'all',
+  activeCatalogName: null,
 };
 
 const PIPELINE_RERUN_DELAY_MS = 3000; // 3 seconds
+const LLM_LOCAL_STORAGE_KEY = 'initbinder.bulk.llm.state.v1';
+const LLM_MAX_HISTORY_STORED = 200;
+const LLM_HISTORY_WINDOW_FOR_API = 30;
 
 // Keep in sync with scripts/pymol_utils.py base_palette.
 const EPITOPE_COLORS = [
@@ -86,6 +102,17 @@ function isBoltzEngine(engine) {
 
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
+  llmConversationSelect: document.querySelector('#llm-conversation-select'),
+  llmNewConversation: document.querySelector('#llm-new-conversation'),
+  llmViewMode: document.querySelector('#llm-view-mode'),
+  llmChatTranscript: document.querySelector('#llm-chat-transcript'),
+  llmChatPrompt: document.querySelector('#llm-chat-prompt'),
+  llmSuggestTargets: document.querySelector('#llm-suggest-targets'),
+  llmSuggestLoading: document.querySelector('#llm-suggest-loading'),
+  llmMatchedList: document.querySelector('#llm-matched-list'),
+  llmUnmatchedList: document.querySelector('#llm-unmatched-list'),
+  llmMatchedCount: document.querySelector('#llm-matched-count'),
+  llmUnmatchedCount: document.querySelector('#llm-unmatched-count'),
   bulkReadmeBtn: document.querySelector('#bulk-readme-btn'),
   bulkSettingsBtn: document.querySelector('#bulk-settings-btn'),
   bulkAlgorithmBtn: document.querySelector('#bulk-algorithm-btn'),
@@ -271,6 +298,397 @@ function formatNumberValue(value, decimals = 1, fallback = '—') {
 function asNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function normalizePdbId(value) {
+  const text = String(value || '').trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
+  return text || '';
+}
+
+function catalogNameFromPath(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const base = text.split(/[\\/]/).pop() || '';
+  if (!base || !/\.(csv|tsv)$/i.test(base)) return null;
+  return base;
+}
+
+function getConfiguredLlmCatalogName() {
+  const fromSettingsField = catalogNameFromPath(el.bulkSettingsInputPath?.value);
+  if (fromSettingsField) return fromSettingsField;
+  const fromUiSettings = catalogNameFromPath(state.uiSettings?.input?.default_input_path);
+  if (fromUiSettings) return fromUiSettings;
+  return null;
+}
+
+function hashUnmatchedKey(raw) {
+  let hash = 0;
+  const text = String(raw || '');
+  for (let idx = 0; idx < text.length; idx += 1) {
+    hash = (hash * 31 + text.charCodeAt(idx)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+function buildUnmatchedKey(entry = {}, fallbackIndex = 0) {
+  const candidate = entry?.candidate || {};
+  const basis = [
+    candidate.target_name,
+    candidate.protein_name,
+    candidate.gene,
+    candidate.uniprot,
+    candidate.pdb_id,
+    candidate.antigen_catalog,
+    candidate.accession,
+    entry?.reason,
+    fallbackIndex,
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .join('|');
+  return `unm_${hashUnmatchedKey(basis)}`;
+}
+
+function normalizeUnmatchedAction(raw = null) {
+  const status = String(raw?.status || '').toLowerCase();
+  const allowed = new Set(['idle', 'queued', 'running', 'success', 'failed']);
+  return {
+    status: allowed.has(status) ? status : 'idle',
+    job_id: raw?.job_id ? String(raw.job_id) : null,
+    message: raw?.message ? String(raw.message) : null,
+    updated_at: Number(raw?.updated_at || llmNowTs()),
+  };
+}
+
+function normalizeUnmatchedList(list = []) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(list) ? list : []).forEach((entry, idx) => {
+    if (!entry || typeof entry !== 'object') return;
+    const base = String(entry.unmatched_key || '').trim() || buildUnmatchedKey(entry, idx);
+    let key = base;
+    let suffix = 1;
+    while (seen.has(key)) {
+      key = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    seen.add(key);
+    out.push({ ...entry, unmatched_key: key });
+  });
+  return out;
+}
+
+function llmNowTs() {
+  return Date.now();
+}
+
+function llmConversationId() {
+  return `conv_${llmNowTs()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function llmConversationTitleFromHistory(history = [], fallback = null) {
+  const firstUser = (history || []).find((msg) => String(msg?.role || '').toLowerCase() === 'user');
+  const text = String(firstUser?.content || '').trim();
+  if (text) {
+    return text.length > 48 ? `${text.slice(0, 48)}...` : text;
+  }
+  return fallback || 'Untitled conversation';
+}
+
+function buildLlmConversation(seed = {}) {
+  const createdAt = Number(seed.created_at || llmNowTs());
+  const history = Array.isArray(seed.history) ? seed.history : [];
+  const matchedRows = Array.isArray(seed.matched_rows) ? seed.matched_rows : [];
+  const unmatched = normalizeUnmatchedList(seed.unmatched);
+  const unmatchedActionsRaw = (seed && typeof seed.unmatched_actions === 'object' && seed.unmatched_actions)
+    ? seed.unmatched_actions
+    : {};
+  const unmatchedActions = {};
+  Object.entries(unmatchedActionsRaw).forEach(([key, value]) => {
+    if (!key) return;
+    unmatchedActions[String(key)] = normalizeUnmatchedAction(value);
+  });
+  unmatched.forEach((entry) => {
+    if (!entry?.unmatched_key) return;
+    if (!unmatchedActions[entry.unmatched_key]) {
+      unmatchedActions[entry.unmatched_key] = normalizeUnmatchedAction();
+    }
+  });
+  const deleted = Array.isArray(seed.deleted_pdb_ids)
+    ? seed.deleted_pdb_ids.map((id) => normalizePdbId(id)).filter(Boolean)
+    : [];
+  const picked = Array.isArray(seed.picked_pdb_ids)
+    ? seed.picked_pdb_ids.map((id) => normalizePdbId(id)).filter(Boolean)
+    : [];
+  const title = String(seed.title || '').trim() || llmConversationTitleFromHistory(history, null);
+  return {
+    id: String(seed.id || llmConversationId()),
+    title: title || 'Untitled conversation',
+    created_at: createdAt,
+    updated_at: Number(seed.updated_at || createdAt),
+    history,
+    matched_rows: matchedRows,
+    unmatched,
+    unmatched_actions: unmatchedActions,
+    picked_pdb_ids: picked,
+    deleted_pdb_ids: deleted,
+    view_mode: seed.view_mode === 'picked' ? 'picked' : 'all',
+    active_catalog_name: seed.active_catalog_name ? String(seed.active_catalog_name) : null,
+  };
+}
+
+function getActiveConversation() {
+  const list = Array.isArray(state.llmConversations) ? state.llmConversations : [];
+  if (!state.activeConversationId) return null;
+  return list.find((conv) => conv.id === state.activeConversationId) || null;
+}
+
+function syncStateFromConversation(conv) {
+  if (!conv) return;
+  state.llmSuggestPending = false;
+  state.llmHistory = Array.isArray(conv.history) ? conv.history : [];
+  state.llmMatchedRows = Array.isArray(conv.matched_rows) ? conv.matched_rows : [];
+  state.llmUnmatched = normalizeUnmatchedList(conv.unmatched);
+  state.llmUnmatchedActions = {};
+  const actionMap = (conv && typeof conv.unmatched_actions === 'object' && conv.unmatched_actions)
+    ? conv.unmatched_actions
+    : {};
+  state.llmUnmatched.forEach((entry) => {
+    const key = String(entry?.unmatched_key || '').trim();
+    if (!key) return;
+    state.llmUnmatchedActions[key] = normalizeUnmatchedAction(actionMap[key]);
+  });
+  state.llmPickedPdbIds = Array.isArray(conv.picked_pdb_ids) ? conv.picked_pdb_ids : [];
+  state.llmDeletedPdbIds = Array.isArray(conv.deleted_pdb_ids) ? conv.deleted_pdb_ids : [];
+  state.llmViewMode = conv.view_mode === 'picked' ? 'picked' : 'all';
+  state.activeCatalogName = getConfiguredLlmCatalogName() || null;
+}
+
+function syncConversationFromState() {
+  const conv = getActiveConversation();
+  if (!conv) return;
+  conv.history = Array.isArray(state.llmHistory) ? state.llmHistory : [];
+  conv.matched_rows = Array.isArray(state.llmMatchedRows) ? state.llmMatchedRows : [];
+  conv.unmatched = normalizeUnmatchedList(state.llmUnmatched);
+  const normalizedActions = {};
+  Object.entries(state.llmUnmatchedActions || {}).forEach(([key, value]) => {
+    if (!key) return;
+    normalizedActions[String(key)] = normalizeUnmatchedAction(value);
+  });
+  conv.unmatched_actions = normalizedActions;
+  conv.picked_pdb_ids = Array.isArray(state.llmPickedPdbIds) ? state.llmPickedPdbIds : [];
+  conv.deleted_pdb_ids = Array.isArray(state.llmDeletedPdbIds) ? state.llmDeletedPdbIds : [];
+  conv.view_mode = state.llmViewMode === 'picked' ? 'picked' : 'all';
+  conv.active_catalog_name = getConfiguredLlmCatalogName() || null;
+  conv.title = llmConversationTitleFromHistory(conv.history, conv.title || null);
+  conv.updated_at = llmNowTs();
+}
+
+function renderConversationSelector() {
+  if (!el.llmConversationSelect) return;
+  const list = Array.isArray(state.llmConversations) ? state.llmConversations : [];
+  const sorted = [...list].sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+  el.llmConversationSelect.innerHTML = '';
+  if (!sorted.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No conversations';
+    el.llmConversationSelect.appendChild(opt);
+    return;
+  }
+  sorted.forEach((conv, idx) => {
+    const opt = document.createElement('option');
+    opt.value = conv.id;
+    const title = String(conv.title || '').trim() || `Conversation ${idx + 1}`;
+    const ts = new Date(Number(conv.updated_at || conv.created_at || llmNowTs())).toLocaleString();
+    const pickedCount = Array.isArray(conv.picked_pdb_ids) ? conv.picked_pdb_ids.length : 0;
+    opt.textContent = `${title} · ${pickedCount} targets (${ts})`;
+    el.llmConversationSelect.appendChild(opt);
+  });
+  el.llmConversationSelect.value = state.activeConversationId || sorted[0].id;
+}
+
+function ensureActiveConversation() {
+  if (!Array.isArray(state.llmConversations)) {
+    state.llmConversations = [];
+  }
+  let conv = getActiveConversation();
+  if (conv) return conv;
+  if (state.llmConversations.length) {
+    state.activeConversationId = state.llmConversations[0].id;
+    conv = getActiveConversation();
+    if (conv) return conv;
+  }
+  const fresh = buildLlmConversation({
+    title: 'New conversation',
+  });
+  state.llmConversations.push(fresh);
+  state.activeConversationId = fresh.id;
+  return fresh;
+}
+
+function recomputeLlmPickedPdbIds() {
+  const deleted = new Set(
+    (state.llmDeletedPdbIds || []).map((id) => normalizePdbId(id)).filter(Boolean),
+  );
+  const ids = Array.from(new Set(
+    (state.llmMatchedRows || [])
+      .map((row) => normalizePdbId(row?.resolved_pdb_id || row?.pdb_id))
+      .filter((id) => id && !deleted.has(id)),
+  ));
+  state.llmPickedPdbIds = ids;
+}
+
+function setActiveConversation(conversationId, { persist = true, rerender = true } = {}) {
+  const list = Array.isArray(state.llmConversations) ? state.llmConversations : [];
+  const target = list.find((conv) => conv.id === conversationId);
+  if (!target) return;
+  syncConversationFromState();
+  state.activeConversationId = target.id;
+  syncStateFromConversation(target);
+  recomputeLlmPickedPdbIds();
+  setLlmSuggestPending(false, { persist: false });
+  renderConversationSelector();
+  setLlmViewMode(state.llmViewMode || 'all', { persist: false, rerender: false });
+  if (persist) persistLlmState();
+  ensureLlmUnmatchedPolling();
+  if (rerender) {
+    renderLlmTranscript();
+    renderLlmMatchPanels();
+    renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+    renderBoltzConfigs();
+    updateRunCommandFilterNote();
+  }
+}
+
+function createNewConversation() {
+  syncConversationFromState();
+  const fresh = buildLlmConversation({
+    title: 'New conversation',
+    view_mode: 'all',
+  });
+  state.llmConversations.push(fresh);
+  state.activeConversationId = fresh.id;
+  syncStateFromConversation(fresh);
+  recomputeLlmPickedPdbIds();
+  setLlmSuggestPending(false, { persist: false });
+  setLlmViewMode('all', { persist: false, rerender: false });
+  renderConversationSelector();
+  renderLlmTranscript();
+  renderLlmMatchPanels();
+  persistLlmState();
+  ensureLlmUnmatchedPolling();
+  renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+  renderBoltzConfigs();
+  updateRunCommandFilterNote();
+}
+
+function getLlmPickedPdbSet() {
+  const ids = Array.isArray(state.llmPickedPdbIds) ? state.llmPickedPdbIds : [];
+  return new Set(ids.map((id) => normalizePdbId(id)).filter(Boolean));
+}
+
+function getVisibleBulkRows(rows = null) {
+  const source = Array.isArray(rows) ? rows : (Array.isArray(state.bulkPreviewRows) ? state.bulkPreviewRows : []);
+  if (state.llmViewMode !== 'picked') return source;
+  const picked = getLlmPickedPdbSet();
+  if (!picked.size) {
+    const hasMatched = Array.isArray(state.llmMatchedRows) && state.llmMatchedRows.length > 0;
+    return hasMatched ? [] : source;
+  }
+  return source.filter((row) => {
+    const pdb = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id);
+    return pdb && picked.has(pdb);
+  });
+}
+
+function getVisibleBoltzTargets(targets = null) {
+  const source = Array.isArray(targets) ? targets : (Array.isArray(state.boltzConfigs) ? state.boltzConfigs : []);
+  if (state.llmViewMode !== 'picked') return source;
+  const picked = getLlmPickedPdbSet();
+  if (!picked.size) {
+    const hasMatched = Array.isArray(state.llmMatchedRows) && state.llmMatchedRows.length > 0;
+    return hasMatched ? [] : source;
+  }
+  return source.filter((target) => {
+    const pdb = normalizePdbId(target?.pdb_id);
+    return pdb && picked.has(pdb);
+  });
+}
+
+function persistLlmState() {
+  try {
+    syncConversationFromState();
+    const list = Array.isArray(state.llmConversations) ? state.llmConversations : [];
+    const payload = {
+      version: 3,
+      active_conversation_id: state.activeConversationId || null,
+      conversations: list.map((conv) => ({
+        id: conv.id,
+        title: conv.title,
+        created_at: conv.created_at,
+        updated_at: conv.updated_at,
+        history: Array.isArray(conv.history) ? conv.history : [],
+        matched_rows: Array.isArray(conv.matched_rows) ? conv.matched_rows : [],
+        unmatched: normalizeUnmatchedList(conv.unmatched),
+        unmatched_actions: (conv && typeof conv.unmatched_actions === 'object' && conv.unmatched_actions)
+          ? conv.unmatched_actions
+          : {},
+        picked_pdb_ids: Array.isArray(conv.picked_pdb_ids) ? conv.picked_pdb_ids : [],
+        deleted_pdb_ids: Array.isArray(conv.deleted_pdb_ids) ? conv.deleted_pdb_ids : [],
+        view_mode: conv.view_mode === 'picked' ? 'picked' : 'all',
+        active_catalog_name: conv.active_catalog_name || null,
+      })),
+    };
+    localStorage.setItem(LLM_LOCAL_STORAGE_KEY, JSON.stringify(payload));
+  } catch (err) {
+    // Ignore storage failures in private mode/quota limits.
+  }
+}
+
+function restoreLlmState() {
+  try {
+    const raw = localStorage.getItem(LLM_LOCAL_STORAGE_KEY);
+    if (!raw) {
+      const fresh = buildLlmConversation({ title: 'New conversation' });
+      state.llmConversations = [fresh];
+      state.activeConversationId = fresh.id;
+      syncStateFromConversation(fresh);
+      return;
+    }
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') {
+      const fresh = buildLlmConversation({ title: 'New conversation' });
+      state.llmConversations = [fresh];
+      state.activeConversationId = fresh.id;
+      syncStateFromConversation(fresh);
+      return;
+    }
+    if (Array.isArray(data.conversations)) {
+      state.llmConversations = data.conversations.map((conv) => buildLlmConversation(conv));
+      state.activeConversationId = String(data.active_conversation_id || '');
+    } else {
+      // Legacy single-conversation payload migration.
+      const migrated = buildLlmConversation({
+        title: llmConversationTitleFromHistory(data.history || [], 'Migrated conversation'),
+        history: Array.isArray(data.history) ? data.history : [],
+        matched_rows: Array.isArray(data.matched_rows) ? data.matched_rows : [],
+        unmatched: Array.isArray(data.unmatched) ? data.unmatched : [],
+        picked_pdb_ids: Array.isArray(data.picked_pdb_ids) ? data.picked_pdb_ids : [],
+        view_mode: data.view_mode === 'picked' ? 'picked' : 'all',
+        active_catalog_name: data.active_catalog_name ? String(data.active_catalog_name) : null,
+      });
+      state.llmConversations = [migrated];
+      state.activeConversationId = migrated.id;
+    }
+    ensureActiveConversation();
+    syncStateFromConversation(getActiveConversation());
+    recomputeLlmPickedPdbIds();
+  } catch (err) {
+    const fresh = buildLlmConversation({ title: 'New conversation' });
+    state.llmConversations = [fresh];
+    state.activeConversationId = fresh.id;
+    syncStateFromConversation(fresh);
+  }
 }
 
 function describeSeries(values = []) {
@@ -2044,7 +2462,7 @@ function previewRunCommandRange(targets) {
 
 function updateRunCommandCountNote(filters) {
   if (!el.boltzRunRangeCountNote) return;
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     el.boltzRunRangeCountNote.textContent = 'Load BoltzGen configs to preview retained targets.';
     return;
@@ -2065,7 +2483,7 @@ function prependRunCommandFilters(text, filters, totalCount, passCount) {
 }
 
 async function submitPipelineRerunRangeModal(triggerBtn = null) {
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     showAlert('No BoltzGen configs loaded.');
     return;
@@ -2108,7 +2526,7 @@ function openRegenerateRangeModal() {
 }
 
 async function submitRegenerateRangeModal(triggerBtn = null) {
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     showAlert('No BoltzGen configs loaded.');
     return;
@@ -2135,7 +2553,7 @@ async function submitRegenerateRangeModal(triggerBtn = null) {
 async function showRunCommandRange() {
   state.runContext = null;
   state.runMode = 'range';
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     showAlert('No targets loaded.');
     return;
@@ -2255,8 +2673,9 @@ function renderBoltzConfigs() {
   if (!el.boltzPanel || !el.boltzTable) return;
   const tbody = el.boltzTable;
   tbody.innerHTML = '';
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
-  if (!targets.length) {
+  const allTargets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets(allTargets);
+  if (!allTargets.length) {
     const emptyRow = document.createElement('tr');
     const emptyCell = document.createElement('td');
     emptyCell.colSpan = 8;
@@ -2265,6 +2684,21 @@ function renderBoltzConfigs() {
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
     if (el.boltzSummary) el.boltzSummary.hidden = true;
+    el.boltzPanel.hidden = false;
+    return;
+  }
+  if (!targets.length) {
+    const emptyRow = document.createElement('tr');
+    const emptyCell = document.createElement('td');
+    emptyCell.colSpan = 8;
+    emptyCell.className = 'empty-note';
+    emptyCell.textContent = 'No LLM-picked targets are currently visible. Switch View mode to All targets.';
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
+    if (el.boltzSummary) {
+      el.boltzSummary.textContent = `Showing 0 of ${allTargets.length} target${allTargets.length === 1 ? '' : 's'} (LLM-picked view)`;
+      el.boltzSummary.hidden = false;
+    }
     el.boltzPanel.hidden = false;
     return;
   }
@@ -2441,7 +2875,10 @@ function renderBoltzConfigs() {
   });
 
   if (el.boltzSummary) {
-    el.boltzSummary.textContent = `${configCount} config${configCount === 1 ? '' : 's'} across ${targets.length} target${targets.length === 1 ? '' : 's'}`;
+    const baseSummary = `${configCount} config${configCount === 1 ? '' : 's'} across ${targets.length} target${targets.length === 1 ? '' : 's'}`;
+    el.boltzSummary.textContent = state.llmViewMode === 'picked' && targets.length !== allTargets.length
+      ? `${baseSummary} (filtered from ${allTargets.length})`
+      : baseSummary;
     el.boltzSummary.hidden = false;
   }
   el.boltzPanel.hidden = false;
@@ -2519,6 +2956,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsOpenaiKey, llm.openai_api_key);
   setTextInputValue(el.bulkSettingsOpenaiModel, llm.openai_model);
   setTextInputValue(el.bulkSettingsInputPath, input.default_input_path);
+  state.activeCatalogName = getConfiguredLlmCatalogName();
   if (el.bulkSettingsAutoLoad) el.bulkSettingsAutoLoad.checked = Boolean(input.auto_load_default_input);
 
   if (el.bulkSettingsMeta) {
@@ -2576,10 +3014,9 @@ async function loadBulkUiSettings({ autoLoadInput = true } = {}) {
     state.uiSettings = payload;
     applyBulkUiSettingsToForm(payload);
     if (autoLoadInput) {
-      const shouldAutoLoad = Boolean(payload?.input?.auto_load_default_input);
-      const hasInput = Boolean((el.bulkCsvInput?.value || '').trim());
-      if (shouldAutoLoad && !hasInput) {
-        await loadDefaultInputFile({ force: false, silent: true });
+      const configuredInput = normalizeOptionalText(payload?.input?.default_input_path);
+      if (configuredInput) {
+        await loadDefaultInputFile({ force: true, silent: false });
       }
     }
   } catch (err) {
@@ -2605,6 +3042,10 @@ async function saveBulkUiSettings(triggerEl = null) {
     applyBulkUiSettingsToForm(body);
     state.commandDefaults = null;
     await loadCommandDefaults();
+    const configuredInput = normalizeOptionalText(body?.input?.default_input_path);
+    if (configuredInput) {
+      await loadDefaultInputFile({ force: true, silent: false });
+    }
     showAlert('Bulk settings saved.', false);
     toggleModal(el.bulkSettingsModal, false);
   } catch (err) {
@@ -2781,8 +3222,9 @@ async function loadBoltzConfigs(options = {}) {
 
 async function regenerateBoltzConfigs(options = {}) {
   const { pdbIds = null, triggerBtn = null } = options;
-  const candidates = Array.isArray(state.boltzConfigs) && state.boltzConfigs.length
-    ? state.boltzConfigs
+  const visibleTargets = getVisibleBoltzTargets();
+  const candidates = Array.isArray(visibleTargets) && visibleTargets.length
+    ? visibleTargets
     : (state.bulkPreviewRows || []);
   const ids = Array.from(new Set(
     (pdbIds && pdbIds.length ? pdbIds : candidates)
@@ -2831,7 +3273,7 @@ async function regenerateBoltzConfigs(options = {}) {
 }
 
 async function plotBoltzAntigenDiversity() {
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   const ids = Array.from(new Set(targets.map((t) => (t?.pdb_id || '').trim().toUpperCase()).filter(Boolean)));
   if (!ids.length) {
     showAlert('No BoltzGen configs loaded.');
@@ -3727,7 +4169,7 @@ async function showRunCommand(pdbId, configPath = null, epitopeName = null) {
 }
 
 async function showRfaRunCommandAll() {
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     renderRunCommandBlocks('# No targets detected.');
     return;
@@ -3762,7 +4204,7 @@ async function showRunCommandAll() {
     await showRfaRunCommandAll();
     return;
   }
-  const targets = Array.isArray(state.boltzConfigs) ? state.boltzConfigs : [];
+  const targets = getVisibleBoltzTargets();
   if (!targets.length) {
     renderRunCommandBlocks('# No BoltzGen targets detected.');
     return;
@@ -4015,10 +4457,22 @@ function renderBulkPreview(rows = [], summary = '') {
   if (!el.bulkPreviewPanel || !el.bulkPreviewTable) return;
   const tbody = el.bulkPreviewTable;
   tbody.innerHTML = '';
-  const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) {
+  const allRows = Array.isArray(rows) ? rows : [];
+  const list = getVisibleBulkRows(allRows);
+  if (!allRows.length) {
     el.bulkPreviewPanel.hidden = true;
     return;
+  }
+  if (!list.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.className = 'empty-note';
+    td.textContent = state.llmViewMode === 'picked'
+      ? 'No LLM-picked targets found in current preview. Switch View mode to All targets.'
+      : 'No targets detected.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
   }
   list.forEach((row) => {
     const tr = document.createElement('tr');
@@ -4039,10 +4493,562 @@ function renderBulkPreview(rows = [], summary = '') {
     tbody.appendChild(tr);
   });
   if (el.bulkPreviewSummary) {
-    el.bulkPreviewSummary.textContent = summary || `${list.length} rows parsed`;
+    const baseSummary = summary || `${allRows.length} rows parsed`;
+    if (state.llmViewMode === 'picked') {
+      el.bulkPreviewSummary.textContent = `${baseSummary} · showing ${list.length} LLM-picked`;
+    } else {
+      el.bulkPreviewSummary.textContent = baseSummary;
+    }
     el.bulkPreviewSummary.hidden = false;
   }
   el.bulkPreviewPanel.hidden = false;
+}
+
+function renderLlmSuggestLoading() {
+  if (el.llmSuggestLoading) {
+    el.llmSuggestLoading.hidden = !state.llmSuggestPending;
+  }
+}
+
+function setLlmSuggestPending(next, { persist = true } = {}) {
+  state.llmSuggestPending = Boolean(next);
+  if (el.llmSuggestTargets) {
+    el.llmSuggestTargets.disabled = state.llmSuggestPending;
+  }
+  renderLlmSuggestLoading();
+  if (persist) persistLlmState();
+}
+
+function ensureLlmUnmatchedActions() {
+  const next = {};
+  const current = (state && typeof state.llmUnmatchedActions === 'object' && state.llmUnmatchedActions)
+    ? state.llmUnmatchedActions
+    : {};
+  const normalized = normalizeUnmatchedList(state.llmUnmatched);
+  state.llmUnmatched = normalized;
+  normalized.forEach((entry) => {
+    const key = String(entry?.unmatched_key || '').trim();
+    if (!key) return;
+    next[key] = normalizeUnmatchedAction(current[key]);
+  });
+  state.llmUnmatchedActions = next;
+}
+
+function getLlmUnmatchedAction(unmatchedKey) {
+  const key = String(unmatchedKey || '').trim();
+  if (!key) return normalizeUnmatchedAction();
+  ensureLlmUnmatchedActions();
+  return state.llmUnmatchedActions[key] || normalizeUnmatchedAction();
+}
+
+function setLlmUnmatchedAction(unmatchedKey, patch = {}) {
+  const key = String(unmatchedKey || '').trim();
+  if (!key) return;
+  ensureLlmUnmatchedActions();
+  const prev = state.llmUnmatchedActions[key] || normalizeUnmatchedAction();
+  state.llmUnmatchedActions[key] = normalizeUnmatchedAction({
+    ...prev,
+    ...patch,
+    updated_at: llmNowTs(),
+  });
+}
+
+function mergeMatchedRowsInState(rows = []) {
+  const mergedRows = new Map();
+  (Array.isArray(state.llmMatchedRows) ? state.llmMatchedRows : []).forEach((row) => {
+    const key = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id)
+      || `row_${row?.raw_index || ''}_${String(row?.preset_name || '')}`;
+    mergedRows.set(key, row);
+  });
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const key = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id)
+      || `row_${row?.raw_index || ''}_${String(row?.preset_name || '')}`;
+    mergedRows.set(key, row);
+  });
+  state.llmMatchedRows = Array.from(mergedRows.values());
+}
+
+function mergeMatchedRowsIntoPreview(rows = []) {
+  if (!Array.isArray(state.bulkPreviewRows) || !state.bulkPreviewRows.length) {
+    state.bulkPreviewRows = Array.isArray(rows) ? [...rows] : [];
+    return;
+  }
+  const existing = Array.isArray(state.bulkPreviewRows) ? state.bulkPreviewRows : [];
+  const merged = [...existing];
+  const existingIds = new Set(
+    existing
+      .map((row) => normalizePdbId(row?.resolved_pdb_id || row?.pdb_id))
+      .filter(Boolean),
+  );
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const pdb = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id);
+    if (pdb && !existingIds.has(pdb)) {
+      merged.push(row);
+      existingIds.add(pdb);
+    }
+  });
+  state.bulkPreviewRows = merged;
+}
+
+function removeUnmatchedEntry(unmatchedKey) {
+  const key = String(unmatchedKey || '').trim();
+  if (!key) return;
+  state.llmUnmatched = (Array.isArray(state.llmUnmatched) ? state.llmUnmatched : [])
+    .filter((entry) => String(entry?.unmatched_key || '').trim() !== key);
+  if (state.llmUnmatchedActions && typeof state.llmUnmatchedActions === 'object') {
+    delete state.llmUnmatchedActions[key];
+  }
+}
+
+function stopLlmUnmatchedPolling() {
+  if (state.llmUnmatchedPoller) {
+    clearInterval(state.llmUnmatchedPoller);
+    state.llmUnmatchedPoller = null;
+  }
+}
+
+function hasActiveLlmUnmatchedJobs() {
+  ensureLlmUnmatchedActions();
+  return Object.values(state.llmUnmatchedActions || {}).some((entry) => {
+    const status = String(entry?.status || '').toLowerCase();
+    return status === 'queued' || status === 'running';
+  });
+}
+
+async function pollLlmUnmatchedJobs() {
+  ensureLlmUnmatchedActions();
+  const actionEntries = Object.entries(state.llmUnmatchedActions || {})
+    .filter(([, entry]) => {
+      const status = String(entry?.status || '').toLowerCase();
+      return (status === 'queued' || status === 'running') && entry?.job_id;
+    });
+  if (!actionEntries.length) {
+    stopLlmUnmatchedPolling();
+    return;
+  }
+
+  let didUpdate = false;
+  for (const [key, action] of actionEntries) {
+    try {
+      const res = await fetch(`/api/bulk/llm-targets/unmatched/discover/${encodeURIComponent(action.job_id)}`);
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body?.detail || body?.message || `Discovery status failed (${res.status})`);
+      }
+      const status = String(body?.status || '').toLowerCase();
+      if (status === 'pending' || status === 'running') {
+        setLlmUnmatchedAction(key, {
+          status: status === 'pending' ? 'queued' : 'running',
+          message: body?.message || 'Discovery in progress...',
+          job_id: action.job_id,
+        });
+        didUpdate = true;
+        continue;
+      }
+      if (status === 'success') {
+        if (body?.matched_row && typeof body.matched_row === 'object') {
+          mergeMatchedRowsInState([body.matched_row]);
+          mergeMatchedRowsIntoPreview([body.matched_row]);
+          recomputeLlmPickedPdbIds();
+        }
+        removeUnmatchedEntry(key);
+        didUpdate = true;
+        continue;
+      }
+      setLlmUnmatchedAction(key, {
+        status: 'failed',
+        message: body?.failure_reason || body?.message || 'Discovery failed.',
+        job_id: action.job_id,
+      });
+      didUpdate = true;
+    } catch (err) {
+      setLlmUnmatchedAction(key, {
+        status: 'failed',
+        message: err?.message || 'Discovery polling failed.',
+        job_id: action.job_id,
+      });
+      didUpdate = true;
+    }
+  }
+
+  if (didUpdate) {
+    ensureLlmUnmatchedActions();
+    renderLlmMatchPanels();
+    renderConversationSelector();
+    persistLlmState();
+    renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+    loadBoltzConfigs({ silent: true });
+    updateRunCommandFilterNote();
+  }
+  if (!hasActiveLlmUnmatchedJobs()) {
+    stopLlmUnmatchedPolling();
+  }
+}
+
+function ensureLlmUnmatchedPolling() {
+  if (!hasActiveLlmUnmatchedJobs()) {
+    stopLlmUnmatchedPolling();
+    return;
+  }
+  if (state.llmUnmatchedPoller) return;
+  pollLlmUnmatchedJobs();
+  state.llmUnmatchedPoller = setInterval(pollLlmUnmatchedJobs, 2500);
+}
+
+function renderLlmTranscript() {
+  if (!el.llmChatTranscript) return;
+  const history = Array.isArray(state.llmHistory) ? state.llmHistory : [];
+  el.llmChatTranscript.innerHTML = '';
+  if (!history.length) {
+    const empty = document.createElement('div');
+    empty.className = 'llm-empty';
+    empty.textContent = 'No conversation yet.';
+    el.llmChatTranscript.appendChild(empty);
+    return;
+  }
+  history.forEach((msg) => {
+    const role = String(msg?.role || '').trim().toLowerCase() === 'assistant' ? 'assistant' : 'user';
+    const text = String(msg?.content || '').trim();
+    if (!text) return;
+    const box = document.createElement('div');
+    box.className = `llm-msg ${role}`;
+    const roleLabel = role === 'assistant' ? 'Assistant' : 'User';
+    box.textContent = `${roleLabel}: ${text}`;
+    el.llmChatTranscript.appendChild(box);
+  });
+  if (state.llmSuggestPending) {
+    const pending = document.createElement('div');
+    pending.className = 'llm-msg assistant';
+    pending.textContent = 'Assistant: Preparing suggestions...';
+    el.llmChatTranscript.appendChild(pending);
+  }
+  el.llmChatTranscript.scrollTop = el.llmChatTranscript.scrollHeight;
+}
+
+function renderLlmMatchPanels() {
+  const matchedList = Array.isArray(state.llmMatchedRows) ? state.llmMatchedRows : [];
+  const deletedSet = new Set(
+    (state.llmDeletedPdbIds || []).map((id) => normalizePdbId(id)).filter(Boolean),
+  );
+  ensureLlmUnmatchedActions();
+  const activeCount = Array.isArray(state.llmPickedPdbIds) ? state.llmPickedPdbIds.length : 0;
+  const totalCount = matchedList.length;
+  if (el.llmMatchedCount) {
+    el.llmMatchedCount.textContent = `${activeCount}/${totalCount}`;
+  }
+  if (el.llmUnmatchedCount) {
+    const count = Array.isArray(state.llmUnmatched) ? state.llmUnmatched.length : 0;
+    el.llmUnmatchedCount.textContent = String(count);
+  }
+
+  if (el.llmMatchedList) {
+    el.llmMatchedList.innerHTML = '';
+    if (!matchedList.length) {
+      const empty = document.createElement('div');
+      empty.className = 'llm-empty';
+      empty.textContent = 'No matched targets yet.';
+      el.llmMatchedList.appendChild(empty);
+    } else {
+      matchedList.forEach((row) => {
+        const item = document.createElement('div');
+        item.className = 'item';
+        const pdb = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id) || '—';
+        const name = row?.protein_name || row?.preset_name || 'Unnamed target';
+        const acc = row?.accession ? ` · ${row.accession}` : '';
+        const isDeleted = deletedSet.has(pdb);
+
+        const rowWrap = document.createElement('div');
+        rowWrap.className = 'llm-item-row';
+
+        const label = document.createElement('span');
+        label.className = `label${isDeleted ? ' deleted' : ''}`;
+        label.textContent = `${pdb} · ${name}${acc}`;
+        rowWrap.appendChild(label);
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.className = 'mini-btn';
+        toggleBtn.dataset.action = 'toggle-picked-target';
+        toggleBtn.dataset.pdbId = pdb;
+        toggleBtn.textContent = isDeleted ? 'Undelete' : 'Delete';
+        rowWrap.appendChild(toggleBtn);
+
+        item.appendChild(rowWrap);
+        el.llmMatchedList.appendChild(item);
+      });
+    }
+  }
+
+  if (el.llmUnmatchedList) {
+    const list = Array.isArray(state.llmUnmatched) ? state.llmUnmatched : [];
+    el.llmUnmatchedList.innerHTML = '';
+    if (!list.length) {
+      const empty = document.createElement('div');
+      empty.className = 'llm-empty';
+      empty.textContent = 'No unmatched suggestions.';
+      el.llmUnmatchedList.appendChild(empty);
+    } else {
+      list.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'item';
+        const key = String(entry?.unmatched_key || '').trim() || buildUnmatchedKey(entry);
+        const action = getLlmUnmatchedAction(key);
+        const candidate = entry?.candidate || {};
+        const label = candidate.target_name
+          || candidate.protein_name
+          || candidate.gene
+          || candidate.uniprot
+          || candidate.pdb_id
+          || 'Unknown target';
+        const nearest = Array.isArray(entry?.nearest) ? entry.nearest : [];
+        const hints = nearest
+          .slice(0, 2)
+          .map((hit) => {
+            const row = hit?.row || {};
+            return row?.resolved_pdb_id || row?.pdb_id || row?.preset_name || '';
+          })
+          .filter(Boolean)
+          .join(', ');
+        const rowWrap = document.createElement('div');
+        rowWrap.className = 'llm-item-row';
+
+        const textWrap = document.createElement('span');
+        textWrap.className = 'label';
+        textWrap.textContent = hints
+          ? `${label} · nearest: ${hints}`
+          : `${label} · no catalog match`;
+        rowWrap.appendChild(textWrap);
+
+        const actionBtn = document.createElement('button');
+        actionBtn.type = 'button';
+        actionBtn.className = 'mini-btn';
+        actionBtn.dataset.action = 'discover-unmatched-target';
+        actionBtn.dataset.unmatchedKey = key;
+        const actionStatus = String(action?.status || 'idle').toLowerCase();
+        if (actionStatus === 'running' || actionStatus === 'queued') {
+          actionBtn.textContent = 'Running...';
+          actionBtn.disabled = true;
+        } else if (actionStatus === 'failed') {
+          actionBtn.textContent = 'Retry';
+          actionBtn.disabled = false;
+        } else if (actionStatus === 'success') {
+          actionBtn.textContent = 'Added';
+          actionBtn.disabled = true;
+        } else {
+          actionBtn.textContent = 'Discover';
+          actionBtn.disabled = false;
+        }
+        rowWrap.appendChild(actionBtn);
+        item.appendChild(rowWrap);
+
+        if (action?.message) {
+          const meta = document.createElement('div');
+          meta.className = 'llm-item-status';
+          meta.textContent = action.message;
+          item.appendChild(meta);
+        }
+        el.llmUnmatchedList.appendChild(item);
+      });
+    }
+  }
+}
+
+function toggleMatchedTargetDeleted(pdbId) {
+  const key = normalizePdbId(pdbId);
+  if (!key) return;
+  const next = new Set(
+    (state.llmDeletedPdbIds || []).map((id) => normalizePdbId(id)).filter(Boolean),
+  );
+  if (next.has(key)) {
+    next.delete(key);
+  } else {
+    next.add(key);
+  }
+  state.llmDeletedPdbIds = Array.from(next);
+  recomputeLlmPickedPdbIds();
+  renderLlmMatchPanels();
+  renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+  renderBoltzConfigs();
+  updateRunCommandFilterNote();
+  persistLlmState();
+}
+
+function handleLlmMatchedListClick(event) {
+  const btn = event.target.closest('button[data-action="toggle-picked-target"]');
+  if (!btn) return;
+  toggleMatchedTargetDeleted(btn.dataset.pdbId || '');
+}
+
+function findUnmatchedEntry(unmatchedKey) {
+  const key = String(unmatchedKey || '').trim();
+  if (!key) return null;
+  const list = Array.isArray(state.llmUnmatched) ? state.llmUnmatched : [];
+  return list.find((entry) => String(entry?.unmatched_key || '').trim() === key) || null;
+}
+
+async function submitUnmatchedDiscovery(unmatchedKey) {
+  const key = String(unmatchedKey || '').trim();
+  const entry = findUnmatchedEntry(key);
+  if (!entry) return;
+  const catalogName = String(getConfiguredLlmCatalogName() || '').trim();
+  if (!catalogName) {
+    showAlert('Set Config -> Input TSV defaults -> Default input file path to a catalog .tsv/.csv file in targets_catalog.');
+    return;
+  }
+  setLlmUnmatchedAction(key, {
+    status: 'queued',
+    message: 'Queued discovery...',
+  });
+  renderLlmMatchPanels();
+  persistLlmState();
+  try {
+    const res = await fetch('/api/bulk/llm-targets/unmatched/discover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        catalog_name: catalogName,
+        unmatched_key: key,
+        candidate: entry.candidate || {},
+        max_targets: 3,
+        launch_browser: true,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body?.detail || body?.message || `Discover request failed (${res.status})`);
+    }
+    setLlmUnmatchedAction(key, {
+      status: 'queued',
+      job_id: body?.job_id ? String(body.job_id) : null,
+      message: body?.message || 'Discovery queued.',
+    });
+    ensureLlmUnmatchedPolling();
+    renderLlmMatchPanels();
+    renderConversationSelector();
+    persistLlmState();
+  } catch (err) {
+    setLlmUnmatchedAction(key, {
+      status: 'failed',
+      message: err?.message || 'Failed to queue discovery.',
+    });
+    renderLlmMatchPanels();
+    persistLlmState();
+    showAlert(err?.message || 'Failed to queue discovery.');
+  }
+}
+
+function handleLlmUnmatchedListClick(event) {
+  const btn = event.target.closest('button[data-action="discover-unmatched-target"]');
+  if (!btn) return;
+  submitUnmatchedDiscovery(btn.dataset.unmatchedKey || '');
+}
+
+function setLlmViewMode(mode, { persist = true, rerender = true } = {}) {
+  const next = mode === 'picked' ? 'picked' : 'all';
+  state.llmViewMode = next;
+  if (el.llmViewMode) {
+    el.llmViewMode.value = next;
+  }
+  if (persist) persistLlmState();
+  if (rerender) {
+    renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+    renderBoltzConfigs();
+    updateRunCommandFilterNote();
+  }
+}
+
+function applyLlmSuggestResponse(body = {}, { promptText = '', appendUserMessage = true } = {}) {
+  const assistantMessage = String(body?.assistant_message || body?.message || '').trim();
+  const matchedRows = Array.isArray(body?.matched_rows) ? body.matched_rows : [];
+  const unmatched = normalizeUnmatchedList(body?.unmatched);
+  const userText = String(promptText || '').trim();
+  if (appendUserMessage && userText) {
+    state.llmHistory.push({ role: 'user', content: userText });
+  }
+  if (assistantMessage) {
+    state.llmHistory.push({ role: 'assistant', content: assistantMessage });
+  }
+  if (state.llmHistory.length > LLM_MAX_HISTORY_STORED) {
+    state.llmHistory = state.llmHistory.slice(-LLM_MAX_HISTORY_STORED);
+  }
+
+  mergeMatchedRowsInState(matchedRows);
+  state.llmUnmatched = unmatched;
+  ensureLlmUnmatchedActions();
+  recomputeLlmPickedPdbIds();
+
+  if (!Array.isArray(state.bulkPreviewRows) || !state.bulkPreviewRows.length) {
+    state.bulkPreviewRows = Array.isArray(state.llmMatchedRows) ? [...state.llmMatchedRows] : [];
+    state.bulkPreviewMessage = body?.message || '';
+  } else {
+    mergeMatchedRowsIntoPreview(matchedRows);
+  }
+  if (body?.catalog_name) {
+    state.activeCatalogName = String(body.catalog_name);
+  }
+  setLlmViewMode('picked', { persist: false, rerender: false });
+  setLlmSuggestPending(false, { persist: false });
+  renderLlmTranscript();
+  renderLlmMatchPanels();
+  renderConversationSelector();
+  persistLlmState();
+  ensureLlmUnmatchedPolling();
+  renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+  loadBoltzConfigs({ silent: true });
+  updateRunCommandFilterNote();
+}
+
+async function submitLlmTargetSuggest(triggerEl = null) {
+  const prompt = String(el.llmChatPrompt?.value || '').trim();
+  const catalogName = String(getConfiguredLlmCatalogName() || '').trim();
+  if (!catalogName) {
+    showAlert('Set Config -> Input TSV defaults -> Default input file path to a catalog .tsv/.csv file in targets_catalog.');
+    return;
+  }
+  if (!prompt) {
+    showAlert('Enter a prompt before suggesting targets.');
+    return;
+  }
+  if (state.llmSuggestPending) return;
+  const historyForApi = Array.isArray(state.llmHistory)
+    ? state.llmHistory.slice(-LLM_HISTORY_WINDOW_FOR_API)
+    : [];
+  state.llmHistory.push({ role: 'user', content: prompt });
+  if (state.llmHistory.length > LLM_MAX_HISTORY_STORED) {
+    state.llmHistory = state.llmHistory.slice(-LLM_MAX_HISTORY_STORED);
+  }
+  if (el.llmChatPrompt) el.llmChatPrompt.value = '';
+  setLlmSuggestPending(true, { persist: false });
+  renderLlmTranscript();
+  renderConversationSelector();
+  persistLlmState();
+  if (triggerEl) triggerEl.disabled = true;
+  try {
+    const payload = {
+      catalog_name: catalogName,
+      prompt,
+      history: historyForApi,
+      max_candidates: 24,
+    };
+    const res = await fetch('/api/bulk/llm-targets/suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body?.detail || body?.message || `LLM suggest failed (${res.status})`);
+    }
+    applyLlmSuggestResponse(body, { promptText: prompt, appendUserMessage: false });
+    showAlert(body?.message || 'LLM target suggestions ready.', false);
+  } catch (err) {
+    setLlmSuggestPending(false, { persist: false });
+    renderLlmTranscript();
+    persistLlmState();
+    showAlert(err.message || 'Failed to suggest targets.');
+  } finally {
+    if (triggerEl) triggerEl.disabled = false;
+  }
 }
 
 async function previewBulkCsv(options = {}) {
@@ -4074,6 +5080,7 @@ async function previewBulkCsv(options = {}) {
     }
     const body = await res.json();
     state.bulkPreviewRows = Array.isArray(body.rows) ? body.rows : [];
+    state.bulkPreviewMessage = body.message || '';
     state.binderPage = 1;
     renderBulkPreview(state.bulkPreviewRows, body.message || '');
     loadBoltzConfigs({ silent: true });
@@ -4476,9 +5483,53 @@ function setupExampleTabs() {
 }
 
 function init() {
+  restoreLlmState();
+  ensureActiveConversation();
+  syncStateFromConversation(getActiveConversation());
+  recomputeLlmPickedPdbIds();
+  setLlmSuggestPending(false, { persist: false });
+  renderConversationSelector();
+  renderLlmSuggestLoading();
+  renderLlmTranscript();
+  renderLlmMatchPanels();
+  setLlmViewMode(state.llmViewMode || 'all', { persist: false, rerender: false });
+  ensureLlmUnmatchedPolling();
   loadCommandDefaults();
   loadBulkUiSettings({ autoLoadInput: true });
   setupExampleTabs();
+  if (el.llmConversationSelect) {
+    el.llmConversationSelect.addEventListener('change', () => {
+      const id = String(el.llmConversationSelect.value || '').trim();
+      if (!id) return;
+      setActiveConversation(id, { persist: true, rerender: true });
+    });
+  }
+  if (el.llmNewConversation) {
+    el.llmNewConversation.addEventListener('click', () => {
+      createNewConversation();
+      if (el.llmChatPrompt) el.llmChatPrompt.value = '';
+    });
+  }
+  if (el.llmSuggestTargets) {
+    el.llmSuggestTargets.addEventListener('click', () => submitLlmTargetSuggest(el.llmSuggestTargets));
+  }
+  if (el.llmViewMode) {
+    el.llmViewMode.addEventListener('change', () => setLlmViewMode(el.llmViewMode.value));
+  }
+  if (el.llmMatchedList) {
+    el.llmMatchedList.addEventListener('click', handleLlmMatchedListClick);
+  }
+  if (el.llmUnmatchedList) {
+    el.llmUnmatchedList.addEventListener('click', handleLlmUnmatchedListClick);
+  }
+  if (el.llmChatPrompt) {
+    el.llmChatPrompt.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter' && (evt.metaKey || evt.ctrlKey)) {
+        evt.preventDefault();
+        submitLlmTargetSuggest(el.llmSuggestTargets);
+      }
+    });
+  }
   if (el.bulkPreviewBtn) el.bulkPreviewBtn.addEventListener('click', () => previewBulkCsv({ silent: false }));
   if (el.bulkPreviewRefresh) el.bulkPreviewRefresh.addEventListener('click', () => previewBulkCsv({ silent: true }));
   if (el.bulkCsvInput) el.bulkCsvInput.addEventListener('input', scheduleBulkPreview);
