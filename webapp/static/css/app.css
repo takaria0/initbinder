@@ -1796,6 +1796,10 @@ body.modal-open {
   gap: 8px;
 }
 
+.llm-list-panel[hidden] {
+  display: none !important;
+}
+
 .llm-list {
   border: 1px solid #d9e2ee;
   border-radius: 12px;

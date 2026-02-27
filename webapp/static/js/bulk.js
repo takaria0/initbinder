@@ -112,6 +112,8 @@ const el = {
   llmChatPrompt: document.querySelector('#llm-chat-prompt'),
   llmSuggestTargets: document.querySelector('#llm-suggest-targets'),
   llmSuggestLoading: document.querySelector('#llm-suggest-loading'),
+  llmMatchedPanel: document.querySelector('#llm-matched-panel'),
+  llmUnmatchedPanel: document.querySelector('#llm-unmatched-panel'),
   llmMatchedList: document.querySelector('#llm-matched-list'),
   llmUnmatchedList: document.querySelector('#llm-unmatched-list'),
   llmMatchedCount: document.querySelector('#llm-matched-count'),
@@ -4785,6 +4787,18 @@ function llmActionStatusLabel(status) {
   return 'Ready';
 }
 
+function hasLlmAssistantResponse() {
+  const history = Array.isArray(state.llmHistory) ? state.llmHistory : [];
+  const hasAssistantInHistory = history.some((msg) => (
+    String(msg?.role || '').trim().toLowerCase() === 'assistant'
+    && String(msg?.content || '').trim()
+  ));
+  if (hasAssistantInHistory) return true;
+  const hasMatched = Array.isArray(state.llmMatchedRows) && state.llmMatchedRows.length > 0;
+  if (hasMatched) return true;
+  return Array.isArray(state.llmUnmatched) && state.llmUnmatched.length > 0;
+}
+
 function renderLlmTranscript() {
   if (!el.llmChatTranscript) return;
   const history = Array.isArray(state.llmHistory) ? state.llmHistory : [];
@@ -4811,6 +4825,12 @@ function renderLlmTranscript() {
 }
 
 function renderLlmMatchPanels() {
+  const showPanels = hasLlmAssistantResponse();
+  const matchedPanel = el.llmMatchedPanel || el.llmMatchedList?.closest('.llm-list-panel');
+  const unmatchedPanel = el.llmUnmatchedPanel || el.llmUnmatchedList?.closest('.llm-list-panel');
+  if (matchedPanel) matchedPanel.hidden = !showPanels;
+  if (unmatchedPanel) unmatchedPanel.hidden = !showPanels;
+
   const matchedList = Array.isArray(state.llmMatchedRows) ? state.llmMatchedRows : [];
   const deletedSet = new Set(
     (state.llmDeletedPdbIds || []).map((id) => normalizePdbId(id)).filter(Boolean),
