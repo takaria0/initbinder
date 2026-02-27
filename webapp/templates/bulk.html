@@ -34,7 +34,7 @@
                 </div>
               </div>
 
-              <div class="llm-control-strip">
+              <div class="llm-session-strip">
                 <div class="llm-control-group">
                   <label class="llm-control-label" for="llm-conversation-select">Conversation</label>
                   <div class="llm-control-inline">
@@ -42,22 +42,6 @@
                       <option value="">New conversation</option>
                     </select>
                     <button type="button" id="llm-new-conversation" class="ghost">New</button>
-                  </div>
-                </div>
-                <div class="llm-control-group llm-filter-group">
-                  <div class="llm-select-field">
-                    <label class="llm-control-label" for="llm-view-mode">View</label>
-                    <select id="llm-view-mode">
-                      <option value="picked">LLM-picked</option>
-                      <option value="all">All targets</option>
-                    </select>
-                  </div>
-                  <div class="llm-select-field">
-                    <label class="llm-control-label" for="llm-catalog-filter">Catalog</label>
-                    <select id="llm-catalog-filter">
-                      <option value="biotin">Biotin only</option>
-                      <option value="all">All</option>
-                    </select>
                   </div>
                 </div>
               </div>
@@ -85,6 +69,26 @@
                 </div>
 
                 <div class="llm-column llm-results-column">
+                  <div class="llm-results-scope">
+                    <p class="llm-results-scope-title">Result scope</p>
+                    <div class="llm-results-scope-fields">
+                      <div class="llm-select-field">
+                        <label class="llm-control-label" for="llm-view-mode">View</label>
+                        <select id="llm-view-mode">
+                          <option value="picked">LLM-picked</option>
+                          <option value="all">All targets</option>
+                        </select>
+                      </div>
+                      <div class="llm-select-field">
+                        <label class="llm-control-label" for="llm-catalog-filter">Catalog</label>
+                        <select id="llm-catalog-filter">
+                          <option value="biotin">Biotin only</option>
+                          <option value="all">All</option>
+                        </select>
+                      </div>
+                    </div>
+                    <p class="llm-results-scope-note">Applies to matched/unmatched lists and selected-target preview.</p>
+                  </div>
                   <div class="llm-list-panel">
                     <div class="llm-section-heading">
                       <h3 class="llm-section-title">Matched targets</h3>
@@ -363,7 +367,7 @@
         <div class="bulk-modal-body">
           <p class="help-text">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
           <div class="bulk-control-row">
-            <label>Expected epitopes
+            <label>Target epitopes
               <input type="number" id="pipeline-rerun-expected" value="10" min="1" max="32">
             </label>
             <label>Decide attempts
@@ -408,7 +412,7 @@
             <label>Row end
               <input type="number" id="boltz-rerun-range-end" placeholder="End" min="1">
             </label>
-            <label>Expected epitopes
+            <label>Target epitopes
               <input type="number" id="boltz-rerun-range-expected" value="10" min="1" max="32">
             </label>
             <label>Decide attempts
