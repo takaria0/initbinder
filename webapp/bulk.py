@@ -2749,6 +2749,10 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         )
         uniprot_idx = _find_index(header, ["uniprot", "uniprot_id", "uniprotkb", "uniprot accession"])
         protein_idx = _find_index(header, ["protein_name", "protein name", "description", "target_name"])
+        expression_host_idx = _find_index(
+            header,
+            ["expression_host", "expression host", "expression_system", "expression system", "host"],
+        )
         selection_idx = _find_index(header, ["selection", "selection_type"])
         biotin_idx = _find_index(header, ["biotinylated", "is_biotinylated", "biotin"])
         tags_idx = _find_index(header, ["tags", "tag", "prefer_tags"])
@@ -2757,6 +2761,7 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         antigen_idx = 1
         pdb_idx = 2 if (rows and len(rows[0]) > 2) else None
         accession_idx = 3 if (rows and len(rows[0]) > 3) else None
+        expression_host_idx = None
 
     entries: List[dict] = []
     skipped_multi_accession = 0
@@ -2782,6 +2787,11 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         if not vendor_range_raw and vendor_overlap_idx is not None and len(row) > vendor_overlap_idx:
             vendor_range_raw = _normalize(row[vendor_overlap_idx])
         protein_name = _normalize(row[protein_idx]) if protein_idx is not None and len(row) > protein_idx else None
+        expression_host = (
+            _normalize(row[expression_host_idx])
+            if expression_host_idx is not None and len(row) > expression_host_idx
+            else None
+        )
         selection = _normalize(row[selection_idx]) if selection_idx is not None and len(row) > selection_idx else None
         biotinylated = _parse_boolish(row[biotin_idx]) if biotin_idx is not None and len(row) > biotin_idx else None
         tags = _normalize(row[tags_idx]) if tags_idx is not None and len(row) > tags_idx else None
@@ -2795,6 +2805,7 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
             "preset_name": preset_name or f"Row {raw_index}",
             "antigen_url": antigen_url,
             "protein_name": protein_name,
+            "expression_host": expression_host,
             "pdb_id": pdb_raw,
             "accession": accession_raw,
             "vendor_range": vendor_range_raw,
@@ -2814,6 +2825,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
         preset_obj = None
         preset_name = entry.get("preset_name") or ""
         protein_name = entry.get("protein_name")
+        expression_host = entry.get("expression_host")
         antigen_url = entry.get("antigen_url") or ""
         pdb_id = _clean_pdb_id(entry.get("pdb_id"))
         accession = entry.get("accession") or ""
@@ -2847,6 +2859,7 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
                 preset_name=preset_name,
                 antigen_url=antigen_url,
                 protein_name=protein_name,
+                expression_host=expression_host,
                 selection=selection,
                 biotinylated=biotinylated,
                 tags=tags,
@@ -7714,7 +7727,7 @@ def run_bulk_workflow(
     except Exception as exc:  # pragma: no cover - defensive
         log(f"[input] copy to bulk dir failed: {exc}")
 
-    # Detected targets table
+    # Selected targets table
     targets_table_path = plot_dir / "detected_targets.csv"
     _write_csv(
         targets_table_path,

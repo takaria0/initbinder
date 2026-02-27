@@ -165,6 +165,7 @@ class BulkCsvRow(BaseModel):
     preset_name: str
     antigen_url: Optional[str] = None
     protein_name: Optional[str] = None
+    expression_host: Optional[str] = Field(None, max_length=200)
     selection: Optional[str] = Field(None, max_length=64)
     biotinylated: Optional[bool] = None
     tags: Optional[str] = Field(None, max_length=500)

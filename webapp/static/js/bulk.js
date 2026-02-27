@@ -778,17 +778,13 @@ function renderRunCommandBlocks(text, options = {}) {
   }
   if (singleBlock) {
     const wrapper = document.createElement('div');
-    wrapper.style.marginBottom = '12px';
+    wrapper.className = 'bulk-command-block';
 
     const header = document.createElement('div');
-    header.style.display = 'flex';
-    header.style.justifyContent = 'space-between';
-    header.style.alignItems = 'center';
-    header.style.gap = '8px';
-    header.style.marginBottom = '6px';
+    header.className = 'bulk-command-header';
 
     const heading = document.createElement('div');
-    heading.style.fontWeight = '600';
+    heading.className = 'bulk-command-title';
     heading.textContent = 'Commands';
     header.appendChild(heading);
 
@@ -800,13 +796,8 @@ function renderRunCommandBlocks(text, options = {}) {
     header.appendChild(copyBtn);
 
     const block = document.createElement('pre');
+    block.className = 'bulk-command-pre';
     block.textContent = String(text).trim() || '—';
-    block.style.background = '#f1f5f9';
-    block.style.border = '1px solid #e2e8f0';
-    block.style.borderRadius = '8px';
-    block.style.padding = '10px';
-    block.style.margin = '0';
-    block.style.whiteSpace = 'pre-wrap';
 
     wrapper.appendChild(header);
     wrapper.appendChild(block);
@@ -834,17 +825,13 @@ function renderRunCommandBlocks(text, options = {}) {
     const title = section.title || `Step ${idx + 1}`;
     const commandText = section.lines.join('\n').trim();
     const wrapper = document.createElement('div');
-    wrapper.style.marginBottom = '12px';
+    wrapper.className = 'bulk-command-block';
 
     const header = document.createElement('div');
-    header.style.display = 'flex';
-    header.style.justifyContent = 'space-between';
-    header.style.alignItems = 'center';
-    header.style.gap = '8px';
-    header.style.marginBottom = '6px';
+    header.className = 'bulk-command-header';
 
     const heading = document.createElement('div');
-    heading.style.fontWeight = '600';
+    heading.className = 'bulk-command-title';
     heading.textContent = title;
     header.appendChild(heading);
 
@@ -856,13 +843,8 @@ function renderRunCommandBlocks(text, options = {}) {
     header.appendChild(copyBtn);
 
     const block = document.createElement('pre');
+    block.className = 'bulk-command-pre';
     block.textContent = commandText || '—';
-    block.style.background = '#f1f5f9';
-    block.style.border = '1px solid #e2e8f0';
-    block.style.borderRadius = '8px';
-    block.style.padding = '10px';
-    block.style.margin = '0';
-    block.style.whiteSpace = 'pre-wrap';
 
     wrapper.appendChild(header);
     wrapper.appendChild(block);
@@ -1015,16 +997,12 @@ function stylePymolButton(btn, hasPrep) {
   if (!btn) return;
   if (hasPrep) {
     btn.disabled = false;
-    btn.style.background = '';
-    btn.style.borderColor = '';
-    btn.style.color = '';
+    btn.classList.remove('pymol-unavailable');
     btn.title = '';
     return;
   }
   btn.disabled = true;
-  btn.style.background = 'rgba(248, 113, 113, 0.15)';
-  btn.style.borderColor = 'rgba(248, 113, 113, 0.35)';
-  btn.style.color = '#b91c1c';
+  btn.classList.add('pymol-unavailable');
   btn.title = 'Hotspot bundle missing; re-run pipeline to enable PyMOL.';
 }
 
@@ -1389,9 +1367,7 @@ function renderSnapshots(meta = []) {
     const img = document.createElement('img');
     img.src = item.url;
     img.alt = `${item.pdb_id || 'Target'} hotspot snapshot`;
-    img.style.maxWidth = '100%';
-    img.style.border = '1px solid #e2e8f0';
-    img.style.borderRadius = '8px';
+    img.className = 'bulk-image';
     img.loading = 'lazy';
     card.appendChild(img);
 
@@ -1405,7 +1381,14 @@ function renderSnapshots(meta = []) {
       const hotspots = (ep.hotspots || []).join(', ');
       const masks = (ep.mask_residues || []).join(', ');
       const residueText = hotspots || masks || 'No residues recorded';
-      li.innerHTML = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:6px;"></span><strong>${name}</strong>: ${residueText}`;
+      const swatch = document.createElement('span');
+      swatch.className = 'bulk-swatch';
+      swatch.style.backgroundColor = color;
+      li.appendChild(swatch);
+      const nameEl = document.createElement('strong');
+      nameEl.textContent = name;
+      li.appendChild(nameEl);
+      li.appendChild(document.createTextNode(`: ${residueText}`));
       epList.appendChild(li);
     });
     card.appendChild(epList);
@@ -1550,9 +1533,7 @@ function renderEpitopePlots(items = []) {
     img.src = src;
     img.alt = label;
     img.loading = 'lazy';
-    img.style.maxWidth = '100%';
-    img.style.border = '1px solid #e2e8f0';
-    img.style.borderRadius = '8px';
+    img.className = 'bulk-image';
     imgBox.appendChild(img);
     card.appendChild(imgBox);
 
@@ -1573,30 +1554,21 @@ function renderDiversityPlots(items = []) {
   const outputDir = (state.diversityOutputDir || '').trim();
   if (outputDir) {
     const dirNote = document.createElement('div');
-    dirNote.className = 'help-text';
-    dirNote.style.margin = '0 0 8px 0';
+    dirNote.className = 'help-text bulk-diversity-note';
     dirNote.textContent = `Output directory: ${outputDir}`;
     el.diversityGrid.appendChild(dirNote);
   }
   const files = Array.isArray(state.diversityFiles) ? state.diversityFiles : [];
   if (files.length) {
     const details = document.createElement('details');
-    details.style.margin = '0 0 10px 0';
+    details.className = 'bulk-diversity-files';
     const summary = document.createElement('summary');
+    summary.className = 'bulk-diversity-summary';
     summary.textContent = `Detected ${files.length} all_designs_metrics.csv file${files.length === 1 ? '' : 's'}`;
-    summary.style.cursor = 'pointer';
-    summary.style.userSelect = 'none';
     details.appendChild(summary);
 
     const pre = document.createElement('pre');
-    pre.style.marginTop = '8px';
-    pre.style.maxHeight = '220px';
-    pre.style.overflow = 'auto';
-    pre.style.fontSize = '12px';
-    pre.style.background = '#0f172a';
-    pre.style.color = '#e2e8f0';
-    pre.style.padding = '10px 12px';
-    pre.style.borderRadius = '8px';
+    pre.className = 'bulk-diversity-pre';
     pre.textContent = files
       .map((f) => (f && (f.path || f.metrics_path)) ? `${f.pdb_id || ''}\t${f.epitope_name || ''}\t${f.datetime || ''}\t${f.path || f.metrics_path}` : String(f))
       .join('\n');
@@ -1607,8 +1579,7 @@ function renderDiversityPlots(items = []) {
   if (!list.length) {
     state.diversityPlots = [];
     const empty = document.createElement('div');
-    empty.className = 'help-text';
-    empty.style.margin = '0';
+    empty.className = 'help-text bulk-doc-help-zero';
     const message = (state.diversityMessage || '').trim();
     empty.textContent =
       message ||
@@ -1661,9 +1632,7 @@ function renderDiversityPlots(items = []) {
       img.src = `/api/bulk/file?name=${encodeURIComponent(plot.png_name)}`;
       img.alt = plot.pdb_id || 'BoltzGen diversity';
       img.loading = 'lazy';
-      img.style.maxWidth = '100%';
-      img.style.border = '1px solid #e2e8f0';
-      img.style.borderRadius = '8px';
+      img.className = 'bulk-image';
       imgBox.appendChild(img);
       card.appendChild(imgBox);
     }
@@ -1672,9 +1641,16 @@ function renderDiversityPlots(items = []) {
     legend.className = 'snapshot-note';
     const colors = plot.epitope_colors || {};
     if (Object.keys(colors).length) {
-      legend.innerHTML = Object.entries(colors)
-        .map(([name, color]) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:8px;"><span style="width:12px;height:12px;border-radius:999px;background:${color};display:inline-block;"></span>${name}</span>`)
-        .join('');
+      Object.entries(colors).forEach(([name, color]) => {
+        const item = document.createElement('span');
+        item.className = 'bulk-legend-item';
+        const dot = document.createElement('span');
+        dot.className = 'bulk-legend-dot';
+        dot.style.backgroundColor = color;
+        item.appendChild(dot);
+        item.appendChild(document.createTextNode(name));
+        legend.appendChild(item);
+      });
     } else {
       legend.textContent = 'Epitope colors not available';
     }
@@ -1918,7 +1894,7 @@ function renderBinderRows(rows = []) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 9;
-    td.style.color = '#64748b';
+    td.className = 'bulk-empty-row';
     td.textContent = state.binderTotal ? 'No binders on this page.' : (state.binderMessage || 'No binders found.');
     tr.appendChild(td);
     return tr;
@@ -1968,6 +1944,7 @@ function renderBinderRows(rows = []) {
       const pymolBtn = document.createElement('button');
       pymolBtn.type = 'button';
       pymolBtn.textContent = 'PyMOL';
+      pymolBtn.className = 'bulk-pymol-btn';
       pymolBtn.dataset.action = 'pymol-binder';
       pymolBtn.dataset.index = String(idx);
       if (!row.design_path || !isBoltzEngine(row.engine)) pymolBtn.disabled = true;
@@ -2830,7 +2807,7 @@ function renderBoltzConfigs() {
     const pymolBtn = document.createElement('button');
     pymolBtn.type = 'button';
     pymolBtn.textContent = 'PyMOL';
-    pymolBtn.className = 'ghost';
+    pymolBtn.className = 'bulk-pymol-btn';
     pymolBtn.dataset.action = 'pymol-target';
     pymolBtn.dataset.pdbId = target.pdb_id || '';
     stylePymolButton(pymolBtn, hasPrep);
@@ -2855,11 +2832,11 @@ function renderBoltzConfigs() {
       epCells.forEach((val, cellIdx) => {
         const td = document.createElement('td');
         td.textContent = val || '';
-        if (cellIdx === 5) td.style.paddingLeft = '14px';
+        if (cellIdx === 5) td.classList.add('epitope-row-indent');
         epRow.appendChild(td);
       });
       if (cfg?.hotspot_surface_ok === false) {
-        epRow.style.opacity = '0.65';
+        epRow.classList.add('is-filtered');
         epRow.title = 'Filtered: hotspot below SASA cutoff.';
       }
       const epStatus = document.createElement('td');
@@ -2905,7 +2882,7 @@ function renderBoltzConfigs() {
       const epPymol = document.createElement('button');
       epPymol.type = 'button';
       epPymol.textContent = 'PyMOL';
-      epPymol.className = 'ghost';
+      epPymol.className = 'bulk-pymol-btn';
       epPymol.dataset.action = 'pymol-epitope';
       epPymol.dataset.pdbId = target.pdb_id || '';
       epPymol.dataset.epitopeName = epitopeLabel(cfg, cfgIdx + 1);
@@ -4541,7 +4518,7 @@ function renderBulkPreview(rows = [], summary = '') {
       biotinText,
       row.tags || '—',
       row.resolved_pdb_id || row.pdb_id || '—',
-      Array.isArray(row.warnings) && row.warnings.length ? row.warnings.join('; ') : '',
+      row.expression_host || '—',
     ];
     values.forEach((value) => {
       const td = document.createElement('td');
@@ -5460,7 +5437,7 @@ function updateJobUI(job) {
       addLink('Epitope input TSV', job.details.selection_filename);
     }
     if (job.details?.targets_table_filename) {
-      addLink('Detected targets', job.details.targets_table_filename);
+      addLink('Selected targets', job.details.targets_table_filename);
     }
     if (job.details?.snapshot_report_filename) {
       addLink('Snapshot report', job.details.snapshot_report_filename);
@@ -5579,10 +5556,7 @@ async function downloadSnapshotPdf() {
     // Fallback: open printable window
     const printable = el.snapshotGrid.cloneNode(true);
     printable.classList.remove('catalog-viewer');
-    printable.style.maxHeight = 'none';
-    printable.style.overflow = 'visible';
-    printable.style.border = 'none';
-    printable.style.background = 'transparent';
+    printable.classList.add('bulk-printable-grid');
     const container = document.createElement('div');
     container.appendChild(printable);
     const html = `
@@ -5604,7 +5578,7 @@ async function downloadSnapshotPdf() {
         </head>
         <body>
           <h1>Hotspot snapshots</h1>
-          <p class="help-text" style="margin-top: 0;">Includes all hotspot images and annotations currently shown.</p>
+          <p class="help-text bulk-print-note">Includes all hotspot images and annotations currently shown.</p>
           ${container.innerHTML}
         </body>
       </html>`;

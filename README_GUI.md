@@ -14,7 +14,7 @@ Before starting, have these ready:
 - Optional OpenAI model override (default is `gpt-4.1-mini`).
 
 Page map:
-- `LLM Target Discovery` -> `Input CSV / TSV` -> `Detected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
+- `LLM Target Discovery` -> `Input CSV / TSV` -> `Selected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
 
 Use `README` for this guide and `Algorithm` for deeper method details.
 
@@ -78,7 +78,7 @@ If not:
 ## Step 2: Confirm Detection
 
 Action:
-- Review the `Detected targets` table and the `Notes` column.
+- Review the `Selected targets` table and the `Notes` column.
 - Check that each row has a resolved PDB in `PDB ID`.
 
 Expect:
@@ -199,7 +199,7 @@ PyMOL caveat:
 - [ ] Open Bulk page and click `Config`.
 - [ ] Verify cluster settings and click `Save settings`.
 - [ ] Paste CSV/TSV into `Input CSV / TSV`.
-- [ ] Confirm `Detected targets` summary shows rows `ready`.
+- [ ] Confirm `Selected targets` summary shows rows `ready`.
 - [ ] Fix unresolved PDB rows if needed.
 - [ ] Set `Epitope design num`, runtime, and crop radius.
 - [ ] Run `Select epitopes (LLM)` if epitope refresh is needed.
