@@ -3000,10 +3000,9 @@ function applyBulkUiSettingsToForm(payload = {}) {
 }
 
 function buildBulkUiSettingsPayload() {
-  const existingMock = Boolean(state.uiSettings?.cluster?.mock);
   return {
     cluster: {
-      mock: existingMock,
+      mock: false,
       ssh_config_alias: normalizeOptionalText(el.bulkSettingsSshAlias?.value),
       remote_root: normalizeOptionalText(el.bulkSettingsRemoteRoot?.value),
       target_root: normalizeOptionalText(el.bulkSettingsTargetRoot?.value),

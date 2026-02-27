@@ -1221,7 +1221,8 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     if not isinstance(cluster_block, dict):
         cluster_block = {}
         data["cluster"] = cluster_block
-    cluster_block["mock"] = bool(payload.cluster.mock)
+    # Mock mode is intentionally disabled for bulk UI settings persistence.
+    cluster_block["mock"] = False
     cluster_block["ssh_config_alias"] = _normalize_optional_text(payload.cluster.ssh_config_alias)
     cluster_block["remote_root"] = _normalize_optional_text(payload.cluster.remote_root)
     cluster_block["target_root"] = _normalize_optional_text(payload.cluster.target_root)

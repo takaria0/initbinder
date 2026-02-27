@@ -198,8 +198,6 @@ class ClusterConfig:
     rfantibody: RfaPipelineConfig = field(default_factory=RfaPipelineConfig)
 
     def as_ssh_target(self) -> Optional[str]:
-        if self.mock:
-            return None
         if self.ssh_config_alias:
             return self.ssh_config_alias
         if self.user:
@@ -446,7 +444,10 @@ def load_config() -> WebAppConfig:
         env_overrides["log_dir"] = log_dir
 
     merged = _deep_update(merged, env_overrides)
-    return _config_from_dict(merged)
+    loaded = _config_from_dict(merged)
+    # Disable mock mode globally for bulk workflows.
+    loaded.cluster.mock = False
+    return loaded
 
 
 __all__ = [

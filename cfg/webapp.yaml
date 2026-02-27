@@ -2,9 +2,8 @@ paths:
   antigen_category_map: targets_catalog/antigen_category_map.tsv
 
 cluster:
-  # Public-safe defaults: offline/mock by default.
-  # Users can override via cfg/webapp.local.yaml or INITBINDER_* env vars.
-  mock: true
+  # Default to real cluster mode; override via cfg/webapp.local.yaml or INITBINDER_* env vars.
+  mock: false
   host: cluster.example.edu
   ssh_config_alias: null
   remote_root: null
