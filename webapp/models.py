@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, validator
 
@@ -165,6 +165,9 @@ class BulkCsvRow(BaseModel):
     preset_name: str
     antigen_url: Optional[str] = None
     protein_name: Optional[str] = None
+    selection: Optional[str] = Field(None, max_length=64)
+    biotinylated: Optional[bool] = None
+    tags: Optional[str] = Field(None, max_length=500)
     pdb_id: Optional[str] = Field(None, max_length=32)
     accession: Optional[str] = Field(None, max_length=200)
     vendor_range: Optional[str] = Field(None, max_length=64)
@@ -267,6 +270,9 @@ class BulkLlmUnmatchedDiscoverRequest(BaseModel):
     catalog_name: str = Field(..., min_length=3, max_length=255)
     unmatched_key: str = Field(..., min_length=3, max_length=160)
     candidate: BulkLlmCandidate
+    history: List[BulkLlmMessage] = Field(default_factory=list)
+    vendor_scope: Literal["both", "sino", "acro"] = "both"
+    planning_mode: Literal["balanced", "aggressive", "fast"] = "balanced"
     max_targets: int = Field(3, ge=1, le=10)
     launch_browser: bool = True
 
@@ -280,9 +286,26 @@ class BulkLlmUnmatchedDiscoverResponse(BaseModel):
 class BulkLlmUnmatchedDiscoverStatusResponse(BaseModel):
     job_id: str
     status: Literal["pending", "running", "success", "failed", "canceled"]
+    phase: Optional[
+        Literal[
+            "planning",
+            "catalog_rematch",
+            "vendor_search",
+            "parsing",
+            "appending",
+            "rematching",
+            "success",
+            "failed",
+        ]
+    ] = None
     message: Optional[str] = None
     unmatched_key: Optional[str] = None
     catalog_name: Optional[str] = None
+    resolved_species: Optional[str] = None
+    planned_queries: List[str] = Field(default_factory=list)
+    vendors_consulted: List[str] = Field(default_factory=list)
+    llm_plan_summary: Optional[str] = None
+    attempts: List[Dict[str, Any]] = Field(default_factory=list)
     matched_row: Optional[BulkCsvRow] = None
     match: Optional[BulkCatalogMatch] = None
     failure_reason: Optional[str] = None

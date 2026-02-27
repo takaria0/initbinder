@@ -123,13 +123,14 @@ if USE_LLM and not OPENAI_API_KEY:
 
 # --- Vendor connectors ---
 try:
-    from lib.vendors.connectors import SinoBioConnector
+    from lib.vendors.connectors import ACROConnector, SinoBioConnector
 except Exception:
     try:
-        from connectors import SinoBioConnector
+        from connectors import ACROConnector, SinoBioConnector
         print("[warn] Using local 'connectors.py' instead of 'lib.vendors.connectors'.")
     except Exception as e:
         print(f"[warn] Could not import vendor connectors: {e}")
+        ACROConnector = None
         SinoBioConnector = None
 
 # -------------------- Paths & Caching --------------------
@@ -666,6 +667,7 @@ def analyze_product_page_with_llm(body_text: str, target_gene: str, target_prote
     )
 
 def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: str, protein_name: str):
+    log_info(f"[llm-page] evaluating {len(options)} vendor product pages for target gene={gene or '(none)'}")
     gene = gene or protein_name or "unknown target"
     protein_name = protein_name or gene
     total_chars = 0
@@ -697,6 +699,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
                 log_info(f"[warn] Skipping text for {opt.catalog} due to global token cap; fallback per-item if needed.")
 
     if not USE_LLM or not items_for_prompt:
+        log_info("[llm-page][warn] LLM disabled or no product page text available.")
         # per-item fallback without LLM (no data)
         for opt in options:
             if opt.llm_analysis is None:
@@ -728,7 +731,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
     data = _llm_flash_json(batch_prompt)
 
     if not data or not isinstance(data, (list, tuple)):
-        log_info("[warn] Batch LLM failed or returned non-list. Falling back to per-item.")
+        log_info("[llm-page][warn] Batch LLM failed or returned non-list. Falling back to per-item.")
         for idx, opt in enumerate(options):
             if opt.llm_analysis is not None: 
                 continue
@@ -737,7 +740,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
                 continue
             res = analyze_product_page_with_llm(opt.body_text, gene, protein_name)
             opt.llm_analysis = res
-            log_info(f"[LLM] {opt.catalog} -> {res.pretty()}")
+            log_info(f"[llm-page] {opt.catalog} -> {res.pretty()}")
         return
 
     index_map: Dict[int, dict] = {}
@@ -747,7 +750,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
                 continue
             index_map[int(elem.get("index"))] = elem
     except Exception:
-        log_info("[warn] Malformed indices from LLM; best-effort order mapping.")
+        log_info("[llm-page][warn] Malformed indices from LLM; best-effort order mapping.")
         for i, elem in enumerate(data):
             if isinstance(elem, dict):
                 index_map[i] = elem
@@ -779,7 +782,7 @@ def enrich_antigen_details_with_llm_batch(options: List[AntigenOption], gene: st
             endotoxin_eu_per_mg=parse_float(elem.get("endotoxin_eu_per_mg")),
             validating_assays=elem.get("validating_assays"),
         )
-        log_info(f"[LLM] {opt.catalog} -> {opt.llm_analysis.pretty()}")
+        log_info(f"[llm-page] {opt.catalog} -> {opt.llm_analysis.pretty()}")
 
 # -------------------- PDB helpers --------------------
 def _get_ncbi_sequence(accession: str) -> str:
@@ -864,6 +867,60 @@ def _sanitize_uniprot_term(term: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+_GENERIC_QUERY_STOPWORDS: Set[str] = {
+    "a",
+    "an",
+    "and",
+    "antibody",
+    "antibodies",
+    "available",
+    "biological",
+    "biosystems",
+    "buy",
+    "catalog",
+    "check",
+    "discover",
+    "find",
+    "for",
+    "from",
+    "generate",
+    "human",
+    "in",
+    "list",
+    "match",
+    "matching",
+    "of",
+    "on",
+    "or",
+    "purchasable",
+    "protein",
+    "proteins",
+    "recombinant",
+    "search",
+    "sino",
+    "target",
+    "targets",
+    "the",
+    "to",
+    "vendor",
+}
+
+
+def _is_generic_query_token(token: str) -> bool:
+    text = (token or "").strip().lower()
+    if not text:
+        return True
+    return text in _GENERIC_QUERY_STOPWORDS
+
+
+def _is_generic_query_phrase(text: str) -> bool:
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", text or "") if p]
+    if not parts:
+        return True
+    meaningful = [p for p in parts if not _is_generic_query_token(p)]
+    return not meaningful
+
+
 def _expand_term_variants(term: str) -> List[str]:
     """Generate safe UniProt query variants from a noisy label."""
     if not term:
@@ -879,7 +936,7 @@ def _expand_term_variants(term: str) -> List[str]:
         if not p:
             continue
         s = re.sub(r"[^A-Za-z0-9\-]", "", p)
-        if s:
+        if s and not _is_generic_query_token(s):
             tokens.append(s)
 
     greek_map = {"alpha": "A", "beta": "B", "gamma": "G", "delta": "D", "epsilon": "E"}
@@ -905,7 +962,7 @@ def _expand_term_variants(term: str) -> List[str]:
             out.append(v)
 
     whole = _sanitize_uniprot_term(cleaned)
-    if whole:
+    if whole and not _is_generic_query_phrase(whole):
         k = whole.upper()
         if k not in seen:
             out.append(whole)
@@ -930,28 +987,103 @@ def _candidate_query_templates(term: str) -> List[str]:
             out.append(q)
     return out
 
-def fetch_vendor_antigens(query_term: str, species: str, limit: int = 40) -> List[AntigenOption]:
-    if SinoBioConnector is None:
-        log_info("[error] SinoBioConnector is not available.")
+def _species_pref_list(species: str) -> Optional[List[str]]:
+    raw_species = (species or "").strip()
+    if not raw_species:
+        return None
+    sp = raw_species.lower()
+    if sp in {"any", "all", "*", "none", ""}:
+        return None
+    return [raw_species.title()]
+
+
+def _normalize_option_species(value: Any, fallback: str) -> str:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(parts) if parts else fallback
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _dedupe_antigen_options(options: List[AntigenOption]) -> List[AntigenOption]:
+    out: List[AntigenOption] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    for opt in options:
+        vendor = (opt.vendor or "").strip().lower()
+        catalog = (opt.catalog or "").strip().lower()
+        url = (opt.url or "").strip().lower()
+        key = (vendor, catalog, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(opt)
+    return out
+
+
+def fetch_vendor_antigens(
+    query_term: str,
+    species: str,
+    limit: int = 40,
+    *,
+    vendor_scope: str = "both",
+) -> List[AntigenOption]:
+    if not query_term:
         return []
-    try:
-        if not query_term:
-            return []
-        mode = "headless" if BROWSER_HEADLESS else "interactive"
-        sino = SinoBioConnector(mode=mode)
-        species_pref: Optional[List[str]] = None
-        if species:
-            raw_species = species.strip()
-            sp = raw_species.lower()
-            if sp not in {"any", "all", "*", "none", ""}:
-                species_pref = [raw_species.title()]
-        results = sino.search_proteins(query_term, species_preference=species_pref, limit=limit)
-        opts = [AntigenOption(vendor="Sino Biological", catalog=r.get("sku",""), species=r.get("species", species), url=r.get("url")) for r in results]
-        log_info(f"[info] Vendor search {query_term} ({species}) -> {len(opts)} candidates (browser_headless={BROWSER_HEADLESS})")
-        return opts
-    except Exception as e:
-        log_info(f"[warn] Sino connector failed for '{query_term}': {e}")
-        return []
+    mode = "headless" if BROWSER_HEADLESS else "interactive"
+    scope = (vendor_scope or "both").strip().lower()
+    if scope not in {"both", "sino", "acro"}:
+        scope = "both"
+    species_pref = _species_pref_list(species)
+
+    all_opts: List[AntigenOption] = []
+    if scope in {"both", "sino"}:
+        if SinoBioConnector is None:
+            log_info("[vendor][warn] SinoBioConnector is not available.")
+        else:
+            try:
+                sino = SinoBioConnector(mode=mode)
+                sino_rows = sino.search_proteins(query_term, species_preference=species_pref, limit=limit)
+                sino_opts = [
+                    AntigenOption(
+                        vendor="Sino Biological",
+                        catalog=str(row.get("sku", "") or ""),
+                        species=_normalize_option_species(row.get("species", species), species),
+                        url=str(row.get("url", "") or "") or None,
+                    )
+                    for row in sino_rows
+                ]
+                log_info(f"[vendor] sino query='{query_term}' species='{species}' hits={len(sino_opts)}")
+                all_opts.extend(sino_opts)
+            except Exception as exc:
+                log_info(f"[vendor][warn] Sino connector failed for '{query_term}': {exc}")
+
+    if scope in {"both", "acro"}:
+        if ACROConnector is None:
+            log_info("[vendor][warn] ACROConnector is not available.")
+        else:
+            try:
+                acro = ACROConnector(mode=mode)
+                acro_rows = acro.search_proteins(query_term, species_preference=species_pref, limit=limit)
+                acro_opts = [
+                    AntigenOption(
+                        vendor=str(row.get("vendor") or "ACROBiosystems"),
+                        catalog=str(row.get("sku", "") or ""),
+                        species=_normalize_option_species(row.get("species", species), species),
+                        url=str(row.get("url", "") or "") or None,
+                    )
+                    for row in acro_rows
+                ]
+                log_info(f"[vendor] acro query='{query_term}' species='{species}' hits={len(acro_opts)}")
+                all_opts.extend(acro_opts)
+            except Exception as exc:
+                log_info(f"[vendor][warn] Acro connector failed for '{query_term}': {exc}")
+
+    deduped = _dedupe_antigen_options(all_opts)
+    log_info(
+        f"[vendor] combined query='{query_term}' scope={scope} raw={len(all_opts)} deduped={len(deduped)} "
+        f"(browser_headless={BROWSER_HEADLESS})"
+    )
+    return deduped
 
 # -------------------- Matching logic --------------------
 def _viable_antigens(antigen_options: List[AntigenOption]) -> List[AntigenOption]:
@@ -1125,11 +1257,11 @@ def _select_best_match(pdb_ids: List[str], antigen_options: List[AntigenOption],
                 }
 
     if best:
-        log_info(f"\n[info] Best match (require_biotinylated={require_biotinylated}) score={best_score:.2f}")
+        log_info(f"\n[match] best (require_biotinylated={require_biotinylated}) score={best_score:.2f}")
         for k, v in best.items():
-            log_info(f"  - {k}: {v if (not isinstance(v, str) or len(v)<80) else v[:77]+'...'}")
+            log_info(f"[match]   - {k}: {v if (not isinstance(v, str) or len(v)<80) else v[:77]+'...'}")
     else:
-        log_info("[warn] No best match found under current filter.")
+        log_info("[match][warn] No best match found under current filter.")
     return best, all_records
 
 # -------------------- Core Pipeline --------------------
@@ -1157,6 +1289,50 @@ def _load_avoid_names(tsv_paths: List[str]) -> set[str]:
             log_info(f"[warn] failed to read avoid TSV {p}: {e}")
     return avoid
 
+
+def _extract_structured_query_terms(instruction: str) -> List[str]:
+    text = (instruction or "").strip()
+    if not text:
+        return []
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    def _append(raw: str):
+        cleaned = _sanitize_uniprot_term(raw)
+        if not cleaned or _is_generic_query_phrase(cleaned):
+            return
+        key = cleaned.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(cleaned)
+
+    structured_patterns = [
+        r"\bgene(?:\s+symbol)?\s*[:=]\s*([A-Za-z0-9\-]{2,})",
+        r"\buniprot(?:\s+accession)?\s*[:=]\s*([A-Za-z0-9]{4,12})",
+        r"\btarget\s+label\s*[:=]\s*([^\n;,]+)",
+        r"\bcatalog\s+hint\s*[:=]\s*([^\n;,]+)",
+        r"\bquery\s*term\s*[:=]\s*([^\n;,]+)",
+    ]
+    for pattern in structured_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            _append(match.group(1))
+
+    if out:
+        return out
+
+    # Fallback heuristic: scan line fragments with key:value structure.
+    for fragment in re.split(r"[\n;]+", text):
+        fragment = fragment.strip()
+        if ":" not in fragment:
+            continue
+        key, _, value = fragment.partition(":")
+        key_l = key.strip().lower()
+        if key_l in {"gene", "gene symbol", "uniprot", "target label", "catalog hint", "query term"}:
+            _append(value.strip())
+    return out
+
+
 def expand_instruction_to_queries(instruction: str, species: str, max_targets: int,
                                   *, avoid_from_tsv: Optional[List[str]] = None) -> List[str]:
     """
@@ -1175,9 +1351,16 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         log_info(f"[info] Explicit list → {len(out)} items after excluding {len(items)-len(items_nodup)} duplicates.")
         return out
 
+    structured_terms = _extract_structured_query_terms(instruction)
+    structured_filtered = [s for s in structured_terms if s.upper() not in avoid_names]
+    if structured_filtered:
+        out = structured_filtered[:max_targets]
+        log_info(f"[plan] Parsed structured instruction terms ({len(out)}): {out}")
+        return out
+
     if not USE_LLM:
-        log_info("[warn] LLM disabled. Using the instruction as a single query.")
-        base = [instruction.strip()]
+        log_info("[warn] LLM disabled. Using deterministic query-term expansion.")
+        base = _expand_term_variants(instruction.strip()) or [instruction.strip()]
         return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
     try:
@@ -1231,8 +1414,8 @@ def expand_instruction_to_queries(instruction: str, species: str, max_targets: i
         log_debug(f"[debug] Final gene symbols: {out}")
         return out
     except Exception as e:
-        log_info(f"[warn] LLM expansion failed: {e}. Fallback to raw instruction.")
-        base = [instruction.strip()]
+        log_info(f"[warn] LLM expansion failed: {e}. Fallback to deterministic term expansion.")
+        base = _expand_term_variants(instruction.strip()) or [instruction.strip()]
         return [s for s in base if s.upper() not in avoid_names][:max_targets]
 
 def build_candidate(
@@ -1241,13 +1424,21 @@ def build_candidate(
     *,
     require_biotinylated_primary: bool = True,
     antigen_options_override: Optional[List[AntigenOption]] = None,
+    vendor_scope: str = "both",
+    max_vendor_candidates: int = 40,
 ) -> Optional[Candidate]:
     tax_id = _taxonomy_id_for_species(species)
     uni_search = None
     used_query = None
     tried_terms = _expand_term_variants(term)
     if not tried_terms:
-        tried_terms = [term]
+        fallback = _sanitize_uniprot_term(term)
+        if fallback and not _is_generic_query_phrase(fallback):
+            tried_terms = [fallback]
+        else:
+            log_info(f"[plan][warn] Query term '{term}' is too generic after normalization; skipping.")
+            return None
+    log_info(f"[plan] UniProt term variants for '{term}': {tried_terms}")
 
     for term_variant in tried_terms:
         base_queries = _candidate_query_templates(term_variant)
@@ -1297,11 +1488,16 @@ def build_candidate(
     antigen_query = gene_name or protein_name or term or acc
     if antigen_options_override is not None:
         antigen_options = antigen_options_override
-        log_info(f"[info] Using {len(antigen_options)} preloaded antigen(s) for {label}.")
+        log_info(f"[catalog] Using {len(antigen_options)} preloaded antigen(s) for {label}.")
     else:
-        antigen_options = fetch_vendor_antigens(antigen_query, species)
+        antigen_options = fetch_vendor_antigens(
+            antigen_query,
+            species,
+            limit=max(1, int(max_vendor_candidates or 40)),
+            vendor_scope=vendor_scope,
+        )
         if not antigen_options:
-            log_info(f"[warn] No vendor antigens found for {label} (query='{antigen_query}').")
+            log_info(f"[vendor][warn] No vendor antigens found for {label} (query='{antigen_query}').")
             return None
 
     enrich_antigen_details_with_llm_batch(antigen_options, gene_name or antigen_query, protein_name or antigen_query)
@@ -1455,9 +1651,15 @@ def run_target_generation(args):
     require_biotin = "biotin" in (args.prefer_tags or "").lower()
     global BROWSER_HEADLESS
     BROWSER_HEADLESS = bool(getattr(args, "no_browser_popup", False))
+    vendor_scope = (getattr(args, "vendor_scope", "both") or "both").strip().lower()
+    if vendor_scope not in {"both", "sino", "acro"}:
+        vendor_scope = "both"
+    explicit_query_terms = [q.strip() for q in list(getattr(args, "query_term", []) or []) if str(q).strip()]
     instruction_label = args.instruction
     if not instruction_label and getattr(args, "antigen_tsv", None):
         instruction_label = f"manual_tsv:{Path(args.antigen_tsv).name}"
+    if not instruction_label and explicit_query_terms:
+        instruction_label = f"query_terms:{len(explicit_query_terms)}"
     instruction_label = instruction_label or "manual_tsv"
     instruction_slug = _slugify(instruction_label, maxlen=32)
 
@@ -1467,6 +1669,9 @@ def run_target_generation(args):
     Species: {args.species}
     Max Targets: {args.max_targets}
     Prefer Tags: {args.prefer_tags}
+    Vendor Scope: {vendor_scope}
+    Explicit Query Terms: {len(explicit_query_terms)}
+    Max Vendor Candidates: {max(1, int(getattr(args, 'max_vendor_candidates', 40) or 40))}
     Require Biotinylated (primary list): {require_biotin}
     Browser Headless Mode: {BROWSER_HEADLESS}
     Manual Antigen TSV: {getattr(args, 'antigen_tsv', None) or '(none)'}
@@ -1513,16 +1718,22 @@ def run_target_generation(args):
         if args.max_targets:
             manual_targets = manual_targets[: args.max_targets]
         if manual_targets:
-            log_info(f"[info] Bypassing instruction expansion; {len(manual_targets)} manual targets loaded.")
+            log_info(f"[catalog] Bypassing instruction expansion; {len(manual_targets)} manual targets loaded.")
         else:
             log_info("[warn] Manual antigen TSV provided but no rows parsed; falling back to instruction expansion.")
 
     queries: List[str] = []
     if not manual_targets:
-        queries = expand_instruction_to_queries(
-            args.instruction, args.species, args.max_targets,
-            avoid_from_tsv=avoid_list
-        )
+        if explicit_query_terms:
+            limit = max(1, int(args.max_targets or len(explicit_query_terms)))
+            queries = explicit_query_terms[:limit]
+            log_info(f"[plan] Using explicit query terms in order: {queries}")
+        else:
+            queries = expand_instruction_to_queries(
+                args.instruction, args.species, args.max_targets,
+                avoid_from_tsv=avoid_list
+            )
+            log_info(f"[plan] Expanded instruction into {len(queries)} planned queries.")
     # Prepare writers (create files with headers if missing); gather existing keys and running ranks
     def _ensure_header(path: Path, columns: list[str]):
         if not path.exists():
@@ -1572,9 +1783,17 @@ def run_target_generation(args):
                     target_species,
                     require_biotinylated_primary=require_biotin,
                     antigen_options_override=q.antigens,
+                    vendor_scope=vendor_scope,
+                    max_vendor_candidates=max(1, int(getattr(args, "max_vendor_candidates", 40) or 40)),
                 )
             else:
-                candidate = build_candidate(q, args.species, require_biotinylated_primary=require_biotin)
+                candidate = build_candidate(
+                    q,
+                    args.species,
+                    require_biotinylated_primary=require_biotin,
+                    vendor_scope=vendor_scope,
+                    max_vendor_candidates=max(1, int(getattr(args, "max_vendor_candidates", 40) or 40)),
+                )
             if candidate:
                 candidates.append(candidate)
                 # Append to catalogs incrementally, de-duplicated by (selection, UNIPROT)
@@ -1656,6 +1875,19 @@ if __name__ == "__main__":
     ap.add_argument("--max_targets", type=int, default=10)
     ap.add_argument("--species", default="human")
     ap.add_argument("--prefer_tags", default="biotin")
+    ap.add_argument("--vendor_scope", choices=["both", "sino", "acro"], default="both")
+    ap.add_argument(
+        "--query_term",
+        action="append",
+        default=[],
+        help="Explicit discovery query term. Repeat this flag to provide ordered terms.",
+    )
+    ap.add_argument(
+        "--max_vendor_candidates",
+        type=int,
+        default=40,
+        help="Maximum vendor candidates to pull per query term.",
+    )
     ap.add_argument("--no_browser_popup", action="store_true",
                     help="Run page fetches headless (no visible browser windows). Recommended for scale.")
     ap.add_argument("--antigen_tsv", type=str, default=None,
@@ -1667,6 +1899,6 @@ if __name__ == "__main__":
     ap.add_argument("--out_prefix", type=str, default=None,
                     help="Output file prefix (under targets_catalog/). If omitted, uses instruction+timestamp.")
     a = ap.parse_args()
-    if not a.instruction and not a.antigen_tsv:
-        ap.error("Provide either --instruction or --antigen_tsv.")
+    if not a.instruction and not a.antigen_tsv and not a.query_term:
+        ap.error("Provide either --instruction or --antigen_tsv or --query_term.")
     run_target_generation(a)

@@ -1,5 +1,11 @@
-from webapp.bulk import _CatalogRecord, _build_catalog_lookup, _coerce_candidate, _match_candidates_to_catalog
-from webapp.models import BulkCsvRow, BulkLlmCandidate
+from webapp.bulk import (
+    _CatalogRecord,
+    _build_catalog_lookup,
+    _coerce_candidate,
+    _match_candidates_to_catalog,
+    preview_bulk_targets,
+)
+from webapp.models import BulkCsvRow, BulkLlmCandidate, BulkPreviewRequest
 
 
 def _record(raw_index, *, preset_name, protein_name, pdb_id, accession, gene=None, uniprot=None, catalog=None):
@@ -117,3 +123,42 @@ def test_candidate_coercion_normalizes_pdb_and_alias_fields():
     assert candidate.pdb_id == "5O45"
     assert candidate.uniprot == "Q9NZQ7"
     assert candidate.antigen_catalog == "10084-H08H-B"
+
+
+def test_semantic_alias_merges_equivalent_target_into_matched_group():
+    records = [
+        _record(
+            1,
+            preset_name="PD-L1",
+            protein_name="Programmed cell death 1 ligand 1",
+            pdb_id="5O45",
+            accession="Q9NZQ7",
+            gene="CD274",
+            uniprot="Q9NZQ7",
+            catalog="10084-H08H-B",
+        ),
+    ]
+    lookup = _build_catalog_lookup(records)
+    candidates = [
+        BulkLlmCandidate(gene="CD274"),
+        BulkLlmCandidate(target_name="PD-L1"),
+    ]
+    matches, unmatched, matched_rows = _match_candidates_to_catalog(lookup, candidates)
+    assert len(matches) == 2
+    assert any(match.match_type == "semantic_alias" for match in matches)
+    assert len(unmatched) == 0
+    assert len(matched_rows) == 1
+    assert matched_rows[0].resolved_pdb_id == "5O45"
+
+
+def test_preview_parses_selection_biotinylated_and_tags_columns():
+    csv_text = (
+        "rank\tselection\tbiotinylated\ttags\tgene\tprotein_name\tchosen_pdb\tvendor_accession\tantigen_url\n"
+        "1\tbiotin\ttrue\tAviTag;His\tCD274\tPD-L1\t5O45\tQ9NZQ7\thttps://example.org/pd-l1\n"
+    )
+    preview = preview_bulk_targets(BulkPreviewRequest(csv_text=csv_text))
+    assert len(preview.rows) == 1
+    row = preview.rows[0]
+    assert row.selection == "biotin"
+    assert row.biotinylated is True
+    assert row.tags == "AviTag;His"

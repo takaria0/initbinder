@@ -409,30 +409,69 @@ def submit_bulk_llm_unmatched_discovery(
     job = store.create_job("bulk_llm_unmatched_discovery", label, details=request.dict())
 
     def _run() -> None:
+        def _log(line: str) -> None:
+            text = str(line or "").rstrip()
+            if not text:
+                return
+            store.append_log(job.job_id, text)
+            # Server-side fallback visibility for users tailing backend logs directly.
+            print(text, flush=True)
+
+        progress_details: dict[str, object] = {
+            "unmatched_key": request.unmatched_key,
+            "catalog_name": request.catalog_name,
+            "phase": "planning",
+            "planned_queries": [],
+            "vendors_consulted": [],
+            "attempts": [],
+            "llm_plan_summary": None,
+            "resolved_species": None,
+        }
+
+        def _progress_hook(update: dict[str, object]) -> None:
+            if not isinstance(update, dict):
+                return
+            for key, value in update.items():
+                if value is not None:
+                    progress_details[key] = value
+            store.update(
+                job.job_id,
+                status=JobStatus.RUNNING,
+                message=str(update.get("message") or "Running unmatched target discovery"),
+                details=dict(progress_details),
+            )
+
         try:
-            store.append_log(job.job_id, "[discover] Workflow start: unmatched discovery queued job is now running.")
+            _log("[discover] Workflow start: unmatched discovery queued job is now running.")
             store.update(
                 job.job_id,
                 status=JobStatus.RUNNING,
                 message="Running unmatched target discovery",
-                details={
-                    "unmatched_key": request.unmatched_key,
-                    "catalog_name": request.catalog_name,
-                },
+                details=dict(progress_details),
             )
             result = discover_unmatched_bulk_target(
                 request,
                 job_id=job.job_id,
-                log_hook=lambda line: store.append_log(job.job_id, line),
+                log_hook=_log,
+                progress_hook=_progress_hook,
             )
             matched_row = result.get("matched_row")
             match = result.get("match")
-            details = {
-                "unmatched_key": request.unmatched_key,
-                "catalog_name": result.get("catalog_name") or request.catalog_name,
-                "catalog_appended": bool(result.get("catalog_appended")),
-                "generated_file": result.get("generated_file"),
-            }
+            details = dict(progress_details)
+            details.update(
+                {
+                    "unmatched_key": request.unmatched_key,
+                    "catalog_name": result.get("catalog_name") or request.catalog_name,
+                    "catalog_appended": bool(result.get("catalog_appended")),
+                    "generated_file": result.get("generated_file"),
+                    "phase": result.get("phase") or "success",
+                    "resolved_species": result.get("resolved_species") or details.get("resolved_species"),
+                    "planned_queries": result.get("planned_queries") or details.get("planned_queries") or [],
+                    "vendors_consulted": result.get("vendors_consulted") or details.get("vendors_consulted") or [],
+                    "llm_plan_summary": result.get("llm_plan_summary") or details.get("llm_plan_summary"),
+                    "attempts": result.get("attempts") or details.get("attempts") or [],
+                }
+            )
             if matched_row is not None and hasattr(matched_row, "dict"):
                 details["matched_row"] = matched_row.dict()
             if match is not None and hasattr(match, "dict"):
@@ -443,22 +482,26 @@ def submit_bulk_llm_unmatched_discovery(
                 message=str(result.get("message") or "Unmatched discovery completed."),
                 details=details,
             )
-            store.append_log(
-                job.job_id,
-                f"[discover] Workflow success: appended={details.get('catalog_appended')} generated_file={details.get('generated_file')}",
+            _log(
+                f"[discover] Workflow success: appended={details.get('catalog_appended')} generated_file={details.get('generated_file')}"
             )
         except Exception as exc:  # pragma: no cover - defensive
+            details = dict(progress_details)
+            details.update(
+                {
+                    "unmatched_key": request.unmatched_key,
+                    "catalog_name": request.catalog_name,
+                    "failure_reason": str(exc),
+                    "phase": str(details.get("phase") or "failed"),
+                }
+            )
             store.update(
                 job.job_id,
                 status=JobStatus.FAILED,
                 message=str(exc),
-                details={
-                    "unmatched_key": request.unmatched_key,
-                    "catalog_name": request.catalog_name,
-                    "failure_reason": str(exc),
-                },
+                details=details,
             )
-            store.append_log(job.job_id, f"[discover] Workflow failed: {exc}")
+            _log(f"[discover] Workflow failed: {exc}")
 
     executor = _get_executor()
     executor.submit(_run)

@@ -121,6 +121,18 @@ def _clean_pdb_id(value: Optional[str]) -> Optional[str]:
     return cleaned if len(cleaned) == 4 else None
 
 
+def _parse_boolish(value: Optional[str]) -> Optional[bool]:
+    text = _normalize(value)
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"1", "true", "t", "yes", "y"}:
+        return True
+    if lowered in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+
 def _preset_index() -> _PresetIndex:
     presets = list_presets()
     by_name: Dict[str, object] = {}
@@ -2687,6 +2699,7 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         "target",
         "rank",
         "selection",
+        "tags",
         "gene",
         "protein_name",
         "uniprot",
@@ -2717,6 +2730,9 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
     vendor_overlap_idx = None
     uniprot_idx = None
     protein_idx = None
+    selection_idx = None
+    biotin_idx = None
+    tags_idx = None
     if has_header:
         preset_idx = _find_index(header, ["preset name", "preset", "name", "target"])
         if preset_idx is None:
@@ -2733,6 +2749,9 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         )
         uniprot_idx = _find_index(header, ["uniprot", "uniprot_id", "uniprotkb", "uniprot accession"])
         protein_idx = _find_index(header, ["protein_name", "protein name", "description", "target_name"])
+        selection_idx = _find_index(header, ["selection", "selection_type"])
+        biotin_idx = _find_index(header, ["biotinylated", "is_biotinylated", "biotin"])
+        tags_idx = _find_index(header, ["tags", "tag", "prefer_tags"])
     else:
         preset_idx = 0
         antigen_idx = 1
@@ -2763,6 +2782,9 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
         if not vendor_range_raw and vendor_overlap_idx is not None and len(row) > vendor_overlap_idx:
             vendor_range_raw = _normalize(row[vendor_overlap_idx])
         protein_name = _normalize(row[protein_idx]) if protein_idx is not None and len(row) > protein_idx else None
+        selection = _normalize(row[selection_idx]) if selection_idx is not None and len(row) > selection_idx else None
+        biotinylated = _parse_boolish(row[biotin_idx]) if biotin_idx is not None and len(row) > biotin_idx else None
+        tags = _normalize(row[tags_idx]) if tags_idx is not None and len(row) > tags_idx else None
         if _is_multi_accession_value(accession_raw):
             skipped_multi_accession += 1
             continue
@@ -2776,6 +2798,9 @@ def _parse_bulk_csv(csv_text: str) -> Tuple[List[dict], int]:
             "pdb_id": pdb_raw,
             "accession": accession_raw,
             "vendor_range": vendor_range_raw,
+            "selection": selection,
+            "biotinylated": biotinylated,
+            "tags": tags,
         })
     return entries, skipped_multi_accession
 
@@ -2793,6 +2818,11 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
         pdb_id = _clean_pdb_id(entry.get("pdb_id"))
         accession = entry.get("accession") or ""
         vendor_range = entry.get("vendor_range") or ""
+        selection = _normalize(entry.get("selection"))
+        biotinylated = entry.get("biotinylated")
+        if not isinstance(biotinylated, bool):
+            biotinylated = _parse_boolish(str(biotinylated)) if biotinylated is not None else None
+        tags = _normalize(entry.get("tags"))
 
         if not pdb_id and preset_name:
             preset_obj = index.by_name.get(preset_name.lower())
@@ -2817,6 +2847,9 @@ def _apply_preset_matches(rows: List[dict]) -> List[BulkCsvRow]:
                 preset_name=preset_name,
                 antigen_url=antigen_url,
                 protein_name=protein_name,
+                selection=selection,
+                biotinylated=biotinylated,
+                tags=tags,
                 accession=accession or None,
                 vendor_range=vendor_range or None,
                 pdb_id=pdb_id,
@@ -2857,6 +2890,17 @@ _LLM_MATCH_MIN_SCORE = 0.74
 _LLM_NEAREST_MIN_SCORE = 0.58
 _LLM_DISCOVERY_DEFAULT_MAX_TARGETS = 3
 _LLM_DISCOVERY_MIN_ROW_SCORE = 3.0
+_LLM_DISCOVERY_HISTORY_WINDOW = 6
+_LLM_DISCOVERY_MAX_QUERY_TERMS = {
+    "fast": 1,
+    "balanced": 3,
+    "aggressive": 5,
+}
+_LLM_DISCOVERY_MAX_CANDIDATES = {
+    "fast": 20,
+    "balanced": 40,
+    "aggressive": 80,
+}
 _CATALOG_APPEND_LOCK = threading.Lock()
 
 
@@ -2876,6 +2920,19 @@ class _CatalogLookup:
     by_catalog: Dict[str, List[int]]
     by_accession: Dict[str, List[int]]
     names: List[Tuple[int, str]]
+
+
+@dataclass(frozen=True)
+class _DiscoveryPlan:
+    canonical_target: str
+    species: str
+    query_terms: List[str]
+    aliases: List[str]
+    positive_terms: List[str]
+    negative_terms: List[str]
+    plan_summary: str
+    planning_mode: str
+    vendor_scope: str
 
 
 def _catalog_dir() -> Path:
@@ -2901,6 +2958,398 @@ def _resolve_catalog_path(name: str) -> Path:
 
 def _catalog_delimiter(path: Path) -> str:
     return "," if path.suffix.lower() == ".csv" else "\t"
+
+
+def _normalize_discovery_vendor_scope(scope: Optional[str]) -> str:
+    text = _normalize(scope)
+    if not text:
+        return "both"
+    lowered = text.lower()
+    if lowered in {"sino", "acro", "both"}:
+        return lowered
+    return "both"
+
+
+def _normalize_discovery_planning_mode(mode: Optional[str]) -> str:
+    text = _normalize(mode)
+    if not text:
+        return "balanced"
+    lowered = text.lower()
+    if lowered in {"fast", "balanced", "aggressive"}:
+        return lowered
+    return "balanced"
+
+
+def _dedupe_terms(values: Sequence[Optional[str]], *, limit: int) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _normalize(value)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+def _normalize_short_target_name(value: Optional[str]) -> Optional[str]:
+    text = _normalize(value)
+    if not text:
+        return None
+    stripped = re.sub(r"\([^)]*\)", " ", text)
+    cleaned = re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9+\-_/ ]+", " ", stripped)).strip()
+    return cleaned or None
+
+
+def _identifier_token_terms(value: Optional[str]) -> List[str]:
+    text = _normalize(value)
+    if not text:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[^A-Za-z0-9]+", text):
+        token = token.strip()
+        if len(token) < 3:
+            continue
+        if not re.search(r"[A-Za-z]", token):
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
+
+
+def _candidate_deterministic_query_terms(
+    candidate: BulkLlmCandidate,
+    *,
+    limit: int,
+) -> List[str]:
+    preferred = _dedupe_terms(
+        [
+            candidate.gene,
+            candidate.uniprot,
+            _normalize_short_target_name(candidate.target_name),
+            _normalize_short_target_name(candidate.protein_name),
+            candidate.accession,
+            candidate.antigen_catalog,
+        ],
+        limit=max(2, limit * 2),
+    )
+    token_terms = _dedupe_terms(
+        _identifier_token_terms(candidate.accession) + _identifier_token_terms(candidate.antigen_catalog),
+        limit=max(2, limit),
+    )
+    merged = _dedupe_terms(preferred + token_terms, limit=max(1, limit))
+    if merged:
+        return merged
+    fallback = _candidate_label(candidate)
+    return [fallback] if fallback else []
+
+
+def _merge_query_terms_with_core(
+    *,
+    core_terms: Sequence[str],
+    llm_terms: Sequence[str],
+    max_terms: int,
+) -> List[str]:
+    core = _dedupe_terms(core_terms, limit=max_terms)
+    llm = _dedupe_terms(llm_terms, limit=max_terms + 6)
+    if not core:
+        return _dedupe_terms(llm, limit=max_terms)
+
+    out: List[str] = []
+    seen: set[str] = set()
+    core_map = {term.lower(): term for term in core}
+    for term in llm:
+        key = term.lower()
+        if key not in core_map or key in seen:
+            continue
+        out.append(core_map[key])
+        seen.add(key)
+    for term in core:
+        key = term.lower()
+        if key in seen:
+            continue
+        out.append(term)
+        seen.add(key)
+    for term in llm:
+        key = term.lower()
+        if key in seen:
+            continue
+        out.append(term)
+        seen.add(key)
+        if len(out) >= max_terms:
+            break
+    return out[:max_terms]
+
+
+def _discovery_history_block(history: Sequence[BulkLlmMessage]) -> str:
+    lines: List[str] = []
+    for msg in list(history or [])[-_LLM_DISCOVERY_HISTORY_WINDOW:]:
+        role = "User" if msg.role == "user" else "Assistant"
+        text = _normalize(msg.content)
+        if text:
+            lines.append(f"{role}: {text}")
+    return "\n".join(lines) if lines else "(no prior history)"
+
+
+def _default_discovery_plan(
+    candidate: BulkLlmCandidate,
+    *,
+    planning_mode: str,
+    vendor_scope: str,
+) -> _DiscoveryPlan:
+    max_terms = _LLM_DISCOVERY_MAX_QUERY_TERMS.get(planning_mode, _LLM_DISCOVERY_MAX_QUERY_TERMS["balanced"])
+    deterministic_terms = _candidate_deterministic_query_terms(candidate, limit=max_terms)
+    aliases = _dedupe_terms(
+        [
+            candidate.target_name,
+            candidate.protein_name,
+            candidate.gene,
+            candidate.uniprot,
+            candidate.antigen_catalog,
+            candidate.accession,
+        ],
+        limit=max_terms + 3,
+    )
+    canonical = aliases[0] if aliases else (_candidate_label(candidate) or "target")
+    query_terms = deterministic_terms
+    if not query_terms:
+        query_terms = [canonical]
+    summary = (
+        "Planner fallback: built query terms from candidate identifiers "
+        f"({', '.join(query_terms)})."
+    )
+    return _DiscoveryPlan(
+        canonical_target=canonical,
+        species="human",
+        query_terms=query_terms,
+        aliases=aliases or [canonical],
+        positive_terms=[],
+        negative_terms=[],
+        plan_summary=summary,
+        planning_mode=planning_mode,
+        vendor_scope=vendor_scope,
+    )
+
+
+def _call_openai_for_discovery_plan(
+    *,
+    api_key: str,
+    model: str,
+    candidate: BulkLlmCandidate,
+    history: Sequence[BulkLlmMessage],
+    planning_mode: str,
+    vendor_scope: str,
+) -> Dict[str, object]:
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:  # pragma: no cover - dependency import
+        raise ValueError(f"openai package is unavailable: {exc}") from exc
+
+    max_terms = _LLM_DISCOVERY_MAX_QUERY_TERMS.get(planning_mode, _LLM_DISCOVERY_MAX_QUERY_TERMS["balanced"])
+    history_block = _discovery_history_block(history)
+    candidate_block = "\n".join(
+        [
+            f"target_name: {candidate.target_name or ''}",
+            f"protein_name: {candidate.protein_name or ''}",
+            f"gene: {candidate.gene or ''}",
+            f"uniprot: {candidate.uniprot or ''}",
+            f"pdb_id: {candidate.pdb_id or ''}",
+            f"antigen_catalog: {candidate.antigen_catalog or ''}",
+            f"accession: {candidate.accession or ''}",
+            f"rationale: {candidate.rationale or ''}",
+        ]
+    )
+    system_prompt = (
+        "You plan discovery queries for recombinant protein catalog matching. "
+        "Avoid ambiguous shorthand. Return strictly JSON."
+    )
+    user_prompt = (
+        "Generate a discovery plan JSON object with keys:\n"
+        "canonical_target (string), species (string), query_terms (string[]), aliases (string[]), "
+        "positive_terms (string[]), negative_terms (string[]), summary (string).\n"
+        f"Use at most {max_terms} query_terms.\n"
+        f"Vendor scope: {vendor_scope}.\n\n"
+        f"Recent conversation:\n{history_block}\n\n"
+        f"Unmatched candidate:\n{candidate_block}\n"
+    )
+    client = OpenAI(api_key=api_key)
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        kwargs: Dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.1,
+        }
+        if attempt == 0:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            msg = completion.choices[0].message if completion.choices else None
+            text = _llm_message_text(msg).strip()
+            if not text:
+                raise ValueError("LLM planner returned empty response.")
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("LLM planner response is not a JSON object.")
+            return data
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise ValueError(f"LLM planner response parse failed: {last_error}")
+
+
+def _coerce_discovery_plan(
+    payload: Dict[str, object],
+    *,
+    candidate: BulkLlmCandidate,
+    planning_mode: str,
+    vendor_scope: str,
+) -> _DiscoveryPlan:
+    def _string_list(value: object) -> List[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, tuple):
+            return [str(item) for item in value]
+        if isinstance(value, str):
+            return [value]
+        return []
+
+    base = _default_discovery_plan(candidate, planning_mode=planning_mode, vendor_scope=vendor_scope)
+    max_terms = _LLM_DISCOVERY_MAX_QUERY_TERMS.get(planning_mode, _LLM_DISCOVERY_MAX_QUERY_TERMS["balanced"])
+    core_terms = _candidate_deterministic_query_terms(candidate, limit=max_terms) or base.query_terms
+    canonical = _normalize(str(payload.get("canonical_target") or "")) or base.canonical_target
+    species = _normalize(str(payload.get("species") or "")) or base.species
+    aliases = _dedupe_terms(
+        _string_list(payload.get("aliases")) + base.aliases,
+        limit=max_terms + 4,
+    )
+    query_terms = _merge_query_terms_with_core(
+        core_terms=core_terms,
+        llm_terms=_string_list(payload.get("query_terms")),
+        max_terms=max_terms,
+    )
+    if not query_terms:
+        query_terms = base.query_terms
+    positive_terms = _dedupe_terms(_string_list(payload.get("positive_terms")), limit=10)
+    negative_terms = _dedupe_terms(_string_list(payload.get("negative_terms")), limit=10)
+    summary = _normalize(str(payload.get("summary") or "")) or base.plan_summary
+    return _DiscoveryPlan(
+        canonical_target=canonical,
+        species=species,
+        query_terms=query_terms,
+        aliases=aliases or [canonical],
+        positive_terms=positive_terms,
+        negative_terms=negative_terms,
+        plan_summary=summary,
+        planning_mode=planning_mode,
+        vendor_scope=vendor_scope,
+    )
+
+
+def _plan_discovery_queries(
+    candidate: BulkLlmCandidate,
+    *,
+    history: Sequence[BulkLlmMessage],
+    planning_mode: str,
+    vendor_scope: str,
+    log_hook: Optional[Callable[[str], None]] = None,
+) -> _DiscoveryPlan:
+    planning_mode = _normalize_discovery_planning_mode(planning_mode)
+    vendor_scope = _normalize_discovery_vendor_scope(vendor_scope)
+    cfg = load_config()
+    api_key = _normalize(cfg.bulk.openai_api_key)
+    model = _normalize(cfg.bulk.openai_model) or "gpt-4.1-mini"
+    if not api_key:
+        _emit_discovery_log(log_hook, "[discover] Planner fallback: OpenAI key missing; using candidate-only terms.")
+        return _default_discovery_plan(candidate, planning_mode=planning_mode, vendor_scope=vendor_scope)
+    try:
+        data = _call_openai_for_discovery_plan(
+            api_key=api_key,
+            model=model,
+            candidate=candidate,
+            history=history,
+            planning_mode=planning_mode,
+            vendor_scope=vendor_scope,
+        )
+        plan = _coerce_discovery_plan(
+            data,
+            candidate=candidate,
+            planning_mode=planning_mode,
+            vendor_scope=vendor_scope,
+        )
+        _emit_discovery_log(
+            log_hook,
+            f"[discover] Planner produced {len(plan.query_terms)} query terms ({', '.join(plan.query_terms)}).",
+        )
+        return plan
+    except Exception as exc:
+        _emit_discovery_log(log_hook, f"[discover] Planner failed ({exc}); falling back to deterministic terms.")
+        return _default_discovery_plan(candidate, planning_mode=planning_mode, vendor_scope=vendor_scope)
+
+
+def _discovery_plan_candidates(candidate: BulkLlmCandidate, plan: _DiscoveryPlan) -> List[BulkLlmCandidate]:
+    expanded: List[BulkLlmCandidate] = [candidate]
+    for alias in plan.aliases:
+        alias_text = _normalize(alias)
+        if not alias_text:
+            continue
+        expanded.append(
+            BulkLlmCandidate(
+                target_name=alias_text,
+                protein_name=alias_text,
+                gene=candidate.gene,
+                uniprot=candidate.uniprot,
+                pdb_id=candidate.pdb_id,
+                antigen_catalog=candidate.antigen_catalog,
+                accession=candidate.accession,
+                rationale=candidate.rationale,
+            )
+        )
+    out: List[BulkLlmCandidate] = []
+    seen: set[str] = set()
+    for item in expanded:
+        signature = "|".join(
+            [
+                _normalize_lookup_key(item.target_name) or "",
+                _normalize_lookup_key(item.protein_name) or "",
+                _normalize_lookup_key(item.gene) or "",
+                _normalize_lookup_key(item.uniprot) or "",
+                _normalize_lookup_key(item.pdb_id) or "",
+                _normalize_lookup_key(item.antigen_catalog) or "",
+                _normalize_lookup_key(item.accession) or "",
+            ]
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        out.append(item)
+    return out
+
+
+def _emit_discovery_progress(
+    progress_hook: Optional[Callable[[Dict[str, object]], None]],
+    payload: Dict[str, object],
+) -> None:
+    if not progress_hook:
+        return
+    try:
+        progress_hook(payload)
+    except Exception:
+        pass
 
 
 def _normalize_lookup_key(value: Optional[str]) -> Optional[str]:
@@ -2937,6 +3386,9 @@ def _catalog_row_to_entry(raw_index: int, values: Dict[str, str]) -> Dict[str, o
     pdb_id = _first_catalog_value(values, ("chosen_pdb", "pdb_id", "pdb", "pdbid", "resolved_pdb_id"))
     accession = _first_catalog_value(values, ("vendor_accession", "vendor_product_accession", "accession", "uniprot"))
     vendor_range = _first_catalog_value(values, ("vendor_range", "expressed_range", "pdb_vendor_intersection"))
+    selection = _first_catalog_value(values, ("selection",))
+    biotinylated = _parse_boolish(_first_catalog_value(values, ("biotinylated", "is_biotinylated", "biotin")))
+    tags = _first_catalog_value(values, ("tags", "tag", "prefer_tags"))
     return {
         "raw_index": raw_index,
         "preset_name": preset_name,
@@ -2945,6 +3397,9 @@ def _catalog_row_to_entry(raw_index: int, values: Dict[str, str]) -> Dict[str, o
         "pdb_id": _clean_pdb_id(pdb_id),
         "accession": accession,
         "vendor_range": vendor_range,
+        "selection": selection,
+        "biotinylated": biotinylated,
+        "tags": tags,
     }
 
 
@@ -3168,20 +3623,10 @@ def _candidate_label(candidate: BulkLlmCandidate) -> str:
     )
 
 
-def _pick_record_index(candidates: Sequence[int], used: set[int]) -> Optional[int]:
-    if not candidates:
-        return None
-    for idx in candidates:
-        if idx not in used:
-            return idx
-    return candidates[0]
-
-
 def _fuzzy_find_record(
     lookup: _CatalogLookup,
     text: Optional[str],
     *,
-    used: set[int],
     min_score: float,
 ) -> Tuple[Optional[int], float]:
     query = _normalize_name_key(text)
@@ -3189,23 +3634,16 @@ def _fuzzy_find_record(
         return None, 0.0
     best_idx: Optional[int] = None
     best_score = 0.0
-    fallback_idx: Optional[int] = None
-    fallback_score = 0.0
     for idx, cand_name in lookup.names:
         if not cand_name:
             continue
         score = SequenceMatcher(None, query, cand_name).ratio()
-        if idx not in used and score > best_score:
+        if score > best_score:
             best_score = score
             best_idx = idx
-        if score > fallback_score:
-            fallback_score = score
-            fallback_idx = idx
     if best_idx is not None and best_score >= min_score:
         return best_idx, best_score
-    if fallback_idx is not None and fallback_score >= min_score:
-        return fallback_idx, fallback_score
-    return None, max(best_score, fallback_score)
+    return None, best_score
 
 
 def _nearest_name_matches(
@@ -3247,6 +3685,70 @@ def _nearest_name_matches(
     return out
 
 
+def _row_match_key(row: BulkCsvRow) -> str:
+    return f"{(row.resolved_pdb_id or row.pdb_id or '').upper()}::{row.raw_index}"
+
+
+def _candidate_group_keys(candidate: BulkLlmCandidate) -> List[str]:
+    raw_keys = [
+        ("uniprot", _normalize_lookup_key(candidate.uniprot)),
+        ("gene", _normalize_lookup_key(candidate.gene)),
+        ("accession", _normalize_lookup_key(candidate.accession)),
+        ("catalog", _normalize_lookup_key(candidate.antigen_catalog)),
+        ("pdb", _normalize_lookup_key(candidate.pdb_id)),
+        (
+            "name",
+            _normalize_name_key(
+                candidate.gene
+                or candidate.target_name
+                or candidate.protein_name
+            ),
+        ),
+        ("label", _normalize_lookup_key(_candidate_label(candidate))),
+    ]
+    out: List[str] = []
+    seen: set[str] = set()
+    for prefix, value in raw_keys:
+        if not value:
+            continue
+        key = f"{prefix}:{value}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _record_group_keys(record: _CatalogRecord) -> List[str]:
+    row = record.row
+    vals = record.values
+    raw_keys = [
+        ("uniprot", _normalize_lookup_key(vals.get("uniprot"))),
+        ("gene", _normalize_lookup_key(vals.get("gene"))),
+        ("gene", _normalize_lookup_key(vals.get("gene_symbol"))),
+        ("accession", _normalize_lookup_key(row.accession)),
+        ("accession", _normalize_lookup_key(vals.get("vendor_accession"))),
+        ("accession", _normalize_lookup_key(vals.get("vendor_product_accession"))),
+        ("catalog", _normalize_lookup_key(vals.get("antigen_catalog"))),
+        ("catalog", _normalize_lookup_key(vals.get("catalog"))),
+        ("catalog", _normalize_lookup_key(vals.get("sku"))),
+        ("pdb", _normalize_lookup_key(row.resolved_pdb_id or row.pdb_id)),
+        ("name", record.name_key),
+        ("label", _normalize_lookup_key(row.preset_name)),
+    ]
+    out: List[str] = []
+    seen: set[str] = set()
+    for prefix, value in raw_keys:
+        if not value:
+            continue
+        key = f"{prefix}:{value}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 def _match_candidates_to_catalog(
     lookup: _CatalogLookup,
     candidates: Sequence[BulkLlmCandidate],
@@ -3255,14 +3757,21 @@ def _match_candidates_to_catalog(
     unmatched: List[BulkUnmatchedSuggestion] = []
     matched_rows: List[BulkCsvRow] = []
     matched_row_keys: set[str] = set()
-    used_record_indices: set[int] = set()
+    direct_match_row_indices: set[int] = set()
+    group_to_record_idx: Dict[str, int] = {}
+    row_key_to_index: Dict[str, int] = {
+        _row_match_key(record.row): idx for idx, record in enumerate(lookup.records)
+    }
+    candidate_states: List[Dict[str, object]] = []
 
     for candidate in candidates:
+        candidate_groups = _candidate_group_keys(candidate)
         record_idx: Optional[int] = None
         match_type = ""
         matched_field: Optional[str] = None
         matched_value: Optional[str] = None
         confidence = 0.0
+        nearest = _nearest_name_matches(lookup, candidate, limit=3)
 
         exact_checks: List[Tuple[str, Optional[str], Dict[str, List[int]], str, float]] = [
             ("pdb_id", candidate.pdb_id, lookup.by_pdb, "exact_pdb", 0.99),
@@ -3275,10 +3784,10 @@ def _match_candidates_to_catalog(
             key = _normalize_lookup_key(raw_value)
             if not key:
                 continue
-            idx = _pick_record_index(index_map.get(key, []), used_record_indices)
-            if idx is None:
+            exact_indices = index_map.get(key, [])
+            if not exact_indices:
                 continue
-            record_idx = idx
+            record_idx = exact_indices[0]
             match_type = mtype
             matched_field = field_name
             matched_value = raw_value
@@ -3290,7 +3799,6 @@ def _match_candidates_to_catalog(
             idx, score = _fuzzy_find_record(
                 lookup,
                 fuzzy_source,
-                used=used_record_indices,
                 min_score=_LLM_MATCH_MIN_SCORE,
             )
             if idx is not None:
@@ -3300,26 +3808,107 @@ def _match_candidates_to_catalog(
                 matched_value = fuzzy_source
                 confidence = max(0.70, min(0.95, score))
 
+        candidate_states.append(
+            {
+                "candidate": candidate,
+                "candidate_groups": candidate_groups,
+                "record_idx": record_idx,
+                "match_type": match_type,
+                "matched_field": matched_field,
+                "matched_value": matched_value,
+                "confidence": confidence,
+                "nearest": nearest,
+            }
+        )
         if record_idx is None:
-            nearest = _nearest_name_matches(lookup, candidate, limit=3)
-            reason = f"No catalog match for '{_candidate_label(candidate)}'."
-            unmatched.append(BulkUnmatchedSuggestion(candidate=candidate, reason=reason, nearest=nearest))
+            continue
+        direct_match_row_indices.add(record_idx)
+        record = lookup.records[record_idx]
+        for key in candidate_groups + _record_group_keys(record):
+            group_to_record_idx.setdefault(key, record_idx)
+
+    unmatched_group_seen: set[str] = set()
+    for state in candidate_states:
+        candidate = state["candidate"]  # type: ignore[assignment]
+        candidate_groups = state.get("candidate_groups") or []
+        nearest = state.get("nearest") or []
+        record_idx = state.get("record_idx")
+        if isinstance(record_idx, int):
+            row = lookup.records[record_idx].row
+            row_key = _row_match_key(row)
+            if row_key not in matched_row_keys:
+                matched_rows.append(row)
+                matched_row_keys.add(row_key)
+            matches.append(
+                BulkCatalogMatch(
+                    candidate=candidate,  # type: ignore[arg-type]
+                    row=row,
+                    match_type=str(state.get("match_type") or "matched"),
+                    matched_field=state.get("matched_field"),  # type: ignore[arg-type]
+                    matched_value=state.get("matched_value"),  # type: ignore[arg-type]
+                    confidence=max(0.0, min(1.0, float(state.get("confidence") or 0.0))),
+                )
+            )
             continue
 
-        used_record_indices.add(record_idx)
-        row = lookup.records[record_idx].row
-        row_key = f"{(row.resolved_pdb_id or row.pdb_id or '').upper()}::{row.raw_index}"
-        if row_key not in matched_row_keys:
-            matched_rows.append(row)
-            matched_row_keys.add(row_key)
-        matches.append(
-            BulkCatalogMatch(
-                candidate=candidate,
-                row=row,
-                match_type=match_type,
-                matched_field=matched_field,
-                matched_value=matched_value,
-                confidence=max(0.0, min(1.0, confidence)),
+        alias_row_idx: Optional[int] = None
+        alias_note: Optional[str] = None
+        for key in candidate_groups:
+            idx = group_to_record_idx.get(key)
+            if idx is None:
+                continue
+            alias_row_idx = idx
+            alias_note = f"merged via {key}"
+            break
+
+        if alias_row_idx is None and nearest:
+            nearest_top = nearest[0]
+            nearest_key = _row_match_key(nearest_top.row)
+            nearest_idx = row_key_to_index.get(nearest_key)
+            if (
+                nearest_idx is not None
+                and nearest_idx in direct_match_row_indices
+                and nearest_top.confidence >= 0.80
+            ):
+                alias_row_idx = nearest_idx
+                alias_note = (
+                    f"merged via nearest alias '{nearest_top.matched_value or nearest_top.row.protein_name or nearest_top.row.preset_name}'"
+                )
+
+        if alias_row_idx is not None:
+            alias_row = lookup.records[alias_row_idx].row
+            alias_row_key = _row_match_key(alias_row)
+            if alias_row_key not in matched_row_keys:
+                matched_rows.append(alias_row)
+                matched_row_keys.add(alias_row_key)
+            matches.append(
+                BulkCatalogMatch(
+                    candidate=candidate,  # type: ignore[arg-type]
+                    row=alias_row,
+                    match_type="semantic_alias",
+                    matched_field="canonical_group",
+                    matched_value=alias_note,
+                    confidence=0.80,
+                )
+            )
+            for key in candidate_groups + _record_group_keys(lookup.records[alias_row_idx]):
+                group_to_record_idx.setdefault(key, alias_row_idx)
+            continue
+
+        unmatched_group = (
+            next((key for key in candidate_groups if not key.startswith("label:")), None)
+            or (candidate_groups[0] if candidate_groups else None)
+            or f"label:{_normalize_lookup_key(_candidate_label(candidate)) or 'unknown'}"  # type: ignore[arg-type]
+        )
+        if unmatched_group in unmatched_group_seen:
+            continue
+        unmatched_group_seen.add(unmatched_group)
+        reason = f"No catalog match for '{_candidate_label(candidate)}'."  # type: ignore[arg-type]
+        unmatched.append(
+            BulkUnmatchedSuggestion(
+                candidate=candidate,  # type: ignore[arg-type]
+                reason=reason,
+                nearest=nearest,  # type: ignore[arg-type]
             )
         )
 
@@ -3356,16 +3945,21 @@ def suggest_bulk_targets_with_llm(request: BulkLlmTargetSuggestRequest) -> BulkL
         candidate = _coerce_candidate(raw_item)
         if candidate is None:
             continue
-        signature = "|".join(
-            [
-                _normalize_lookup_key(candidate.target_name) or "",
-                _normalize_lookup_key(candidate.protein_name) or "",
-                _normalize_lookup_key(candidate.gene) or "",
-                _normalize_lookup_key(candidate.uniprot) or "",
-                _normalize_lookup_key(candidate.pdb_id) or "",
-                _normalize_lookup_key(candidate.antigen_catalog) or "",
-                _normalize_lookup_key(candidate.accession) or "",
-            ]
+        group_keys = _candidate_group_keys(candidate)
+        signature = (
+            next((key for key in group_keys if not key.startswith("label:")), None)
+            or (group_keys[0] if group_keys else None)
+            or "|".join(
+                [
+                    _normalize_lookup_key(candidate.target_name) or "",
+                    _normalize_lookup_key(candidate.protein_name) or "",
+                    _normalize_lookup_key(candidate.gene) or "",
+                    _normalize_lookup_key(candidate.uniprot) or "",
+                    _normalize_lookup_key(candidate.pdb_id) or "",
+                    _normalize_lookup_key(candidate.antigen_catalog) or "",
+                    _normalize_lookup_key(candidate.accession) or "",
+                ]
+            )
         )
         if signature in seen_signatures:
             continue
@@ -3443,6 +4037,10 @@ def _run_target_generation_discovery(
     instruction: str,
     out_prefix: str,
     max_targets: int,
+    species: Optional[str] = None,
+    query_terms: Optional[Sequence[str]] = None,
+    vendor_scope: str = "both",
+    max_vendor_candidates: int = 40,
     launch_browser: bool = True,
     log_hook: Optional[Callable[[str], None]] = None,
 ) -> None:
@@ -3461,13 +4059,22 @@ def _run_target_generation_discovery(
         instruction,
         "--max_targets",
         str(clamped_max_targets),
-        "--species",
-        "human",
         "--prefer_tags",
         "biotin",
         "--out_prefix",
         out_prefix,
+        "--vendor_scope",
+        _normalize_discovery_vendor_scope(vendor_scope),
+        "--max_vendor_candidates",
+        str(max(1, min(int(max_vendor_candidates or 40), 200))),
     ]
+    norm_species = _normalize(species)
+    if norm_species:
+        cmd.extend(["--species", norm_species])
+    for term in (query_terms or []):
+        text = _normalize(term)
+        if text:
+            cmd.extend(["--query_term", text])
     if not launch_browser:
         cmd.append("--no_browser_popup")
     _emit_discovery_log(log_hook, "[discover] Step 1/6: starting target generation subprocess.")
@@ -3480,6 +4087,14 @@ def _run_target_generation_discovery(
     display_cmd = " ".join(cmd)
     _emit_discovery_log(log_hook, f"[discover] {display_cmd}")
 
+    env = os.environ.copy()
+    api_key = _normalize(cfg.bulk.openai_api_key)
+    model = _normalize(cfg.bulk.openai_model) or "gpt-4.1-mini"
+    if api_key:
+        env["OPENAI_API_KEY"] = api_key
+        env["USE_LLM"] = "true"
+        env["MODEL"] = model
+
     process = subprocess.Popen(
         cmd,
         cwd=str(project_root),
@@ -3487,6 +4102,7 @@ def _run_target_generation_discovery(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     assert process.stdout is not None
     for line in process.stdout:
@@ -3678,10 +4294,16 @@ def _catalog_column_value(column: str, source: Dict[str, str], rank_value: int) 
     direct = _normalize(source.get(key))
     if key == "rank":
         return direct or str(rank_value)
+    if key == "biotinylated":
+        bool_value = _parse_boolish(direct)
+        if bool_value is not None:
+            return "True" if bool_value else "False"
     if direct:
         return direct
     aliases: Dict[str, Tuple[str, ...]] = {
         "selection": ("selection",),
+        "biotinylated": ("biotinylated", "is_biotinylated"),
+        "tags": ("tags", "tag", "prefer_tags"),
         "uniprot": ("uniprot", "vendor_accession", "accession"),
         "gene": ("gene", "target_name", "protein_name"),
         "protein_name": ("protein_name", "target_name", "gene"),
@@ -3699,6 +4321,10 @@ def _catalog_column_value(column: str, source: Dict[str, str], rank_value: int) 
     }
     for alias in aliases.get(key, ()):
         val = _normalize(source.get(alias))
+        if key == "biotinylated":
+            bool_value = _parse_boolish(val)
+            if bool_value is not None:
+                return "True" if bool_value else "False"
         if val:
             return val
     return ""
@@ -3755,6 +4381,7 @@ def discover_unmatched_bulk_target(
     *,
     job_id: Optional[str] = None,
     log_hook: Optional[Callable[[str], None]] = None,
+    progress_hook: Optional[Callable[[Dict[str, object]], None]] = None,
 ) -> Dict[str, object]:
     _emit_discovery_log(log_hook, "[discover] Unmatched discovery job accepted.")
     _emit_discovery_log(log_hook, f"[discover] job_id={job_id or 'n/a'} unmatched_key={request.unmatched_key}")
@@ -3775,7 +4402,135 @@ def discover_unmatched_bulk_target(
     ):
         raise ValueError("Candidate is empty; provide at least one target identifier before discovery.")
 
+    planning_mode = _normalize_discovery_planning_mode(request.planning_mode)
+    vendor_scope = _normalize_discovery_vendor_scope(request.vendor_scope)
+    vendors_consulted = (
+        ["Sino Biological", "ACROBiosystems"]
+        if vendor_scope == "both"
+        else (["Sino Biological"] if vendor_scope == "sino" else ["ACROBiosystems"])
+    )
+    attempts: List[Dict[str, object]] = []
+
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "planning",
+            "message": "Planning discovery queries with LLM context",
+            "vendors_consulted": vendors_consulted,
+            "attempts": attempts,
+        },
+    )
+    plan = _plan_discovery_queries(
+        candidate,
+        history=list(request.history or []),
+        planning_mode=planning_mode,
+        vendor_scope=vendor_scope,
+        log_hook=log_hook,
+    )
+    resolved_species = _normalize(plan.species) or "human"
+    planned_queries = _dedupe_terms(
+        plan.query_terms,
+        limit=_LLM_DISCOVERY_MAX_QUERY_TERMS.get(planning_mode, _LLM_DISCOVERY_MAX_QUERY_TERMS["balanced"]),
+    )
+    if not planned_queries:
+        planned_queries = [_candidate_label(candidate)]
+    _emit_discovery_log(
+        log_hook,
+        f"[discover] Planning result species={resolved_species} vendor_scope={vendor_scope} terms={planned_queries}",
+    )
+    attempts.append(
+        {
+            "phase": "planning",
+            "planning_mode": planning_mode,
+            "vendor_scope": vendor_scope,
+            "query_terms": planned_queries,
+        }
+    )
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "catalog_rematch",
+            "message": "Trying catalog rematch with planned aliases",
+            "resolved_species": resolved_species,
+            "planned_queries": planned_queries,
+            "llm_plan_summary": plan.plan_summary,
+            "attempts": attempts,
+            "vendors_consulted": vendors_consulted,
+        },
+    )
+
+    rematch_records = _load_catalog_records(catalog_path)
+    if not rematch_records:
+        raise ValueError(f"No usable rows found in catalog: {catalog_path.name}")
+    rematch_lookup = _build_catalog_lookup(rematch_records)
+    rematch_candidates = _discovery_plan_candidates(candidate, plan)
+    rematch_matches, _, rematch_rows = _match_candidates_to_catalog(rematch_lookup, rematch_candidates)
+    exact_match_types = {"exact_pdb", "exact_uniprot", "exact_gene", "exact_catalog", "exact_accession"}
+    exact_matches = [item for item in rematch_matches if item.match_type in exact_match_types]
+    if exact_matches and rematch_rows:
+        best = sorted(exact_matches, key=lambda item: item.confidence, reverse=True)[0]
+        attempts.append(
+            {
+                "phase": "catalog_rematch",
+                "matched": True,
+                "match_type": best.match_type,
+                "confidence": best.confidence,
+            }
+        )
+        _emit_discovery_log(
+            log_hook,
+            f"[discover] Catalog rematch succeeded via {best.match_type} ({best.matched_value or ''}).",
+        )
+        _emit_discovery_progress(
+            progress_hook,
+            {
+                "phase": "success",
+                "message": "Matched from existing catalog without external discovery",
+                "attempts": attempts,
+                "planned_queries": planned_queries,
+                "resolved_species": resolved_species,
+                "vendors_consulted": vendors_consulted,
+                "llm_plan_summary": plan.plan_summary,
+            },
+        )
+        return {
+            "catalog_name": catalog_path.name,
+            "matched_row": best.row,
+            "match": best,
+            "message": (
+                f"Matched '{_candidate_label(candidate)}' directly in {catalog_path.name} "
+                f"via {best.match_type}."
+            ),
+            "catalog_appended": False,
+            "generated_file": None,
+            "phase": "success",
+            "resolved_species": resolved_species,
+            "planned_queries": planned_queries,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+            "attempts": attempts,
+        }
+
+    attempts.append({"phase": "catalog_rematch", "matched": False})
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "vendor_search",
+            "message": "No direct catalog match. Running vendor discovery",
+            "attempts": attempts,
+            "planned_queries": planned_queries,
+            "resolved_species": resolved_species,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+        },
+    )
+
     instruction = _build_discovery_instruction(candidate)
+    if planned_queries:
+        instruction = (
+            f"{instruction} Prioritize these discovery terms in order: {', '.join(planned_queries)}. "
+            f"Prefer vendor scope: {vendor_scope}."
+        )
     out_prefix = _discovery_prefix(request.unmatched_key, job_id)
     _emit_discovery_log(log_hook, f"[discover] Candidate summary: {_candidate_label(candidate)}")
     _emit_discovery_log(log_hook, f"[discover] Discovery instruction: {instruction}")
@@ -3787,14 +4542,64 @@ def discover_unmatched_bulk_target(
         instruction=instruction,
         out_prefix=out_prefix,
         max_targets=request.max_targets or _LLM_DISCOVERY_DEFAULT_MAX_TARGETS,
+        species=resolved_species,
+        query_terms=planned_queries,
+        vendor_scope=vendor_scope,
+        max_vendor_candidates=_LLM_DISCOVERY_MAX_CANDIDATES.get(planning_mode, _LLM_DISCOVERY_MAX_CANDIDATES["balanced"]),
         launch_browser=bool(request.launch_browser),
         log_hook=log_hook,
     )
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "parsing",
+            "message": "Parsing generated discovery catalog files",
+            "attempts": attempts,
+            "planned_queries": planned_queries,
+            "resolved_species": resolved_species,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+        },
+    )
     generated_rows, generated_path = _load_generated_candidate_rows(out_prefix, log_hook=log_hook)
     selected_row = _select_best_generated_row(candidate, generated_rows, log_hook=log_hook)
+    attempts.append(
+        {
+            "phase": "vendor_search",
+            "vendor_scope": vendor_scope,
+            "query_terms": planned_queries,
+            "generated_rows": len(generated_rows),
+            "generated_file": generated_path.name,
+        }
+    )
+
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "appending",
+            "message": "Appending selected discovery row to active catalog",
+            "attempts": attempts,
+            "planned_queries": planned_queries,
+            "resolved_species": resolved_species,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+        },
+    )
     appended = _append_generated_row_to_catalog(catalog_path, selected_row, log_hook=log_hook)
 
     _emit_discovery_log(log_hook, "[discover] Step 5/6: rebuilding catalog match index and rematching.")
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "rematching",
+            "message": "Rematching candidate after catalog update",
+            "attempts": attempts,
+            "planned_queries": planned_queries,
+            "resolved_species": resolved_species,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+        },
+    )
     records = _load_catalog_records(catalog_path)
     if not records:
         raise ValueError(f"Catalog became empty after discovery: {catalog_path.name}")
@@ -3812,6 +4617,18 @@ def discover_unmatched_bulk_target(
 
     match = matches[0]
     _emit_discovery_log(log_hook, "[discover] Step 6/6: discovery workflow completed successfully.")
+    _emit_discovery_progress(
+        progress_hook,
+        {
+            "phase": "success",
+            "message": "Discovery workflow completed",
+            "attempts": attempts,
+            "planned_queries": planned_queries,
+            "resolved_species": resolved_species,
+            "vendors_consulted": vendors_consulted,
+            "llm_plan_summary": plan.plan_summary,
+        },
+    )
     message = (
         f"Discovered and matched '{_candidate_label(candidate)}' using {generated_path.name}. "
         f"{'Appended new row to active catalog.' if appended else 'Catalog already contained an equivalent row.'}"
@@ -3823,6 +4640,12 @@ def discover_unmatched_bulk_target(
         "message": message,
         "catalog_appended": appended,
         "generated_file": generated_path.name,
+        "phase": "success",
+        "resolved_species": resolved_species,
+        "planned_queries": planned_queries,
+        "vendors_consulted": vendors_consulted,
+        "llm_plan_summary": plan.plan_summary,
+        "attempts": attempts,
     }
 
 

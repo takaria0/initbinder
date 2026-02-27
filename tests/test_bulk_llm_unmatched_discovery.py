@@ -3,8 +3,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from webapp.bulk import (
+    _DiscoveryPlan,
     _append_generated_row_to_catalog,
     _build_discovery_instruction,
+    _coerce_discovery_plan,
     _select_best_generated_row,
     discover_unmatched_bulk_target,
 )
@@ -93,12 +95,30 @@ def test_discover_unmatched_bulk_target_rematches_and_appends(tmp_path: Path, mo
     )
 
     monkeypatch.setattr("webapp.bulk._catalog_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "webapp.bulk._plan_discovery_queries",
+        lambda *args, **kwargs: _DiscoveryPlan(
+            canonical_target="PD-L1",
+            species="human",
+            query_terms=["CD274", "PD-L1"],
+            aliases=["PD-L1", "CD274"],
+            positive_terms=[],
+            negative_terms=[],
+            plan_summary="test plan",
+            planning_mode="balanced",
+            vendor_scope="both",
+        ),
+    )
 
     def fake_run_target_generation_discovery(
         *,
         instruction,
         out_prefix,
         max_targets,
+        species=None,
+        query_terms=None,
+        vendor_scope="both",
+        max_vendor_candidates=40,
         launch_browser=True,
         log_hook=None,
     ):
@@ -137,3 +157,72 @@ def test_unmatched_discover_endpoint_requires_existing_catalog():
     }
     response = client.post("/api/bulk/llm-targets/unmatched/discover", json=payload)
     assert response.status_code == 404
+
+
+def test_unmatched_discover_request_defaults_include_planning_fields():
+    payload = BulkLlmUnmatchedDiscoverRequest(
+        catalog_name="catalog.tsv",
+        unmatched_key="unm_default",
+        candidate=BulkLlmCandidate(target_name="PD-L1"),
+    )
+    assert payload.vendor_scope == "both"
+    assert payload.planning_mode == "balanced"
+    assert payload.history == []
+
+
+def test_discover_unmatched_bulk_target_catalog_rematch_short_circuits_subprocess(tmp_path: Path, monkeypatch):
+    catalog = tmp_path / "catalog.tsv"
+    catalog.write_text(
+        "rank\tselection\tuniprot\tgene\tprotein_name\tchosen_pdb\tvendor_accession\tantigen_catalog\tantigen_url\n"
+        "1\tbiotin\tQ9NZQ7\tCD274\tPD-L1\t5O45\tQ9NZQ7\t10084-H08H-B\thttps://example.org/b\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("webapp.bulk._catalog_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "webapp.bulk._plan_discovery_queries",
+        lambda *args, **kwargs: _DiscoveryPlan(
+            canonical_target="PD-L1",
+            species="human",
+            query_terms=["CD274", "PD-L1"],
+            aliases=["PD-L1", "CD274"],
+            positive_terms=[],
+            negative_terms=[],
+            plan_summary="test plan",
+            planning_mode="balanced",
+            vendor_scope="both",
+        ),
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("subprocess discovery should not run when catalog rematch already succeeds")
+
+    monkeypatch.setattr("webapp.bulk._run_target_generation_discovery", fail_if_called)
+
+    request = BulkLlmUnmatchedDiscoverRequest(
+        catalog_name="catalog.tsv",
+        unmatched_key="unm_cd274",
+        candidate=BulkLlmCandidate(gene="CD274", target_name="PD-L1"),
+    )
+    result = discover_unmatched_bulk_target(request, job_id="job_rematch")
+    assert result["catalog_appended"] is False
+    assert result["generated_file"] is None
+    assert result["matched_row"].resolved_pdb_id == "5O45"
+
+
+def test_coerce_discovery_plan_keeps_deterministic_core_terms():
+    candidate = BulkLlmCandidate(
+        target_name="CD39",
+        protein_name="Ectonucleoside triphosphate diphosphohydrolase 1",
+        gene="ENTPD1",
+        uniprot="P49961",
+        accession="11039-H08H-B",
+    )
+    plan = _coerce_discovery_plan(
+        {"query_terms": ["immune checkpoint target", "sars cov 2"]},
+        candidate=candidate,
+        planning_mode="balanced",
+        vendor_scope="both",
+    )
+    lowered = [term.lower() for term in plan.query_terms]
+    assert "entpd1" in lowered
+    assert "p49961" in lowered

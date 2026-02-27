@@ -47,6 +47,7 @@ const state = {
   llmSuggestPending: false,
   llmUnmatchedPoller: null,
   llmViewMode: 'all',
+  llmCatalogFilter: 'biotin',
   activeCatalogName: null,
 };
 
@@ -105,6 +106,7 @@ const el = {
   llmConversationSelect: document.querySelector('#llm-conversation-select'),
   llmNewConversation: document.querySelector('#llm-new-conversation'),
   llmViewMode: document.querySelector('#llm-view-mode'),
+  llmCatalogFilter: document.querySelector('#llm-catalog-filter'),
   llmChatTranscript: document.querySelector('#llm-chat-transcript'),
   llmChatPrompt: document.querySelector('#llm-chat-prompt'),
   llmSuggestTargets: document.querySelector('#llm-suggest-targets'),
@@ -432,6 +434,7 @@ function buildLlmConversation(seed = {}) {
     picked_pdb_ids: picked,
     deleted_pdb_ids: deleted,
     view_mode: seed.view_mode === 'picked' ? 'picked' : 'all',
+    catalog_filter: seed.catalog_filter === 'all' ? 'all' : 'biotin',
     active_catalog_name: seed.active_catalog_name ? String(seed.active_catalog_name) : null,
   };
 }
@@ -460,6 +463,7 @@ function syncStateFromConversation(conv) {
   state.llmPickedPdbIds = Array.isArray(conv.picked_pdb_ids) ? conv.picked_pdb_ids : [];
   state.llmDeletedPdbIds = Array.isArray(conv.deleted_pdb_ids) ? conv.deleted_pdb_ids : [];
   state.llmViewMode = conv.view_mode === 'picked' ? 'picked' : 'all';
+  state.llmCatalogFilter = conv.catalog_filter === 'all' ? 'all' : 'biotin';
   state.activeCatalogName = getConfiguredLlmCatalogName() || null;
 }
 
@@ -478,6 +482,7 @@ function syncConversationFromState() {
   conv.picked_pdb_ids = Array.isArray(state.llmPickedPdbIds) ? state.llmPickedPdbIds : [];
   conv.deleted_pdb_ids = Array.isArray(state.llmDeletedPdbIds) ? state.llmDeletedPdbIds : [];
   conv.view_mode = state.llmViewMode === 'picked' ? 'picked' : 'all';
+  conv.catalog_filter = state.llmCatalogFilter === 'all' ? 'all' : 'biotin';
   conv.active_catalog_name = getConfiguredLlmCatalogName() || null;
   conv.title = llmConversationTitleFromHistory(conv.history, conv.title || null);
   conv.updated_at = llmNowTs();
@@ -549,6 +554,7 @@ function setActiveConversation(conversationId, { persist = true, rerender = true
   setLlmSuggestPending(false, { persist: false });
   renderConversationSelector();
   setLlmViewMode(state.llmViewMode || 'all', { persist: false, rerender: false });
+  setLlmCatalogFilter(state.llmCatalogFilter || 'biotin', { persist: false, rerender: false });
   if (persist) persistLlmState();
   ensureLlmUnmatchedPolling();
   if (rerender) {
@@ -572,6 +578,7 @@ function createNewConversation() {
   recomputeLlmPickedPdbIds();
   setLlmSuggestPending(false, { persist: false });
   setLlmViewMode('all', { persist: false, rerender: false });
+  setLlmCatalogFilter('biotin', { persist: false, rerender: false });
   renderConversationSelector();
   renderLlmTranscript();
   renderLlmMatchPanels();
@@ -587,15 +594,39 @@ function getLlmPickedPdbSet() {
   return new Set(ids.map((id) => normalizePdbId(id)).filter(Boolean));
 }
 
+function normalizeLlmCatalogFilter(mode) {
+  return String(mode || '').toLowerCase() === 'all' ? 'all' : 'biotin';
+}
+
+function parseBiotinFlag(value) {
+  if (typeof value === 'boolean') return value;
+  const raw = (value === null || value === undefined)
+    ? ''
+    : String(value).trim().toLowerCase();
+  if (!raw) return null;
+  if (['1', 'true', 't', 'yes', 'y'].includes(raw)) return true;
+  if (['0', 'false', 'f', 'no', 'n'].includes(raw)) return false;
+  return null;
+}
+
+function rowPassesCatalogFilter(row) {
+  const mode = normalizeLlmCatalogFilter(state.llmCatalogFilter);
+  if (mode === 'all') return true;
+  const selection = String(row?.selection || '').trim().toLowerCase();
+  if (selection === 'biotin') return true;
+  return parseBiotinFlag(row?.biotinylated) === true;
+}
+
 function getVisibleBulkRows(rows = null) {
   const source = Array.isArray(rows) ? rows : (Array.isArray(state.bulkPreviewRows) ? state.bulkPreviewRows : []);
-  if (state.llmViewMode !== 'picked') return source;
+  const byCatalog = source.filter((row) => rowPassesCatalogFilter(row));
+  if (state.llmViewMode !== 'picked') return byCatalog;
   const picked = getLlmPickedPdbSet();
   if (!picked.size) {
     const hasMatched = Array.isArray(state.llmMatchedRows) && state.llmMatchedRows.length > 0;
-    return hasMatched ? [] : source;
+    return hasMatched ? [] : byCatalog;
   }
-  return source.filter((row) => {
+  return byCatalog.filter((row) => {
     const pdb = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id);
     return pdb && picked.has(pdb);
   });
@@ -603,13 +634,14 @@ function getVisibleBulkRows(rows = null) {
 
 function getVisibleBoltzTargets(targets = null) {
   const source = Array.isArray(targets) ? targets : (Array.isArray(state.boltzConfigs) ? state.boltzConfigs : []);
-  if (state.llmViewMode !== 'picked') return source;
+  const byCatalog = source.filter((target) => rowPassesCatalogFilter(target));
+  if (state.llmViewMode !== 'picked') return byCatalog;
   const picked = getLlmPickedPdbSet();
   if (!picked.size) {
     const hasMatched = Array.isArray(state.llmMatchedRows) && state.llmMatchedRows.length > 0;
-    return hasMatched ? [] : source;
+    return hasMatched ? [] : byCatalog;
   }
-  return source.filter((target) => {
+  return byCatalog.filter((target) => {
     const pdb = normalizePdbId(target?.pdb_id);
     return pdb && picked.has(pdb);
   });
@@ -620,7 +652,7 @@ function persistLlmState() {
     syncConversationFromState();
     const list = Array.isArray(state.llmConversations) ? state.llmConversations : [];
     const payload = {
-      version: 3,
+      version: 4,
       active_conversation_id: state.activeConversationId || null,
       conversations: list.map((conv) => ({
         id: conv.id,
@@ -636,6 +668,7 @@ function persistLlmState() {
         picked_pdb_ids: Array.isArray(conv.picked_pdb_ids) ? conv.picked_pdb_ids : [],
         deleted_pdb_ids: Array.isArray(conv.deleted_pdb_ids) ? conv.deleted_pdb_ids : [],
         view_mode: conv.view_mode === 'picked' ? 'picked' : 'all',
+        catalog_filter: conv.catalog_filter === 'all' ? 'all' : 'biotin',
         active_catalog_name: conv.active_catalog_name || null,
       })),
     };
@@ -675,6 +708,7 @@ function restoreLlmState() {
         unmatched: Array.isArray(data.unmatched) ? data.unmatched : [],
         picked_pdb_ids: Array.isArray(data.picked_pdb_ids) ? data.picked_pdb_ids : [],
         view_mode: data.view_mode === 'picked' ? 'picked' : 'all',
+        catalog_filter: data.catalog_filter === 'all' ? 'all' : 'biotin',
         active_catalog_name: data.active_catalog_name ? String(data.active_catalog_name) : null,
       });
       state.llmConversations = [migrated];
@@ -2692,11 +2726,19 @@ function renderBoltzConfigs() {
     const emptyCell = document.createElement('td');
     emptyCell.colSpan = 8;
     emptyCell.className = 'empty-note';
-    emptyCell.textContent = 'No LLM-picked targets are currently visible. Switch View mode to All targets.';
+    const viewNote = state.llmViewMode === 'picked'
+      ? 'No LLM-picked targets are currently visible.'
+      : 'No targets are currently visible.';
+    const filterNote = state.llmCatalogFilter === 'biotin'
+      ? ' Try Catalog filter -> All.'
+      : '';
+    emptyCell.textContent = `${viewNote}${filterNote} Switch View mode to All targets if needed.`;
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
     if (el.boltzSummary) {
-      el.boltzSummary.textContent = `Showing 0 of ${allTargets.length} target${allTargets.length === 1 ? '' : 's'} (LLM-picked view)`;
+      const modeLabel = state.llmViewMode === 'picked' ? 'LLM-picked' : 'all-target';
+      const catalogLabel = state.llmCatalogFilter === 'biotin' ? 'biotin' : 'all';
+      el.boltzSummary.textContent = `Showing 0 of ${allTargets.length} target${allTargets.length === 1 ? '' : 's'} (${modeLabel}, catalog=${catalogLabel})`;
       el.boltzSummary.hidden = false;
     }
     el.boltzPanel.hidden = false;
@@ -2876,9 +2918,12 @@ function renderBoltzConfigs() {
 
   if (el.boltzSummary) {
     const baseSummary = `${configCount} config${configCount === 1 ? '' : 's'} across ${targets.length} target${targets.length === 1 ? '' : 's'}`;
-    el.boltzSummary.textContent = state.llmViewMode === 'picked' && targets.length !== allTargets.length
-      ? `${baseSummary} (filtered from ${allTargets.length})`
-      : baseSummary;
+    const filtered = targets.length !== allTargets.length;
+    const modeLabel = state.llmViewMode === 'picked' ? 'LLM-picked' : 'all-target';
+    const catalogLabel = state.llmCatalogFilter === 'biotin' ? 'biotin' : 'all';
+    el.boltzSummary.textContent = filtered
+      ? `${baseSummary} (filtered from ${allTargets.length}; mode=${modeLabel}; catalog=${catalogLabel})`
+      : `${baseSummary} (mode=${modeLabel}; catalog=${catalogLabel})`;
     el.boltzSummary.hidden = false;
   }
   el.boltzPanel.hidden = false;
@@ -3198,15 +3243,19 @@ async function loadBoltzConfigs(options = {}) {
     }
     const body = await res.json();
     const targets = Array.isArray(body.targets) ? body.targets : [];
-    const presetMap = new Map();
+    const previewMap = new Map();
     (state.bulkPreviewRows || []).forEach((row) => {
-      const key = (row.resolved_pdb_id || '').toUpperCase();
-      if (key) presetMap.set(key, row.preset_name || row.gene || '');
+      const key = (row.resolved_pdb_id || row.pdb_id || '').toUpperCase();
+      if (key) previewMap.set(key, row);
     });
     targets.forEach((target) => {
       const key = (target.pdb_id || '').toUpperCase();
-      if (presetMap.has(key)) {
-        target.preset_name = presetMap.get(key);
+      const previewRow = previewMap.get(key);
+      if (previewRow) {
+        target.preset_name = previewRow.preset_name || previewRow.gene || '';
+        target.selection = previewRow.selection ?? null;
+        target.biotinylated = previewRow.biotinylated ?? null;
+        target.tags = previewRow.tags ?? null;
       }
     });
     state.expandedTargets = new Set();
@@ -4466,22 +4515,30 @@ function renderBulkPreview(rows = [], summary = '') {
   if (!list.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 10;
     td.className = 'empty-note';
+    const catalogSuffix = state.llmCatalogFilter === 'biotin'
+      ? ' Try Catalog filter -> All.'
+      : '';
     td.textContent = state.llmViewMode === 'picked'
-      ? 'No LLM-picked targets found in current preview. Switch View mode to All targets.'
-      : 'No targets detected.';
+      ? `No LLM-picked targets found in current preview.${catalogSuffix} Switch View mode to All targets if needed.`
+      : `No targets detected.${catalogSuffix}`;
     tr.appendChild(td);
     tbody.appendChild(tr);
   }
   list.forEach((row) => {
     const tr = document.createElement('tr');
+    const biotinValue = parseBiotinFlag(row?.biotinylated);
+    const biotinText = biotinValue === true ? 'Yes' : (biotinValue === false ? 'No' : '—');
     const values = [
       row.raw_index ?? '',
       row.preset_name || '',
       row.protein_name || '',
       row.antigen_url || '',
       row.accession || '',
+      row.selection || '—',
+      biotinText,
+      row.tags || '—',
       row.resolved_pdb_id || row.pdb_id || '—',
       Array.isArray(row.warnings) && row.warnings.length ? row.warnings.join('; ') : '',
     ];
@@ -4494,11 +4551,13 @@ function renderBulkPreview(rows = [], summary = '') {
   });
   if (el.bulkPreviewSummary) {
     const baseSummary = summary || `${allRows.length} rows parsed`;
-    if (state.llmViewMode === 'picked') {
-      el.bulkPreviewSummary.textContent = `${baseSummary} · showing ${list.length} LLM-picked`;
-    } else {
-      el.bulkPreviewSummary.textContent = baseSummary;
-    }
+    const viewSummary = state.llmViewMode === 'picked'
+      ? `showing ${list.length} LLM-picked`
+      : `showing ${list.length} targets`;
+    const catalogSummary = state.llmCatalogFilter === 'biotin'
+      ? 'Catalog filter: biotin only'
+      : 'Catalog filter: all';
+    el.bulkPreviewSummary.textContent = `${baseSummary} · ${viewSummary} · ${catalogSummary}`;
     el.bulkPreviewSummary.hidden = false;
   }
   el.bulkPreviewPanel.hidden = false;
@@ -4626,6 +4685,10 @@ async function pollLlmUnmatchedJobs() {
     stopLlmUnmatchedPolling();
     return;
   }
+  const activeLogJobId = String(actionEntries[0]?.[1]?.job_id || '').trim();
+  if (activeLogJobId) {
+    await refreshDiscoveryJobLog(activeLogJobId);
+  }
 
   let didUpdate = false;
   for (const [key, action] of actionEntries) {
@@ -4637,15 +4700,23 @@ async function pollLlmUnmatchedJobs() {
       }
       const status = String(body?.status || '').toLowerCase();
       if (status === 'pending' || status === 'running') {
+        const phase = String(body?.phase || '').trim();
+        const attempts = Array.isArray(body?.attempts) ? body.attempts.length : 0;
+        const queryPreview = Array.isArray(body?.planned_queries) && body.planned_queries.length
+          ? ` · ${body.planned_queries.slice(0, 2).join(', ')}`
+          : '';
+        const phasePrefix = phase ? `[${phase}] ` : '';
+        const attemptSuffix = attempts ? ` · attempts: ${attempts}` : '';
         setLlmUnmatchedAction(key, {
           status: status === 'pending' ? 'queued' : 'running',
-          message: body?.message || 'Discovery in progress...',
+          message: `${phasePrefix}${body?.message || 'Discovery in progress...'}${queryPreview}${attemptSuffix}`,
           job_id: action.job_id,
         });
         didUpdate = true;
         continue;
       }
       if (status === 'success') {
+        await refreshDiscoveryJobLog(action.job_id);
         if (body?.matched_row && typeof body.matched_row === 'object') {
           mergeMatchedRowsInState([body.matched_row]);
           mergeMatchedRowsIntoPreview([body.matched_row]);
@@ -4657,9 +4728,13 @@ async function pollLlmUnmatchedJobs() {
       }
       setLlmUnmatchedAction(key, {
         status: 'failed',
-        message: body?.failure_reason || body?.message || 'Discovery failed.',
+        message: [
+          body?.phase ? `[${String(body.phase).trim()}]` : '',
+          body?.failure_reason || body?.message || 'Discovery failed.',
+        ].filter(Boolean).join(' '),
         job_id: action.job_id,
       });
+      await refreshDiscoveryJobLog(action.job_id);
       didUpdate = true;
     } catch (err) {
       setLlmUnmatchedAction(key, {
@@ -4667,6 +4742,7 @@ async function pollLlmUnmatchedJobs() {
         message: err?.message || 'Discovery polling failed.',
         job_id: action.job_id,
       });
+      await refreshDiscoveryJobLog(action.job_id);
       didUpdate = true;
     }
   }
@@ -4902,6 +4978,9 @@ async function submitUnmatchedDiscovery(unmatchedKey) {
   renderLlmMatchPanels();
   persistLlmState();
   try {
+    const historyForDiscover = Array.isArray(state.llmHistory)
+      ? state.llmHistory.slice(-6)
+      : [];
     const res = await fetch('/api/bulk/llm-targets/unmatched/discover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4909,6 +4988,9 @@ async function submitUnmatchedDiscovery(unmatchedKey) {
         catalog_name: catalogName,
         unmatched_key: key,
         candidate: entry.candidate || {},
+        history: historyForDiscover,
+        vendor_scope: 'both',
+        planning_mode: 'balanced',
         max_targets: 3,
         launch_browser: true,
       }),
@@ -4922,6 +5004,10 @@ async function submitUnmatchedDiscovery(unmatchedKey) {
       job_id: body?.job_id ? String(body.job_id) : null,
       message: body?.message || 'Discovery queued.',
     });
+    if (body?.job_id) {
+      appendLog(`[discover] queued unmatched_key=${key} job_id=${body.job_id}`);
+      await refreshDiscoveryJobLog(body.job_id);
+    }
     ensureLlmUnmatchedPolling();
     renderLlmMatchPanels();
     renderConversationSelector();
@@ -4948,6 +5034,20 @@ function setLlmViewMode(mode, { persist = true, rerender = true } = {}) {
   state.llmViewMode = next;
   if (el.llmViewMode) {
     el.llmViewMode.value = next;
+  }
+  if (persist) persistLlmState();
+  if (rerender) {
+    renderBulkPreview(state.bulkPreviewRows || [], state.bulkPreviewMessage || '');
+    renderBoltzConfigs();
+    updateRunCommandFilterNote();
+  }
+}
+
+function setLlmCatalogFilter(mode, { persist = true, rerender = true } = {}) {
+  const next = normalizeLlmCatalogFilter(mode);
+  state.llmCatalogFilter = next;
+  if (el.llmCatalogFilter) {
+    el.llmCatalogFilter.value = next;
   }
   if (persist) persistLlmState();
   if (rerender) {
@@ -5199,6 +5299,31 @@ async function fetchJob(jobId) {
   const res = await fetch(`/api/jobs/${jobId}`);
   if (!res.ok) throw new Error('Unable to retrieve job status');
   return res.json();
+}
+
+async function refreshDiscoveryJobLog(jobId) {
+  const id = String(jobId || '').trim();
+  if (!id) return;
+  // Avoid clobbering the primary bulk run log stream while bulk polling is active.
+  if (state.jobPoller && state.currentJobId && state.currentJobId !== id) return;
+  try {
+    const job = await fetchJob(id);
+    const logs = Array.isArray(job?.logs) ? job.logs : [];
+    if (logs.length) {
+      resetJobLog(logs.join('\n'));
+    } else {
+      resetJobLog(`[discover] Job ${id} has started. Waiting for log lines...`);
+    }
+    if (job.status === 'running' || job.status === 'pending') {
+      setBadge(el.bulkStatus, 'Discovery running…');
+    } else if (job.status === 'success') {
+      setBadge(el.bulkStatus, 'Discovery complete', 'rgba(134, 239, 172, 0.25)');
+    } else if (job.status === 'failed' || job.status === 'canceled') {
+      setBadge(el.bulkStatus, 'Discovery failed', 'rgba(248, 113, 113, 0.25)');
+    }
+  } catch (err) {
+    appendLog(`[discover] Unable to retrieve log stream for ${id}: ${err?.message || err}`);
+  }
 }
 
 function stopJobPolling() {
@@ -5493,6 +5618,7 @@ function init() {
   renderLlmTranscript();
   renderLlmMatchPanels();
   setLlmViewMode(state.llmViewMode || 'all', { persist: false, rerender: false });
+  setLlmCatalogFilter(state.llmCatalogFilter || 'biotin', { persist: false, rerender: false });
   ensureLlmUnmatchedPolling();
   loadCommandDefaults();
   loadBulkUiSettings({ autoLoadInput: true });
@@ -5515,6 +5641,9 @@ function init() {
   }
   if (el.llmViewMode) {
     el.llmViewMode.addEventListener('change', () => setLlmViewMode(el.llmViewMode.value));
+  }
+  if (el.llmCatalogFilter) {
+    el.llmCatalogFilter.addEventListener('change', () => setLlmCatalogFilter(el.llmCatalogFilter.value));
   }
   if (el.llmMatchedList) {
     el.llmMatchedList.addEventListener('click', handleLlmMatchedListClick);
