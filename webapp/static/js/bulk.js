@@ -103,6 +103,7 @@ function isBoltzEngine(engine) {
 
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
+  llmTargetPanel: document.querySelector('#llm-target-panel'),
   llmConversationSelect: document.querySelector('#llm-conversation-select'),
   llmNewConversation: document.querySelector('#llm-new-conversation'),
   llmViewMode: document.querySelector('#llm-view-mode'),
@@ -4573,6 +4574,13 @@ function setLlmSuggestPending(next, { persist = true } = {}) {
   state.llmSuggestPending = Boolean(next);
   if (el.llmSuggestTargets) {
     el.llmSuggestTargets.disabled = state.llmSuggestPending;
+    el.llmSuggestTargets.setAttribute('aria-busy', state.llmSuggestPending ? 'true' : 'false');
+  }
+  if (el.llmTargetPanel) {
+    el.llmTargetPanel.setAttribute('aria-busy', state.llmSuggestPending ? 'true' : 'false');
+  }
+  if (el.llmChatPrompt) {
+    el.llmChatPrompt.setAttribute('aria-busy', state.llmSuggestPending ? 'true' : 'false');
   }
   renderLlmSuggestLoading();
   if (persist) persistLlmState();
@@ -4771,6 +4779,35 @@ function ensureLlmUnmatchedPolling() {
   state.llmUnmatchedPoller = setInterval(pollLlmUnmatchedJobs, 2500);
 }
 
+function buildLlmMessageNode(role, text, { pending = false } = {}) {
+  const safeRole = role === 'assistant' ? 'assistant' : 'user';
+  const box = document.createElement('div');
+  box.className = `llm-msg llm-msg-${safeRole}${pending ? ' llm-msg-pending' : ''}`;
+
+  const head = document.createElement('div');
+  head.className = 'llm-msg-head';
+  const badge = document.createElement('span');
+  badge.className = `llm-role-pill ${safeRole}`;
+  badge.textContent = safeRole === 'assistant' ? 'Assistant' : 'You';
+  head.appendChild(badge);
+  box.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'llm-msg-body';
+  body.textContent = String(text || '').trim();
+  box.appendChild(body);
+  return box;
+}
+
+function llmActionStatusLabel(status) {
+  const normalized = String(status || 'idle').toLowerCase();
+  if (normalized === 'queued') return 'Queued';
+  if (normalized === 'running') return 'Running';
+  if (normalized === 'failed') return 'Failed';
+  if (normalized === 'success') return 'Added';
+  return 'Ready';
+}
+
 function renderLlmTranscript() {
   if (!el.llmChatTranscript) return;
   const history = Array.isArray(state.llmHistory) ? state.llmHistory : [];
@@ -4786,17 +4823,12 @@ function renderLlmTranscript() {
     const role = String(msg?.role || '').trim().toLowerCase() === 'assistant' ? 'assistant' : 'user';
     const text = String(msg?.content || '').trim();
     if (!text) return;
-    const box = document.createElement('div');
-    box.className = `llm-msg ${role}`;
-    const roleLabel = role === 'assistant' ? 'Assistant' : 'User';
-    box.textContent = `${roleLabel}: ${text}`;
-    el.llmChatTranscript.appendChild(box);
+    el.llmChatTranscript.appendChild(buildLlmMessageNode(role, text));
   });
   if (state.llmSuggestPending) {
-    const pending = document.createElement('div');
-    pending.className = 'llm-msg assistant';
-    pending.textContent = 'Assistant: Preparing suggestions...';
-    el.llmChatTranscript.appendChild(pending);
+    el.llmChatTranscript.appendChild(
+      buildLlmMessageNode('assistant', 'Preparing suggestions...', { pending: true }),
+    );
   }
   el.llmChatTranscript.scrollTop = el.llmChatTranscript.scrollHeight;
 }
@@ -4830,16 +4862,27 @@ function renderLlmMatchPanels() {
         item.className = 'item';
         const pdb = normalizePdbId(row?.resolved_pdb_id || row?.pdb_id) || '—';
         const name = row?.protein_name || row?.preset_name || 'Unnamed target';
-        const acc = row?.accession ? ` · ${row.accession}` : '';
+        const acc = row?.accession ? `Accession: ${row.accession}` : '';
+        const preset = row?.preset_name ? `Preset: ${row.preset_name}` : '';
         const isDeleted = deletedSet.has(pdb);
 
         const rowWrap = document.createElement('div');
         rowWrap.className = 'llm-item-row';
 
+        const main = document.createElement('div');
+        main.className = 'llm-item-main';
         const label = document.createElement('span');
-        label.className = `label${isDeleted ? ' deleted' : ''}`;
-        label.textContent = `${pdb} · ${name}${acc}`;
-        rowWrap.appendChild(label);
+        label.className = `llm-item-title label${isDeleted ? ' deleted' : ''}`;
+        label.textContent = `${pdb} · ${name}`;
+        main.appendChild(label);
+        const metaParts = [acc, preset].filter(Boolean);
+        if (metaParts.length) {
+          const meta = document.createElement('span');
+          meta.className = 'llm-item-meta';
+          meta.textContent = metaParts.join(' · ');
+          main.appendChild(meta);
+        }
+        rowWrap.appendChild(main);
 
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
@@ -4847,7 +4890,10 @@ function renderLlmMatchPanels() {
         toggleBtn.dataset.action = 'toggle-picked-target';
         toggleBtn.dataset.pdbId = pdb;
         toggleBtn.textContent = isDeleted ? 'Undelete' : 'Delete';
-        rowWrap.appendChild(toggleBtn);
+        const actions = document.createElement('div');
+        actions.className = 'llm-item-actions';
+        actions.appendChild(toggleBtn);
+        rowWrap.appendChild(actions);
 
         item.appendChild(rowWrap);
         el.llmMatchedList.appendChild(item);
@@ -4887,20 +4933,35 @@ function renderLlmMatchPanels() {
           .join(', ');
         const rowWrap = document.createElement('div');
         rowWrap.className = 'llm-item-row';
+        const actionStatus = String(action?.status || 'idle').toLowerCase();
+        const statusClass = ['queued', 'running', 'failed', 'success'].includes(actionStatus) ? actionStatus : 'idle';
 
+        const main = document.createElement('div');
+        main.className = 'llm-item-main';
         const textWrap = document.createElement('span');
-        textWrap.className = 'label';
-        textWrap.textContent = hints
-          ? `${label} · nearest: ${hints}`
-          : `${label} · no catalog match`;
-        rowWrap.appendChild(textWrap);
+        textWrap.className = 'llm-item-title label';
+        textWrap.textContent = label;
+        main.appendChild(textWrap);
+        const meta = document.createElement('span');
+        meta.className = 'llm-item-meta';
+        const reason = entry?.reason ? `Reason: ${String(entry.reason).trim()}` : '';
+        const matchHint = hints ? `Nearest: ${hints}` : 'No catalog match';
+        meta.textContent = [matchHint, reason].filter(Boolean).join(' · ');
+        main.appendChild(meta);
+        rowWrap.appendChild(main);
+
+        const actions = document.createElement('div');
+        actions.className = 'llm-item-actions';
+        const statusBadge = document.createElement('span');
+        statusBadge.className = `llm-status-badge ${statusClass}`;
+        statusBadge.textContent = llmActionStatusLabel(statusClass);
+        actions.appendChild(statusBadge);
 
         const actionBtn = document.createElement('button');
         actionBtn.type = 'button';
         actionBtn.className = 'mini-btn';
         actionBtn.dataset.action = 'discover-unmatched-target';
         actionBtn.dataset.unmatchedKey = key;
-        const actionStatus = String(action?.status || 'idle').toLowerCase();
         if (actionStatus === 'running' || actionStatus === 'queued') {
           actionBtn.textContent = 'Running...';
           actionBtn.disabled = true;
@@ -4914,7 +4975,8 @@ function renderLlmMatchPanels() {
           actionBtn.textContent = 'Discover';
           actionBtn.disabled = false;
         }
-        rowWrap.appendChild(actionBtn);
+        actions.appendChild(actionBtn);
+        rowWrap.appendChild(actions);
         item.appendChild(rowWrap);
 
         if (action?.message) {

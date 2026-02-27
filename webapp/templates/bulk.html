@@ -33,30 +33,6 @@
       .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
       .settings-section { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
       .settings-section h4 { margin: 0 0 8px 0; font-size: 13px; color: #0f172a; }
-      .llm-target-panel { border: 1px solid #dbeafe; background: #f8fbff; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
-      .llm-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 10px; }
-      .llm-toolbar label { display: flex; flex-direction: column; gap: 4px; min-width: 180px; font-size: 12px; color: #334155; }
-      .llm-toolbar select { min-height: 32px; }
-      .llm-grid { display: grid; grid-template-columns: minmax(280px, 1.4fr) minmax(240px, 1fr); gap: 12px; }
-      .llm-transcript { border: 1px solid #cbd5e1; border-radius: 8px; background: #ffffff; min-height: 170px; max-height: 280px; overflow: auto; padding: 8px; }
-      .llm-msg { margin-bottom: 8px; padding: 8px; border-radius: 8px; font-size: 13px; line-height: 1.4; }
-      .llm-msg.user { background: #e0f2fe; border: 1px solid #bae6fd; }
-      .llm-msg.assistant { background: #f1f5f9; border: 1px solid #e2e8f0; }
-      .llm-list { border: 1px solid #cbd5e1; border-radius: 8px; background: #ffffff; min-height: 90px; max-height: 160px; overflow: auto; padding: 8px; font-size: 12px; }
-      .llm-list .item { padding: 6px 0; border-bottom: 1px dashed #e2e8f0; }
-      .llm-list .item:last-child { border-bottom: none; }
-      .llm-item-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-      .llm-item-row .label { flex: 1; min-width: 0; word-break: break-word; }
-      .llm-item-row .label.deleted { color: #94a3b8; text-decoration: line-through; }
-      .llm-item-row .mini-btn { font-size: 11px; padding: 4px 8px; border: 1px solid #cbd5e1; background: #f8fafc; border-radius: 6px; cursor: pointer; }
-      .llm-item-row .mini-btn:hover { background: #e2e8f0; }
-      .llm-item-status { margin-top: 4px; color: #64748b; font-size: 11px; line-height: 1.3; }
-      .llm-loading { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #334155; }
-      .llm-loading[hidden] { display: none !important; }
-      .llm-spinner { width: 12px; height: 12px; border: 2px solid #cbd5e1; border-top-color: #2563eb; border-radius: 50%; animation: llm-spin 0.8s linear infinite; display: inline-block; }
-      @keyframes llm-spin { to { transform: rotate(360deg); } }
-      .llm-empty { color: #64748b; font-size: 12px; }
-      @media (max-width: 920px) { .llm-grid { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>
@@ -77,64 +53,83 @@
 
         <div class="bulk-layout">
           <div class="bulk-main">
-            <section id="llm-target-panel" class="llm-target-panel">
-              <h2 style="margin: 0 0 8px;">LLM Target Discovery</h2>
-              <p class="help-text" style="margin-top: 0;">
-                Start with a scientific question, then match LLM-suggested targets against the default catalog
-                configured in <code>Config</code> -> <code>Input TSV defaults</code>.
-                Use <code>View mode</code> to focus on LLM-picked targets or return to all targets.
-              </p>
-              <div class="llm-toolbar">
-                <label>Conversation
-                  <select id="llm-conversation-select">
-                    <option value="">New conversation</option>
-                  </select>
-                </label>
-                <button type="button" id="llm-new-conversation" class="ghost">New conversation</button>
-                <label>View mode
-                  <select id="llm-view-mode">
-                    <option value="picked">LLM-picked</option>
-                    <option value="all">All targets</option>
-                  </select>
-                </label>
-                <label>Catalog filter
-                  <select id="llm-catalog-filter">
-                    <option value="biotin">Biotin only</option>
-                    <option value="all">All</option>
-                  </select>
-                </label>
+            <section id="llm-target-panel" class="llm-target-panel" aria-labelledby="llm-panel-title" aria-busy="false">
+              <div class="llm-panel-header">
+                <div class="llm-panel-heading">
+                  <h2 id="llm-panel-title" class="llm-panel-title">LLM Target Discovery</h2>
+                  <p class="llm-panel-subtitle">Describe the biology, get catalog matches, and keep only the targets you want to run.</p>
+                  <p class="llm-panel-hint">Catalog source: <code>Config</code> -> <code>Input TSV defaults</code>.</p>
+                </div>
               </div>
+
+              <div class="llm-control-strip">
+                <div class="llm-control-group">
+                  <label class="llm-control-label" for="llm-conversation-select">Conversation</label>
+                  <div class="llm-control-inline">
+                    <select id="llm-conversation-select">
+                      <option value="">New conversation</option>
+                    </select>
+                    <button type="button" id="llm-new-conversation" class="ghost">New</button>
+                  </div>
+                </div>
+                <div class="llm-control-group llm-filter-group">
+                  <div class="llm-select-field">
+                    <label class="llm-control-label" for="llm-view-mode">View</label>
+                    <select id="llm-view-mode">
+                      <option value="picked">LLM-picked</option>
+                      <option value="all">All targets</option>
+                    </select>
+                  </div>
+                  <div class="llm-select-field">
+                    <label class="llm-control-label" for="llm-catalog-filter">Catalog</label>
+                    <select id="llm-catalog-filter">
+                      <option value="biotin">Biotin only</option>
+                      <option value="all">All</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               <div class="llm-grid">
-                <div>
-                  <div class="form-row" style="margin-top: 8px;">
-                    <label>Prompt
-                      <textarea id="llm-chat-prompt" rows="3" placeholder="Example: I work on autoimmune disease and need purchasable human immune checkpoints with soluble ectodomains."></textarea>
-                    </label>
+                <div class="llm-column llm-chat-column">
+                  <div class="llm-composer">
+                    <label class="llm-control-label" for="llm-chat-prompt">Prompt</label>
+                    <textarea id="llm-chat-prompt" rows="3" placeholder="Example: I work on autoimmune disease and need purchasable human immune checkpoints with soluble ectodomains."></textarea>
+                    <div class="llm-composer-actions">
+                      <button type="button" id="llm-suggest-targets">Suggest targets</button>
+                      <span id="llm-suggest-loading" class="llm-loading" hidden>
+                        <span class="llm-spinner" aria-hidden="true"></span>
+                        Waiting for suggestions...
+                      </span>
+                    </div>
+                    <p class="llm-composer-hint">Press Cmd/Ctrl + Enter to send.</p>
                   </div>
-                  <div class="flex-row" style="gap: 8px;">
-                    <button type="button" id="llm-suggest-targets">Suggest targets</button>
-                    <span id="llm-suggest-loading" class="llm-loading" hidden>
-                      <span class="llm-spinner" aria-hidden="true"></span>
-                      Waiting for suggestions...
-                    </span>
+                  <div class="llm-section-heading">
+                    <h3 class="llm-section-title">Conversation</h3>
                   </div>
-                  <div class="help-text" style="margin: 10px 0 6px; color: #0f172a;">Conversation</div>
-                  <div id="llm-chat-transcript" class="llm-transcript">
+                  <div id="llm-chat-transcript" class="llm-transcript" aria-live="polite">
                     <div class="llm-empty">No conversation yet.</div>
                   </div>
                 </div>
-                <div>
-                  <div class="help-text" style="margin-bottom: 6px; color: #0f172a;">
-                    Matched targets active/total (<span id="llm-matched-count">0/0</span>)
+
+                <div class="llm-column llm-results-column">
+                  <div class="llm-list-panel">
+                    <div class="llm-section-heading">
+                      <h3 class="llm-section-title">Matched targets</h3>
+                      <div class="llm-section-meta">Active/total <strong id="llm-matched-count">0/0</strong></div>
+                    </div>
+                    <div id="llm-matched-list" class="llm-list">
+                      <div class="llm-empty">No matched targets yet.</div>
+                    </div>
                   </div>
-                  <div id="llm-matched-list" class="llm-list">
-                    <div class="llm-empty">No matched targets yet.</div>
-                  </div>
-                  <div class="help-text" style="margin: 10px 0 6px; color: #0f172a;">
-                    Unmatched suggestions (<span id="llm-unmatched-count">0</span>)
-                  </div>
-                  <div id="llm-unmatched-list" class="llm-list">
-                    <div class="llm-empty">No unmatched suggestions.</div>
+                  <div class="llm-list-panel">
+                    <div class="llm-section-heading">
+                      <h3 class="llm-section-title">Unmatched suggestions</h3>
+                      <div class="llm-section-meta">Count <strong id="llm-unmatched-count">0</strong></div>
+                    </div>
+                    <div id="llm-unmatched-list" class="llm-list">
+                      <div class="llm-empty">No unmatched suggestions.</div>
+                    </div>
                   </div>
                 </div>
               </div>
