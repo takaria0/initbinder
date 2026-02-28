@@ -11,3 +11,4 @@ beautifulsoup4>=4.12
 biotite>=0.41
 playwright>=1.46
 openai>=1.40
+dnachisel>=3.2

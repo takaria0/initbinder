@@ -446,6 +446,17 @@ class BoltzgenBinderExportRequest(BaseModel):
     )
     per_group: int = Field(48, ge=1, description="Binders to export per antigen:epitope group.")
     include_summary: bool = Field(True, description="Whether to emit a summary CSV.")
+    upstream_flank: str = Field("GGAG", min_length=1, description="5' DNA flank for exported binder constructs.")
+    downstream_flank: str = Field("CGCT", min_length=1, description="3' DNA flank for exported binder constructs.")
+
+
+class BoltzgenBinderExportPlot(BaseModel):
+    engine: str
+    png_name: Optional[str] = None
+    svg_name: Optional[str] = None
+    map_csv_name: Optional[str] = None
+    point_count: int = 0
+    skipped_missing_metrics: int = 0
 
 
 class BoltzgenBinderExportResponse(BaseModel):
@@ -453,6 +464,7 @@ class BoltzgenBinderExportResponse(BaseModel):
     summary_csv_name: Optional[str] = None
     selection_count: int = 0
     invalid: List[str] = Field(default_factory=list)
+    plot_exports: List[BoltzgenBinderExportPlot] = Field(default_factory=list)
     message: Optional[str] = None
 
 

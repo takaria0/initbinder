@@ -41,6 +41,7 @@ from .job_store import JobStatus, JobStore, get_job_store
 from .models import (
     AntigenDiversityPlot,
     AntigenDiversityResponse,
+    BoltzgenBinderExportPlot,
     BoltzgenBinderResponse,
     BoltzgenBinderRow,
     BoltzgenBinderExportRequest,
@@ -7333,6 +7334,255 @@ def _load_binder_rows_from_csv(
     return all_rows
 
 
+_DNA_FLANK_RE = re.compile(r"^[ACGTN]+$", flags=re.IGNORECASE)
+_BINDER_EXPORT_MAP_COLUMNS = [
+    "engine",
+    "pdb_id",
+    "epitope",
+    "rank_within_epitope",
+    "iptm",
+    "rmsd",
+    "ranking_score",
+    "color_hex",
+    "design_path",
+    "metrics_path",
+]
+_YEAST_STATIC_CODON_TABLE = {
+    "A": "GCT",
+    "C": "TGT",
+    "D": "GAT",
+    "E": "GAA",
+    "F": "TTT",
+    "G": "GGT",
+    "H": "CAT",
+    "I": "ATT",
+    "K": "AAA",
+    "L": "TTG",
+    "M": "ATG",
+    "N": "AAT",
+    "P": "CCT",
+    "Q": "CAA",
+    "R": "AGA",
+    "S": "TCT",
+    "T": "ACT",
+    "V": "GTG",
+    "W": "TGG",
+    "Y": "TAT",
+    "X": "NNK",
+}
+
+
+def _normalize_export_engine(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    if "boltz" in text:
+        return "boltzgen"
+    if text in {"rfa", "rf", "rfantibody"} or "rfantibody" in text:
+        return "rfantibody"
+    return text
+
+
+def _normalize_dna_flank(value: object, *, default: str) -> Optional[str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        text = default.upper()
+    if not text:
+        return None
+    return text if _DNA_FLANK_RE.fullmatch(text) else None
+
+
+def _aa_to_static_yeast_dna(seq: object) -> Optional[str]:
+    aa_seq = "".join(ch for ch in str(seq or "").strip().upper() if ch.isalpha())
+    if not aa_seq:
+        return None
+    dna_parts: List[str] = []
+    for aa in aa_seq:
+        codon = _YEAST_STATIC_CODON_TABLE.get(aa)
+        if not codon:
+            return None
+        dna_parts.append(codon)
+    return "".join(dna_parts)
+
+
+def _optimize_yeast_dna_with_dnachisel(aa_seq: str, seed_dna: str) -> Optional[str]:
+    try:
+        import dnachisel as dc  # type: ignore
+    except Exception:
+        return None
+
+    seq = "".join(ch for ch in str(aa_seq or "").strip().upper() if ch.isalpha())
+    dna = str(seed_dna or "").strip().upper()
+    if not seq or not dna:
+        return None
+
+    species_candidates = (
+        "saccharomyces_cerevisiae",
+        "s_cerevisiae",
+        "yeast",
+    )
+    for species in species_candidates:
+        try:
+            problem = dc.DnaOptimizationProblem(
+                sequence=dna,
+                constraints=[dc.EnforceTranslation()],
+                objectives=[dc.CodonOptimize(species=species)],
+            )
+            problem.resolve_constraints()
+            problem.optimize()
+            optimized = str(problem.sequence).strip().upper()
+            if optimized:
+                return optimized
+        except Exception:
+            continue
+    return None
+
+
+def _codon_optimize_yeast_dna(seq: object) -> Tuple[Optional[str], Optional[str]]:
+    static_dna = _aa_to_static_yeast_dna(seq)
+    if not static_dna:
+        return None, None
+    aa_seq = "".join(ch for ch in str(seq or "").strip().upper() if ch.isalpha())
+    optimized = _optimize_yeast_dna_with_dnachisel(aa_seq, static_dna)
+    if optimized:
+        return optimized, "dnachisel"
+    return static_dna, "static_fallback"
+
+
+def _build_binder_export_scatter_artifacts(
+    points: List[Dict[str, object]],
+    *,
+    out_dir: Path,
+    timestamp: str,
+) -> Tuple[List[BoltzgenBinderExportPlot], List[str]]:
+    if not points:
+        return [], []
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.colors as mcolors
+        import matplotlib.pyplot as plt
+    except Exception:
+        return [], ["scatter export skipped (matplotlib unavailable)"]
+
+    group_keys = sorted({str(row.get("group_key") or "").strip() for row in points if str(row.get("group_key") or "").strip()})
+    if not group_keys:
+        return [], []
+    denom = max(1, len(group_keys) - 1)
+    cmap = plt.get_cmap("tab20")
+    group_colors = {
+        key: mcolors.to_hex(cmap(idx / denom))
+        for idx, key in enumerate(group_keys)
+    }
+
+    by_engine: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    skipped_missing: Dict[str, int] = defaultdict(int)
+    for row in points:
+        engine = _normalize_export_engine(row.get("engine"))
+        iptm_val = _finite_float(row.get("iptm"))
+        rmsd_val = _finite_float(row.get("rmsd"))
+        if iptm_val is None or rmsd_val is None:
+            skipped_missing[engine] += 1
+            continue
+        item = dict(row)
+        item["iptm"] = iptm_val
+        item["rmsd"] = rmsd_val
+        by_engine[engine].append(item)
+
+    exports: List[BoltzgenBinderExportPlot] = []
+    summary_notes: List[str] = []
+    engines = sorted(set(list(by_engine.keys()) + list(skipped_missing.keys())))
+    for engine in engines:
+        engine_rows = by_engine.get(engine) or []
+        missing_count = int(skipped_missing.get(engine, 0))
+        if not engine_rows:
+            if missing_count:
+                summary_notes.append(f"{engine}: no plotted points ({missing_count} missing ipTM/RMSD)")
+            continue
+
+        engine_safe = re.sub(r"[^a-z0-9]+", "_", engine.lower()).strip("_") or "unknown"
+        title_engine = "BoltzGen" if engine == "boltzgen" else ("RFAntibody" if engine == "rfantibody" else engine)
+        fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+        engine_groups = sorted({str(row.get("group_key") or "").strip() for row in engine_rows if str(row.get("group_key") or "").strip()})
+        for group_key in engine_groups:
+            subset = [row for row in engine_rows if str(row.get("group_key") or "").strip() == group_key]
+            if not subset:
+                continue
+            xs = [float(row["rmsd"]) for row in subset]
+            ys = [float(row["iptm"]) for row in subset]
+            label = f"{group_key} (n={len(subset)})"
+            ax.scatter(
+                xs,
+                ys,
+                s=18,
+                alpha=0.7,
+                color=group_colors.get(group_key, "#2563eb"),
+                label=label,
+                edgecolors="none",
+            )
+        ax.set_title(f"Selected binders {title_engine}: RMSD vs ipTM", fontsize=11, fontweight="semibold")
+        ax.set_xlabel("RMSD (Å)")
+        ax.set_ylabel("ipTM")
+        ax.set_xlim(left=0.0)
+        ax.set_ylim(0.0, 1.0)
+        _style_scatter(ax)
+        if len(engine_groups) <= 24:
+            ax.legend(loc="best", fontsize=7, frameon=False)
+        plt.tight_layout()
+
+        png_name = f"selected_binders_scatter_{engine_safe}_{timestamp}.png"
+        svg_name = f"selected_binders_scatter_{engine_safe}_{timestamp}.svg"
+        png_path = out_dir / png_name
+        svg_path = out_dir / svg_name
+        try:
+            fig.savefig(png_path, dpi=200)
+            fig.savefig(svg_path)
+        except Exception as exc:
+            print(f"[binder-export] failed to save scatter plot ({engine}): {exc}")
+            traceback.print_exc()
+            plt.close(fig)
+            continue
+        finally:
+            plt.close(fig)
+
+        map_name = f"selected_binders_scatter_map_{engine_safe}_{timestamp}.csv"
+        map_path = out_dir / map_name
+        map_rows: List[Dict[str, object]] = []
+        for row in engine_rows:
+            group_key = str(row.get("group_key") or "").strip()
+            map_rows.append(
+                {
+                    "engine": engine,
+                    "pdb_id": row.get("pdb_id"),
+                    "epitope": row.get("epitope"),
+                    "rank_within_epitope": row.get("rank_within_epitope"),
+                    "iptm": _format_float(row.get("iptm"), 6),
+                    "rmsd": _format_float(row.get("rmsd"), 6),
+                    "ranking_score": _format_float(row.get("ranking_score"), 6),
+                    "color_hex": group_colors.get(group_key),
+                    "design_path": row.get("design_path"),
+                    "metrics_path": row.get("metrics_path"),
+                }
+            )
+        _write_csv(map_path, _BINDER_EXPORT_MAP_COLUMNS, map_rows)
+
+        exports.append(
+            BoltzgenBinderExportPlot(
+                engine=engine,
+                png_name=png_name,
+                svg_name=svg_name,
+                map_csv_name=map_name,
+                point_count=len(engine_rows),
+                skipped_missing_metrics=missing_count,
+            )
+        )
+        summary_notes.append(
+            f"{engine}: {len(engine_rows)} plotted point(s)"
+            + (f", {missing_count} missing ipTM/RMSD" if missing_count else "")
+        )
+    return exports, summary_notes
+
+
 _BINDER_EXPORT_COLUMNS = [
     "pdb_id",
     "epitope",
@@ -7345,6 +7595,11 @@ _BINDER_EXPORT_COLUMNS = [
     "ipsae_min",
     "binder_seq",
     "binder_length",
+    "upstream_flank",
+    "dna_yeast_codon",
+    "downstream_flank",
+    "dna_with_flanks",
+    "dna_method",
     "design_path",
     "metrics_path",
     "run_label",
@@ -7437,6 +7692,8 @@ def export_selected_binders(
     selections = request.selections or []
     per_group = max(1, int(request.per_group or 1))
     include_summary = bool(request.include_summary)
+    upstream_flank = _normalize_dna_flank(request.upstream_flank, default="GGAG")
+    downstream_flank = _normalize_dna_flank(request.downstream_flank, default="CGCT")
     entries, invalid = _parse_binder_export_selections(selections)
     if not entries:
         message = "No valid PDB:epitope selections provided."
@@ -7446,6 +7703,12 @@ def export_selected_binders(
             selection_count=0,
             invalid=invalid,
             message=message,
+        )
+    if not upstream_flank or not downstream_flank:
+        return BoltzgenBinderExportResponse(
+            selection_count=len(entries),
+            invalid=invalid,
+            message="No binder export produced. Invalid DNA flank(s); use A/C/G/T/N only.",
         )
 
     report = build_boltzgen_diversity_report()
@@ -7483,6 +7746,7 @@ def export_selected_binders(
 
     export_rows: List[Dict[str, object]] = []
     summary_rows: List[Dict[str, object]] = []
+    scatter_points: List[Dict[str, object]] = []
     total_selected = 0
 
     for pdb_id, ep_key in entries:
@@ -7563,7 +7827,33 @@ def export_selected_binders(
             record["epitope_total"] = total
             record["selected_percentile"] = _format_float(selected_percentile, 2)
             record["binder_length"] = len(row.binder_seq) if row.binder_seq else None
+            dna_yeast_codon, dna_method = _codon_optimize_yeast_dna(row.binder_seq)
+            record["upstream_flank"] = upstream_flank
+            record["dna_yeast_codon"] = dna_yeast_codon
+            record["downstream_flank"] = downstream_flank
+            record["dna_with_flanks"] = (
+                f"{upstream_flank}{dna_yeast_codon}{downstream_flank}"
+                if dna_yeast_codon
+                else None
+            )
+            record["dna_method"] = dna_method
             export_rows.append(record)
+
+            group_key = f"{pdb_id}:{ep_key}"
+            scatter_points.append(
+                {
+                    "engine": row.engine,
+                    "pdb_id": pdb_id,
+                    "epitope": row.epitope or row.epitope_id or ep_key,
+                    "rank_within_epitope": idx,
+                    "iptm": iptm_val,
+                    "rmsd": rmsd_val,
+                    "ranking_score": score,
+                    "design_path": row.design_path,
+                    "metrics_path": row.metrics_path,
+                    "group_key": group_key,
+                }
+            )
             if iptm_val is not None:
                 iptm_selected.append(iptm_val)
             if rmsd_val is not None:
@@ -7611,14 +7901,23 @@ def export_selected_binders(
         summary_path = out_dir / summary_name
         _write_csv(summary_path, _BINDER_EXPORT_SUMMARY_COLUMNS, summary_rows)
 
+    plot_exports, plot_notes = _build_binder_export_scatter_artifacts(
+        scatter_points,
+        out_dir=out_dir,
+        timestamp=timestamp,
+    )
+
     message = f"Exported {total_selected} binders across {len(entries)} selections."
     if invalid:
         message = f"{message} Invalid entries: {', '.join(invalid)}"
+    if plot_notes:
+        message = f"{message} Scatter exports -> {'; '.join(plot_notes)}"
     return BoltzgenBinderExportResponse(
         csv_name=export_name,
         summary_csv_name=summary_name,
         selection_count=len(entries),
         invalid=invalid,
+        plot_exports=plot_exports,
         message=message,
     )
 

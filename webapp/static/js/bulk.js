@@ -249,6 +249,8 @@ const el = {
   binderExportSelections: document.querySelector('#binder-export-selections'),
   binderExportCount: document.querySelector('#binder-export-count'),
   binderExportSummary: document.querySelector('#binder-export-summary'),
+  binderExportUpstreamFlank: document.querySelector('#binder-export-upstream-flank'),
+  binderExportDownstreamFlank: document.querySelector('#binder-export-downstream-flank'),
   boltzConfigModal: document.querySelector('#boltz-config-modal'),
   boltzConfigTitle: document.querySelector('#boltz-config-title'),
   boltzConfigBody: document.querySelector('#boltz-config-body'),
@@ -2114,6 +2116,13 @@ async function exportSelectedBinders() {
     showAlert('Enter a valid number of binders per antigen:epitope.');
     return;
   }
+  const dnaRe = /^[ACGTN]+$/i;
+  const upstreamFlank = (el.binderExportUpstreamFlank?.value || 'GGAG').trim().toUpperCase();
+  const downstreamFlank = (el.binderExportDownstreamFlank?.value || 'CGCT').trim().toUpperCase();
+  if (!dnaRe.test(upstreamFlank) || !dnaRe.test(downstreamFlank)) {
+    showAlert('Flanks must contain only A/C/G/T/N characters.');
+    return;
+  }
 
   if (el.binderExportConfirm) el.binderExportConfirm.disabled = true;
   try {
@@ -2122,6 +2131,8 @@ async function exportSelectedBinders() {
       selections,
       per_group: perGroup,
       include_summary: Boolean(el.binderExportSummary?.checked),
+      upstream_flank: upstreamFlank,
+      downstream_flank: downstreamFlank,
     };
     const res = await fetch('/api/bulk/boltzgen/binders/export', {
       method: 'POST',
@@ -2140,6 +2151,15 @@ async function exportSelectedBinders() {
     await downloadNamedFile(body.csv_name);
     if (body.summary_csv_name) {
       await downloadNamedFile(body.summary_csv_name);
+    }
+    const plotExports = Array.isArray(body.plot_exports) ? body.plot_exports : [];
+    for (const item of plotExports) {
+      if (!item || typeof item !== 'object') continue;
+      const files = [item.png_name, item.svg_name, item.map_csv_name];
+      for (const name of files) {
+        if (!name) continue;
+        await downloadNamedFile(String(name));
+      }
     }
     showAlert(body.message || `Export ready: ${body.csv_name}`, false);
   } catch (err) {
