@@ -182,6 +182,7 @@ class ClusterConfig:
     squeue_path: str = "squeue"
     sacct_path: str = "sacct"
     pymol_path: str = "pymol"
+    pymol_conda_env: Optional[str] = None
     mock: bool = False
     assess_partition: Optional[str] = None
     assess_account: Optional[str] = None
@@ -440,6 +441,8 @@ def load_config() -> WebAppConfig:
         }
     if conda_activate := os.getenv("INITBINDER_CONDA_ACTIVATE"):
         env_overrides.setdefault("cluster", {})["conda_activate"] = conda_activate
+    if pymol_conda_env := os.getenv("INITBINDER_PYMOL_CONDA_ENV"):
+        env_overrides.setdefault("cluster", {})["pymol_conda_env"] = pymol_conda_env
     if log_dir := os.getenv("INITBINDER_LOG_DIR"):
         env_overrides["log_dir"] = log_dir
 

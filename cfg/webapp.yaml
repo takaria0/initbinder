@@ -17,6 +17,7 @@ cluster:
   squeue_path: squeue
   sacct_path: sacct
   pymol_path: pymol
+  pymol_conda_env: null
   assess_partition: null
   assess_account: null
   assess_time_minutes: 240

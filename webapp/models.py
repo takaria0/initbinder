@@ -507,6 +507,7 @@ class BulkUiClusterConfig(BaseModel):
     target_root: Optional[str] = None
     conda_activate: Optional[str] = None
     pymol_path: Optional[str] = None
+    pymol_conda_env: Optional[str] = None
 
 
 class BulkUiBoltzgenConfig(BaseModel):

@@ -236,6 +236,7 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
             target_root=str(cluster_cfg.target_root) if cluster_cfg.target_root else None,
             conda_activate=cluster_cfg.conda_activate,
             pymol_path=cluster_cfg.pymol_path,
+            pymol_conda_env=cluster_cfg.pymol_conda_env,
         ),
         boltzgen=BulkUiBoltzgenConfig(
             partition=boltz_cfg.partition,
@@ -1228,6 +1229,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     cluster_block["target_root"] = _normalize_optional_text(payload.cluster.target_root)
     cluster_block["conda_activate"] = _normalize_optional_text(payload.cluster.conda_activate)
     cluster_block["pymol_path"] = _normalize_optional_text(payload.cluster.pymol_path)
+    cluster_block["pymol_conda_env"] = _normalize_optional_text(payload.cluster.pymol_conda_env)
 
     boltz_block = cluster_block.get("boltzgen")
     if not isinstance(boltz_block, dict):

@@ -198,6 +198,7 @@ const el = {
   bulkSettingsTargetRoot: document.querySelector('#bulk-settings-target-root'),
   bulkSettingsConda: document.querySelector('#bulk-settings-conda'),
   bulkSettingsPymolPath: document.querySelector('#bulk-settings-pymol-path'),
+  bulkSettingsPymolCondaEnv: document.querySelector('#bulk-settings-pymol-conda-env'),
   bulkSettingsBoltzPartition: document.querySelector('#bulk-settings-boltz-partition'),
   bulkSettingsBoltzAccount: document.querySelector('#bulk-settings-boltz-account'),
   bulkSettingsBoltzGpus: document.querySelector('#bulk-settings-boltz-gpus'),
@@ -2984,6 +2985,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsTargetRoot, cluster.target_root);
   setTextInputValue(el.bulkSettingsConda, cluster.conda_activate);
   setTextInputValue(el.bulkSettingsPymolPath, cluster.pymol_path);
+  setTextInputValue(el.bulkSettingsPymolCondaEnv, cluster.pymol_conda_env);
 
   setTextInputValue(el.bulkSettingsBoltzPartition, boltzgen.partition);
   setTextInputValue(el.bulkSettingsBoltzAccount, boltzgen.account);
@@ -3024,6 +3026,7 @@ function buildBulkUiSettingsPayload() {
       target_root: normalizeOptionalText(el.bulkSettingsTargetRoot?.value),
       conda_activate: normalizeOptionalText(el.bulkSettingsConda?.value),
       pymol_path: normalizeOptionalText(el.bulkSettingsPymolPath?.value),
+      pymol_conda_env: normalizeOptionalText(el.bulkSettingsPymolCondaEnv?.value),
     },
     boltzgen: {
       partition: normalizeOptionalText(el.bulkSettingsBoltzPartition?.value),

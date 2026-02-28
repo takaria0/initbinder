@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -243,9 +244,82 @@ def _copy_bundle(src: Path, dest: Path) -> Path:
     return dest
 
 
+def _resolve_pymol_command_for_conda(configured_path: str) -> str:
+    candidate = configured_path.strip() or "pymol"
+    cand_path = Path(candidate)
+    if cand_path.suffix.lower() == ".app" and cand_path.is_dir():
+        for rel in ("Contents/bin/pymol", "Contents/MacOS/PyMOL"):
+            cli_path = cand_path / rel
+            if cli_path.exists():
+                return str(cli_path)
+    return candidate
+
+
+def _ensure_conda_env_available(conda_exe: str, env_name: str) -> None:
+    try:
+        result = subprocess.run(
+            [conda_exe, "env", "list", "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - depends on host PATH
+        raise PyMolLaunchError(
+            "Conda executable not found in PATH while validating PyMOL environment."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise PyMolLaunchError(
+            f"Unable to validate conda environments before launching PyMOL: {detail or exc}"
+        ) from exc
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise PyMolLaunchError(
+            "Conda environment listing returned invalid JSON; cannot validate PyMOL conda env."
+        ) from exc
+
+    env_paths = payload.get("envs", []) if isinstance(payload, dict) else []
+    env_names = {Path(path).name for path in env_paths if isinstance(path, str) and path.strip()}
+    if env_name not in env_names:
+        raise PyMolLaunchError(
+            f"Configured PyMOL conda env '{env_name}' was not found. Check Bulk settings."
+        )
+
+
 def _launch_pymol(script_path: Path) -> None:
     cfg = load_config()
-    script_arg = str(script_path)
+    script_cwd = script_path.parent
+    script_arg = script_path.name
+    pymol_conda_env = (cfg.cluster.pymol_conda_env or "").strip()
+
+    if pymol_conda_env:
+        conda_exe = shutil.which("conda")
+        if not conda_exe:
+            raise PyMolLaunchError(
+                "Conda executable not found in PATH; cannot launch PyMOL with configured conda env."
+            )
+        _ensure_conda_env_available(conda_exe, pymol_conda_env)
+        pymol_cmd = _resolve_pymol_command_for_conda((cfg.cluster.pymol_path or "").strip())
+        try:
+            subprocess.Popen(
+                [conda_exe, "run", "-n", pymol_conda_env, pymol_cmd, script_arg],
+                cwd=script_cwd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        except FileNotFoundError as exc:
+            raise PyMolLaunchError(
+                f"PyMOL command '{pymol_cmd}' not found when launching in conda env '{pymol_conda_env}'."
+            ) from exc
+        except Exception as exc:  # pragma: no cover - best effort
+            raise PyMolLaunchError(
+                f"Failed to launch PyMOL in conda env '{pymol_conda_env}': {exc}"
+            ) from exc
 
     candidates: list[str] = []
     configured_path = (cfg.cluster.pymol_path or "").strip()
@@ -262,6 +336,7 @@ def _launch_pymol(script_path: Path) -> None:
         try:
             subprocess.Popen(
                 [cmd, script_arg],
+                cwd=script_cwd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -278,6 +353,7 @@ def _launch_pymol(script_path: Path) -> None:
         try:
             subprocess.Popen(
                 ["open", "-n", "-a", "/Applications/PyMOL.app", script_arg],
+                cwd=script_cwd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
