@@ -77,6 +77,30 @@ class GalleryMovieResult:
     log_path: Path
 
 
+_PDB_SUFFIX_RE = re.compile(r"(?i)\.(?:mmcif|cif|pdb)$")
+
+
+def _canonicalize_pdb_id(pdb_id: str) -> str:
+    raw = str(pdb_id or "").strip()
+    if not raw:
+        raise PyMolLaunchError("Could not parse PDB ID from empty input.")
+
+    token = raw.replace("\\", "/").split("/")[-1].strip()
+    while token:
+        stripped = _PDB_SUFFIX_RE.sub("", token)
+        if stripped == token:
+            break
+        token = stripped
+
+    cleaned = "".join(ch for ch in token.upper() if ch.isalnum())
+    if len(cleaned) < 4:
+        raise PyMolLaunchError(f"Could not parse PDB ID from '{raw}'.")
+    canonical = cleaned[:4]
+    if canonical != raw.upper():
+        print(f"[pymol] canonicalized pdb id '{raw}' -> '{canonical}'")
+    return canonical
+
+
 def _swap_selection_object(selection: str, obj_name: str) -> str:
     """Replace the leading object name in a PyMOL selection with obj_name."""
     if not selection:
@@ -325,25 +349,32 @@ def _cache_dir(subfolder: str) -> Path:
     return target
 
 
-def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | None = None) -> tuple[Optional[Path], bool]:
-    _require_pymol_utils()
-    _ensure_env()
-    cfg = load_config()
-    workspace = cfg.paths.workspace_root or cfg.paths.project_root
-    target_dir = workspace / "targets" / pdb_id.upper()
+def _target_structure_candidates(workspace: Path, pdb_id: str) -> list[Path]:
+    target_dir = workspace / "targets" / pdb_id
     prep_dir = target_dir / "prep"
-
-    # Choose structure with preference for raw mmCIF, then prepared.* as fallback.
     raw_dir = target_dir / "raw"
-    structure_candidates = [
-        raw_dir / f"{pdb_id.upper()}.cif",
-        raw_dir / f"{pdb_id.upper()}.mmcif",
+    return [
+        raw_dir / f"{pdb_id}.cif",
+        raw_dir / f"{pdb_id}.mmcif",
+        raw_dir / f"{pdb_id}.pdb",
         raw_dir / "raw.cif",
         raw_dir / "raw.mmcif",
+        raw_dir / "raw.pdb",
         prep_dir / "prepared.cif",
         prep_dir / "prepared.mmcif",
         prep_dir / "prepared.pdb",
     ]
+
+
+def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | None = None) -> tuple[Optional[Path], bool]:
+    pdb_id = _canonicalize_pdb_id(pdb_id)
+    _require_pymol_utils()
+    _ensure_env()
+    cfg = load_config()
+    workspace = cfg.paths.workspace_root or cfg.paths.project_root
+
+    # Choose structure with preference for raw mmCIF, then prepared.* as fallback.
+    structure_candidates = _target_structure_candidates(workspace, pdb_id)
     structure_path = next((p for p in structure_candidates if p.exists()), None)
     if structure_path is None:
         raise PyMolLaunchError("Structure file not found; run prep-target to create a raw/prepared structure")
@@ -353,7 +384,7 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | Non
     if bundle is None:
         raise PyMolLaunchError("Unable to generate hotspot bundle; ensure prep-target has been run")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    dest = _cache_dir("pymol_hotspots") / f"{pdb_id.upper()}_{timestamp}"
+    dest = _cache_dir("pymol_hotspots") / f"{pdb_id}_{timestamp}"
     _copy_bundle(Path(bundle), dest)
     pml = dest / "hotspot_visualization.pml"
     launched = False
@@ -365,23 +396,12 @@ def launch_hotspots(pdb_id: str, *, launch: bool = True, epitope_name: str | Non
 
 def render_hotspot_snapshot(pdb_id: str) -> Path:
     """Generate a headless PyMOL PNG for hotspot visualization."""
+    pdb_id = _canonicalize_pdb_id(pdb_id)
     _require_pymol_utils()
     _ensure_env()
     cfg = load_config()
     workspace = cfg.paths.workspace_root or cfg.paths.project_root
-    target_dir = workspace / "targets" / pdb_id.upper()
-    prep_dir = target_dir / "prep"
-
-    raw_dir = target_dir / "raw"
-    structure_candidates = [
-        raw_dir / f"{pdb_id.upper()}.cif",
-        raw_dir / f"{pdb_id.upper()}.mmcif",
-        raw_dir / "raw.cif",
-        raw_dir / "raw.mmcif",
-        prep_dir / "prepared.cif",
-        prep_dir / "prepared.mmcif",
-        prep_dir / "prepared.pdb",
-    ]
+    structure_candidates = _target_structure_candidates(workspace, pdb_id)
     structure_path = next((p for p in structure_candidates if p.exists()), None)
     if structure_path is None:
         raise PyMolLaunchError("Structure file not found; run prep-target to create a raw/prepared structure")
@@ -390,7 +410,7 @@ def render_hotspot_snapshot(pdb_id: str) -> Path:
     if bundle is None:
         raise PyMolLaunchError("Unable to generate hotspot bundle; ensure prep-target has been run")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    dest = _cache_dir("pymol_hotspots") / f"{pdb_id.upper()}_{timestamp}"
+    dest = _cache_dir("pymol_hotspots") / f"{pdb_id}_{timestamp}"
     _copy_bundle(Path(bundle), dest)
 
     base_pml = dest / "hotspot_visualization.pml"
@@ -564,6 +584,7 @@ def resolve_boltz_design_path(spec_dir: Path, metadata: Dict[str, object]) -> Op
 
 def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str] = None,
                        launch: bool = True) -> tuple[Optional[Path], bool]:
+    pdb_id = _canonicalize_pdb_id(pdb_id)
     _require_pymol_utils()
     _ensure_env()
     try:
@@ -574,7 +595,7 @@ def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str]
     if payload.gallery_path and payload.gallery_path.exists():
         dest_root = _cache_dir("pymol_gallery")
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        session_dir = dest_root / f"{pdb_id.upper()}_{payload.run_label}_{timestamp}"
+        session_dir = dest_root / f"{pdb_id}_{payload.run_label}_{timestamp}"
         _copy_bundle(payload.gallery_path.parent, session_dir)
         gallery_script = session_dir / payload.gallery_path.name
         launched = False
@@ -586,7 +607,7 @@ def launch_top_binders(pdb_id: str, *, top_n: int = 96, run_label: Optional[str]
     rows = _collect_top_rows(payload, top_n)
     dest_root = _cache_dir("pymol_top_binders")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    session_dir = dest_root / f"{pdb_id.upper()}_{payload.run_label}_{timestamp}"
+    session_dir = dest_root / f"{pdb_id}_{payload.run_label}_{timestamp}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     bundles: List[Path] = []
@@ -620,6 +641,7 @@ def launch_boltzgen_top_binders(
     spec_name: Optional[str] = None,
     launch: bool = True,
 ) -> tuple[Optional[Path], bool]:
+    pdb_id = _canonicalize_pdb_id(pdb_id)
     _ensure_env()
     try:
         payload = load_boltzgen_metrics(
@@ -642,7 +664,7 @@ def launch_boltzgen_top_binders(
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     run_token = (payload.run_label or "latest").replace(" ", "_")
     spec_token = spec_dir.name.replace(" ", "_")
-    session_dir = dest_root / f"{pdb_id.upper()}_{run_token}_{spec_token}_{timestamp}"
+    session_dir = dest_root / f"{pdb_id}_{run_token}_{spec_token}_{timestamp}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     script_lines = [
@@ -777,6 +799,7 @@ def launch_boltzgen_binder(
     config_path: Optional[str] = None,
     launch: bool = True,
 ) -> tuple[Path, Path, bool]:
+    pdb_id = _canonicalize_pdb_id(pdb_id)
     _ensure_env()
     design_src = Path(design_path).expanduser()
     if not design_src.exists():
@@ -785,7 +808,7 @@ def launch_boltzgen_binder(
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     label = _sanitize_design_token(epitope_label or design_src.stem)
     dest_root = _cache_dir("pymol_boltzgen_binder")
-    session_dir = dest_root / f"{pdb_id.upper()}_{label}_{timestamp}"
+    session_dir = dest_root / f"{pdb_id}_{label}_{timestamp}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     hotspot_pml: Optional[Path] = None
@@ -817,7 +840,7 @@ def launch_boltzgen_binder(
             target_dest = session_dir / candidate.name
             shutil.copy2(candidate, target_dest)
 
-    pdb_fetch_name = (pdb_id or "").strip().upper()
+    pdb_fetch_name = pdb_id
     _, _, target_chain_ids = _gather_expression_regions(pdb_id)
 
     script_lines: list[str] = []
@@ -843,10 +866,27 @@ def launch_boltzgen_binder(
         )
         target_loaded = True
 
+    if not target_dest and not hotspot_pml:
+        cfg = load_config()
+        workspace = cfg.paths.workspace_root or cfg.paths.project_root
+        local_target = next((p for p in _target_structure_candidates(workspace, pdb_id) if p.exists()), None)
+        if local_target is not None:
+            target_dest = session_dir / local_target.name
+            shutil.copy2(local_target, target_dest)
+            script_lines.extend(
+                [
+                    f"load {target_dest.name}, target",
+                    "hide everything, target",
+                    "show cartoon, target",
+                    "color gray80, target",
+                ]
+            )
+            target_loaded = True
+
     if pdb_fetch_name and not hotspot_pml and not target_loaded:
         script_lines.extend(
             [
-                f"fetch {pdb_fetch_name}, target",
+                f"fetch {pdb_fetch_name}, target, type=mmcif, async=0",
                 "hide everything, target",
                 "show cartoon, target",
                 "color gray80, target",
@@ -863,7 +903,6 @@ def launch_boltzgen_binder(
             if len(target_chain_ids) == 1
             else f"{base_name}_chains_{chain_label}"
         )
-        chain_obj_name = obj_name
         script_lines.extend(
             [
                 f"create {obj_name}, target and ({chain_expr})",
@@ -915,6 +954,7 @@ def render_gallery_movie(
     rotation_axis: str = "y",
     desired_states: int = 48,
 ) -> GalleryMovieResult:
+    pdb_id = _canonicalize_pdb_id(pdb_id)
     _ensure_env()
 
     if fps < 1:
@@ -942,7 +982,7 @@ def render_gallery_movie(
     dest_root = _cache_dir("pymol_gallery_movies")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     run_token = (payload.run_label or "latest").replace(" ", "_")
-    session_dir = dest_root / f"{pdb_id.upper()}_{run_token}_{timestamp}"
+    session_dir = dest_root / f"{pdb_id}_{run_token}_{timestamp}"
     _copy_bundle(gallery_path.parent, session_dir)
 
     gallery_script = session_dir / gallery_path.name

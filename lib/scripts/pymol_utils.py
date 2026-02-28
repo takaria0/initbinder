@@ -46,6 +46,26 @@ except Exception:
     ROOT = None  # type: ignore
     parse_key = None  # type: ignore
 
+
+_PDB_SUFFIX_RE = re.compile(r"(?i)\.(?:mmcif|cif|pdb)$")
+
+
+def _canonicalize_pdb_id(pdb_id: str) -> str:
+    raw = str(pdb_id or "").strip()
+    if not raw:
+        raise ValueError("Could not parse PDB ID from empty input.")
+    token = raw.replace("\\", "/").split("/")[-1].strip()
+    while token:
+        stripped = _PDB_SUFFIX_RE.sub("", token)
+        if stripped == token:
+            break
+        token = stripped
+    cleaned = "".join(ch for ch in token.upper() if ch.isalnum())
+    if len(cleaned) < 4:
+        raise ValueError(f"Could not parse PDB ID from '{raw}'.")
+    return cleaned[:4]
+
+
 def _keys_to_expr(prefix: str, keys: List[str]) -> str:
     """
     Convert a list of residue keys (``A23`` or ``A:23``) into a PyMOL selection
@@ -947,21 +967,30 @@ def _write_hotspot_pml(
     pml.append("set cartoon_oval_width, 0.2\n")
     pml.append("set auto_zoom, off\n\n")
 
+    canonical_fetch_id: Optional[str] = None
+    if fetch_pdb_id:
+        try:
+            canonical_fetch_id = _canonicalize_pdb_id(fetch_pdb_id)
+        except ValueError:
+            canonical_fetch_id = None
+
     full_obj = (
-        _sanitize(full_object_name)
-        or _sanitize(fetch_pdb_id)
-        or full_object_name
-        or fetch_pdb_id
+        (_sanitize(full_object_name) if full_object_name else "")
+        or (_sanitize(canonical_fetch_id) if canonical_fetch_id else "")
+        or (str(full_object_name) if full_object_name else "")
+        or canonical_fetch_id
     )
-    if full_obj or full_struct_name or fetch_pdb_id:
+    if full_obj or full_struct_name or canonical_fetch_id:
         pml.append("# Load full raw PDB for context\n")
-        if fetch_pdb_id:
-            pml.append(f"fetch {fetch_pdb_id}, {full_obj}\n")
-        elif full_struct_name and full_obj:
+        if full_struct_name and full_obj:
             pml.append(f"load {full_struct_name}, {full_obj}\n")
         elif full_struct_name:
             pml.append(f"load {full_struct_name}, assembly_full\n")
             full_obj = "assembly_full"
+        elif canonical_fetch_id:
+            fetch_obj = full_obj or canonical_fetch_id
+            pml.append(f"fetch {canonical_fetch_id}, {fetch_obj}, type=mmcif, async=0\n")
+            full_obj = fetch_obj
         if full_obj:
             pml.append(f"hide everything, {full_obj}\n")
             pml.append(f"show cartoon, {full_obj}\n")
@@ -1274,7 +1303,7 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     """
     if ROOT is None:
         raise RuntimeError("pymol_utils.export_hotspot_bundle() requires utils.ROOT; did you run this inside the correct environment?")
-    pdb_id_u = pdb_id.upper()
+    pdb_id_u = _canonicalize_pdb_id(pdb_id)
     target_dir = ROOT / "targets" / pdb_id_u
     prep_dir = target_dir / "prep"
     if not prep_dir.exists():
@@ -1406,22 +1435,26 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
         )
         print(f"[pymol_utils] Allowed epitope ranges: {desc}")
 
-    raw_pdb_path: Optional[Path] = None
+    raw_context_path: Optional[Path] = None
     if raw_dir.exists():
-        candidates = [pdb_id, pdb_id_u, pdb_id.lower()]
-        for candidate in candidates:
-            path = raw_dir / f"{candidate}.pdb"
-            if path.exists():
-                raw_pdb_path = path
-                break
-        if raw_pdb_path is None:
-            first_raw = next((p for p in sorted(raw_dir.glob("*.pdb"))), None)
+        raw_context_candidates = [
+            raw_dir / f"{pdb_id_u}.cif",
+            raw_dir / f"{pdb_id_u}.mmcif",
+            raw_dir / f"{pdb_id_u}.pdb",
+            raw_dir / "raw.cif",
+            raw_dir / "raw.mmcif",
+            raw_dir / "raw.pdb",
+        ]
+        raw_context_path = next((p for p in raw_context_candidates if p.exists()), None)
+        if raw_context_path is None:
+            first_raw = next((p for p in sorted(raw_dir.glob("*")) if p.suffix.lower() in {".cif", ".mmcif", ".pdb"}), None)
             if first_raw:
-                raw_pdb_path = first_raw
+                raw_context_path = first_raw
 
     raw_bundle_name: Optional[str] = None
-    if raw_pdb_path is not None:
-        raw_bundle_name = "raw_full.pdb"
+    if raw_context_path is not None:
+        suffix = raw_context_path.suffix.lower() or ".cif"
+        raw_bundle_name = f"raw_full{suffix}"
 
     label_auth_map = _label_to_auth_map(structure_path)
     selection_mode = "auth" if label_auth_map else "label"
@@ -1533,8 +1566,8 @@ def export_hotspot_bundle(pdb_id: str, epitope_names: Optional[Sequence[str]] = 
     # Copy chosen structure with just its basename
     dest_pdb_name = structure_path.name
     shutil.copy(str(structure_path), str(bundle_dir / dest_pdb_name))
-    if raw_pdb_path is not None and raw_bundle_name:
-        shutil.copy(str(raw_pdb_path), str(bundle_dir / raw_bundle_name))
+    if raw_context_path is not None and raw_bundle_name:
+        shutil.copy(str(raw_context_path), str(bundle_dir / raw_bundle_name))
     # Write PML script
     pml_path = bundle_dir / "hotspot_visualization.pml"
     _write_hotspot_pml(

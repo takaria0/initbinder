@@ -310,6 +310,16 @@ function normalizePdbId(value) {
   return text || '';
 }
 
+function normalizePdbIdForPymol(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const base = text.split(/[\\/]/).pop() || text;
+  const stripped = base.replace(/\.(mmcif|cif|pdb)$/i, '');
+  const cleaned = stripped.toUpperCase().replace(/[^0-9A-Z]/g, '');
+  if (cleaned.length < 4) return '';
+  return cleaned.slice(0, 4);
+}
+
 function catalogNameFromPath(value) {
   const text = String(value || '').trim();
   if (!text) return null;
@@ -2152,10 +2162,15 @@ async function launchBinderPymol(index) {
     showAlert('Design path unavailable for this binder.');
     return;
   }
+  const normalizedPdbId = normalizePdbIdForPymol(row.pdb_id);
+  if (!normalizedPdbId) {
+    showAlert(`Invalid PDB ID for PyMOL: ${row.pdb_id || 'missing value'}.`);
+    return;
+  }
   try {
     const epLabel = row.epitope_id || row.epitope || null;
     const payload = {
-      pdb_id: row.pdb_id,
+      pdb_id: normalizedPdbId,
       design_path: row.design_path,
       epitope_label: epLabel,
       binding_label: row.binding_label || null,
@@ -2179,7 +2194,8 @@ async function launchBinderPymol(index) {
 }
 
 async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
-  if (!pdbId) {
+  const normalizedPdbId = normalizePdbIdForPymol(pdbId);
+  if (!normalizedPdbId) {
     showAlert('Missing PDB ID for PyMOL.');
     return;
   }
@@ -2190,7 +2206,7 @@ async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
       bundle_only: false,
       epitope_name: epitopeName || null,
     };
-    const res = await fetch(`/api/targets/${encodeURIComponent(pdbId)}/pymol/hotspots`, {
+    const res = await fetch(`/api/targets/${encodeURIComponent(normalizedPdbId)}/pymol/hotspots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -2201,8 +2217,8 @@ async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
     }
     const body = await res.json();
     const scopeText = epitopeName ? `epitope ${epitopeName}` : 'all epitopes';
-    showAlert(`PyMOL hotspot bundle ready (${pdbId} · ${scopeText})`, false);
-    appendLog(body.message || `PyMOL bundle ready for ${pdbId}`);
+    showAlert(`PyMOL hotspot bundle ready (${normalizedPdbId} · ${scopeText})`, false);
+    appendLog(body.message || `PyMOL bundle ready for ${normalizedPdbId}`);
   } catch (err) {
     showAlert(err.message || 'Failed to launch PyMOL.');
   } finally {
