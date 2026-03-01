@@ -10,6 +10,7 @@ import re
 import time
 import shutil
 import base64
+import hashlib
 import traceback
 import statistics
 import math
@@ -79,6 +80,7 @@ from .models import (
 from .pipeline import get_target_status, init_decide_prep
 from .preferences import list_presets
 from .result_collectors import load_boltzgen_metrics
+from .golden_gate_seq_builder import GoldenGateSeqBuilder
 from .pymol import PyMolLaunchError, launch_hotspots, render_hotspot_snapshot, resolve_boltz_design_path
 from .hotspot_distance import (
     _load_cif_coords as _hs_load_cif_coords,
@@ -7334,11 +7336,11 @@ def _load_binder_rows_from_csv(
     return all_rows
 
 
-_DNA_FLANK_RE = re.compile(r"^[ACGTN]+$", flags=re.IGNORECASE)
 _BINDER_EXPORT_MAP_COLUMNS = [
     "engine",
     "pdb_id",
     "epitope",
+    "adapter_seed",
     "rank_within_epitope",
     "iptm",
     "rmsd",
@@ -7347,6 +7349,8 @@ _BINDER_EXPORT_MAP_COLUMNS = [
     "design_path",
     "metrics_path",
 ]
+_BSAI_MOTIFS = ("GGTCTC", "GAGACC")
+_BSAI_RETRY_MAX_ATTEMPTS = 5
 _YEAST_STATIC_CODON_TABLE = {
     "A": "GCT",
     "C": "TGT",
@@ -7370,6 +7374,29 @@ _YEAST_STATIC_CODON_TABLE = {
     "Y": "TAT",
     "X": "NNK",
 }
+_YEAST_SYNONYMOUS_CODON_CHOICES: Dict[str, Tuple[str, ...]] = {
+    "A": ("GCT", "GCC", "GCA", "GCG"),
+    "C": ("TGT", "TGC"),
+    "D": ("GAT", "GAC"),
+    "E": ("GAA", "GAG"),
+    "F": ("TTT", "TTC"),
+    "G": ("GGT", "GGC", "GGA", "GGG"),
+    "H": ("CAT", "CAC"),
+    "I": ("ATT", "ATC", "ATA"),
+    "K": ("AAA", "AAG"),
+    "L": ("TTG", "TTA", "CTT", "CTC", "CTA", "CTG"),
+    "M": ("ATG",),
+    "N": ("AAT", "AAC"),
+    "P": ("CCT", "CCC", "CCA", "CCG"),
+    "Q": ("CAA", "CAG"),
+    "R": ("AGA", "AGG", "CGT", "CGC", "CGA", "CGG"),
+    "S": ("TCT", "TCC", "TCA", "TCG", "AGT", "AGC"),
+    "T": ("ACT", "ACC", "ACA", "ACG"),
+    "V": ("GTG", "GTT", "GTC", "GTA"),
+    "W": ("TGG",),
+    "Y": ("TAT", "TAC"),
+    "X": ("NNK",),
+}
 
 
 def _normalize_export_engine(value: object) -> str:
@@ -7383,13 +7410,30 @@ def _normalize_export_engine(value: object) -> str:
     return text
 
 
-def _normalize_dna_flank(value: object, *, default: str) -> Optional[str]:
-    text = str(value or "").strip().upper()
+def _sanitize_hotspot_token(value: object) -> str:
+    text = str(value or "").strip()
     if not text:
-        text = default.upper()
-    if not text:
-        return None
-    return text if _DNA_FLANK_RE.fullmatch(text) else None
+        return "hotspot"
+    token = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+    if not token:
+        return "hotspot"
+    if len(token) > 72:
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+        token = f"{token[:48]}_{digest}"
+    return token
+
+
+def _adapter_seed_for_row(row: BoltzgenBinderRow, fallback_epitope_key: str) -> Tuple[str, str]:
+    hotspot_raw = (
+        row.binding_label
+        or row.include_label
+        or row.epitope_id
+        or row.epitope
+        or fallback_epitope_key
+    )
+    hotspot_token = _sanitize_hotspot_token(hotspot_raw)
+    pdb_id = str(row.pdb_id or "").strip().upper() or "UNKNOWN"
+    return f"{pdb_id}_{hotspot_token}", hotspot_token
 
 
 def _aa_to_static_yeast_dna(seq: object) -> Optional[str]:
@@ -7405,7 +7449,11 @@ def _aa_to_static_yeast_dna(seq: object) -> Optional[str]:
     return "".join(dna_parts)
 
 
-def _optimize_yeast_dna_with_dnachisel(aa_seq: str, seed_dna: str) -> Optional[str]:
+def _optimize_yeast_dna_with_dnachisel(
+    aa_seq: str,
+    seed_dna: str,
+    avoid_motifs: Optional[Sequence[str]] = None,
+) -> Optional[str]:
     try:
         import dnachisel as dc  # type: ignore
     except Exception:
@@ -7421,11 +7469,15 @@ def _optimize_yeast_dna_with_dnachisel(aa_seq: str, seed_dna: str) -> Optional[s
         "s_cerevisiae",
         "yeast",
     )
+    motifs = [str(m or "").strip().upper() for m in (avoid_motifs or []) if str(m or "").strip()]
     for species in species_candidates:
         try:
+            constraints = [dc.EnforceTranslation()]
+            for motif in motifs:
+                constraints.append(dc.AvoidPattern(motif))
             problem = dc.DnaOptimizationProblem(
                 sequence=dna,
-                constraints=[dc.EnforceTranslation()],
+                constraints=constraints,
                 objectives=[dc.CodonOptimize(species=species)],
             )
             problem.resolve_constraints()
@@ -7438,15 +7490,107 @@ def _optimize_yeast_dna_with_dnachisel(aa_seq: str, seed_dna: str) -> Optional[s
     return None
 
 
-def _codon_optimize_yeast_dna(seq: object) -> Tuple[Optional[str], Optional[str]]:
+def _aa_to_yeast_dna_variant(seq: object, variant_index: int) -> Optional[str]:
+    aa_seq = "".join(ch for ch in str(seq or "").strip().upper() if ch.isalpha())
+    if not aa_seq:
+        return None
+    parts: List[str] = []
+    step = max(0, int(variant_index or 0))
+    for idx, aa in enumerate(aa_seq):
+        choices = _YEAST_SYNONYMOUS_CODON_CHOICES.get(aa)
+        if not choices:
+            return None
+        choice_idx = (step + idx) % len(choices)
+        parts.append(choices[choice_idx])
+    return "".join(parts)
+
+
+def _codon_optimize_yeast_dna(
+    seq: object,
+    *,
+    avoid_motifs: Optional[Sequence[str]] = None,
+    variant_index: int = 0,
+) -> Tuple[Optional[str], Optional[str]]:
     static_dna = _aa_to_static_yeast_dna(seq)
     if not static_dna:
         return None, None
     aa_seq = "".join(ch for ch in str(seq or "").strip().upper() if ch.isalpha())
-    optimized = _optimize_yeast_dna_with_dnachisel(aa_seq, static_dna)
+    seed_dna = _aa_to_yeast_dna_variant(seq, variant_index) or static_dna
+    optimized = _optimize_yeast_dna_with_dnachisel(aa_seq, seed_dna, avoid_motifs=avoid_motifs)
     if optimized:
         return optimized, "dnachisel"
-    return static_dna, "static_fallback"
+    return seed_dna, "static_fallback"
+
+
+def _count_motif_occurrences(seq: str, motif: str) -> int:
+    source = str(seq or "").upper()
+    target = str(motif or "").upper()
+    if not source or not target:
+        return 0
+    count = 0
+    start = 0
+    while True:
+        idx = source.find(target, start)
+        if idx < 0:
+            return count
+        count += 1
+        start = idx + 1
+
+
+def _bsai_site_check_ok(full_seq: object, left_adapter: object, right_adapter: object) -> Optional[bool]:
+    full = str(full_seq or "").strip().upper()
+    left = str(left_adapter or "").strip().upper()
+    right = str(right_adapter or "").strip().upper()
+    if not full or not left or not right:
+        return None
+    for motif in _BSAI_MOTIFS:
+        expected = _count_motif_occurrences(left, motif) + _count_motif_occurrences(right, motif)
+        observed = _count_motif_occurrences(full, motif)
+        if observed != expected:
+            return False
+    return True
+
+
+def _rescue_bsai_free_construct(
+    binder_seq: object,
+    *,
+    adapter_builder: GoldenGateSeqBuilder,
+    adapter_seed: str,
+    retry_budget: int = _BSAI_RETRY_MAX_ATTEMPTS,
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, object]], Optional[bool], int]:
+    retries = max(0, int(retry_budget or 0))
+    attempts_used = 0
+    last_dna: Optional[str] = None
+    last_method: Optional[str] = None
+    last_payload: Optional[Dict[str, object]] = None
+    last_ok: Optional[bool] = None
+    for retry_idx in range(1, retries + 1):
+        attempts_used += 1
+        dna_yeast_codon, dna_method = _codon_optimize_yeast_dna(
+            binder_seq,
+            avoid_motifs=_BSAI_MOTIFS,
+            variant_index=retry_idx,
+        )
+        if not dna_yeast_codon:
+            continue
+        adapter_payload = adapter_builder.build(insert_seq=dna_yeast_codon, seed=adapter_seed)
+        bsai_ok = _bsai_site_check_ok(
+            adapter_payload.get("full_seq"),
+            adapter_payload.get("left"),
+            adapter_payload.get("right"),
+        )
+        last_dna = dna_yeast_codon
+        last_method = dna_method
+        last_payload = adapter_payload
+        last_ok = bsai_ok
+        if bsai_ok is True:
+            method_tag = f"{dna_method}_bsai_retry" if dna_method else "bsai_retry"
+            return dna_yeast_codon, method_tag, adapter_payload, True, attempts_used
+    if last_method:
+        method_tag = f"{last_method}_bsai_retry_failed"
+    else:
+        method_tag = "bsai_retry_failed"
+    return last_dna, method_tag, last_payload, last_ok, attempts_used
 
 
 def _build_binder_export_scatter_artifacts(
@@ -7555,6 +7699,7 @@ def _build_binder_export_scatter_artifacts(
                     "engine": engine,
                     "pdb_id": row.get("pdb_id"),
                     "epitope": row.get("epitope"),
+                    "adapter_seed": row.get("adapter_seed"),
                     "rank_within_epitope": row.get("rank_within_epitope"),
                     "iptm": _format_float(row.get("iptm"), 6),
                     "rmsd": _format_float(row.get("rmsd"), 6),
@@ -7595,10 +7740,14 @@ _BINDER_EXPORT_COLUMNS = [
     "ipsae_min",
     "binder_seq",
     "binder_length",
-    "upstream_flank",
+    "adapter_seed",
+    "adapter_barcode",
+    "adapter_left",
+    "adapter_right",
+    "adapter_seqs",
     "dna_yeast_codon",
-    "downstream_flank",
-    "dna_with_flanks",
+    "dna_with_adapters",
+    "bsai_site_check_ok",
     "dna_method",
     "design_path",
     "metrics_path",
@@ -7692,8 +7841,6 @@ def export_selected_binders(
     selections = request.selections or []
     per_group = max(1, int(request.per_group or 1))
     include_summary = bool(request.include_summary)
-    upstream_flank = _normalize_dna_flank(request.upstream_flank, default="GGAG")
-    downstream_flank = _normalize_dna_flank(request.downstream_flank, default="CGCT")
     entries, invalid = _parse_binder_export_selections(selections)
     if not entries:
         message = "No valid PDB:epitope selections provided."
@@ -7704,12 +7851,8 @@ def export_selected_binders(
             invalid=invalid,
             message=message,
         )
-    if not upstream_flank or not downstream_flank:
-        return BoltzgenBinderExportResponse(
-            selection_count=len(entries),
-            invalid=invalid,
-            message="No binder export produced. Invalid DNA flank(s); use A/C/G/T/N only.",
-        )
+    # Flank request fields are accepted for backward compatibility, but ignored.
+    _ = request.upstream_flank, request.downstream_flank
 
     report = build_boltzgen_diversity_report()
     csv_name = report.csv_name
@@ -7747,6 +7890,11 @@ def export_selected_binders(
     export_rows: List[Dict[str, object]] = []
     summary_rows: List[Dict[str, object]] = []
     scatter_points: List[Dict[str, object]] = []
+    adapter_builder = GoldenGateSeqBuilder(enforce_constraints=True)
+    bsai_retry_attempted_rows = 0
+    bsai_retry_rescued_rows = 0
+    bsai_retry_flagged_rows = 0
+    bsai_retry_attempt_count = 0
     total_selected = 0
 
     for pdb_id, ep_key in entries:
@@ -7828,14 +7976,79 @@ def export_selected_binders(
             record["selected_percentile"] = _format_float(selected_percentile, 2)
             record["binder_length"] = len(row.binder_seq) if row.binder_seq else None
             dna_yeast_codon, dna_method = _codon_optimize_yeast_dna(row.binder_seq)
-            record["upstream_flank"] = upstream_flank
+            adapter_seed, hotspot_token = _adapter_seed_for_row(row, ep_key)
+            if not dna_yeast_codon:
+                return BoltzgenBinderExportResponse(
+                    selection_count=len(entries),
+                    invalid=invalid,
+                    message=(
+                        "No binder export produced. Missing/invalid DNA insert for adapter assembly "
+                        f"at {row.pdb_id}:{hotspot_token} (seed={adapter_seed})."
+                    ),
+                )
+            try:
+                adapter_payload = adapter_builder.build(insert_seq=dna_yeast_codon, seed=adapter_seed)
+            except Exception as exc:
+                return BoltzgenBinderExportResponse(
+                    selection_count=len(entries),
+                    invalid=invalid,
+                    message=(
+                        "No binder export produced. Adapter generation failed "
+                        f"at {row.pdb_id}:{hotspot_token} (seed={adapter_seed}): {exc}"
+                    ),
+                )
+            record["adapter_seed"] = str(adapter_payload.get("seed") or adapter_seed)
+            record["adapter_barcode"] = adapter_payload.get("barcode")
+            record["adapter_left"] = adapter_payload.get("left")
+            record["adapter_right"] = adapter_payload.get("right")
+            record["adapter_seqs"] = adapter_payload.get("adapter_seqs")
             record["dna_yeast_codon"] = dna_yeast_codon
-            record["downstream_flank"] = downstream_flank
-            record["dna_with_flanks"] = (
-                f"{upstream_flank}{dna_yeast_codon}{downstream_flank}"
-                if dna_yeast_codon
-                else None
+            record["dna_with_adapters"] = adapter_payload.get("full_seq")
+            bsai_ok = _bsai_site_check_ok(
+                record["dna_with_adapters"],
+                record["adapter_left"],
+                record["adapter_right"],
             )
+            if bsai_ok is False:
+                bsai_retry_attempted_rows += 1
+                try:
+                    rescue_dna, rescue_method, rescue_payload, rescue_ok, used = _rescue_bsai_free_construct(
+                        row.binder_seq,
+                        adapter_builder=adapter_builder,
+                        adapter_seed=adapter_seed,
+                        retry_budget=_BSAI_RETRY_MAX_ATTEMPTS,
+                    )
+                except Exception as exc:
+                    return BoltzgenBinderExportResponse(
+                        selection_count=len(entries),
+                        invalid=invalid,
+                        message=(
+                            "No binder export produced. Adapter generation failed during BsaI rescue "
+                            f"at {row.pdb_id}:{hotspot_token} (seed={adapter_seed}): {exc}"
+                        ),
+                    )
+                bsai_retry_attempt_count += used
+                if rescue_payload and rescue_dna:
+                    adapter_payload = rescue_payload
+                    dna_yeast_codon = rescue_dna
+                    if rescue_method:
+                        dna_method = rescue_method
+                    record["adapter_seed"] = str(adapter_payload.get("seed") or adapter_seed)
+                    record["adapter_barcode"] = adapter_payload.get("barcode")
+                    record["adapter_left"] = adapter_payload.get("left")
+                    record["adapter_right"] = adapter_payload.get("right")
+                    record["adapter_seqs"] = adapter_payload.get("adapter_seqs")
+                    record["dna_yeast_codon"] = dna_yeast_codon
+                    record["dna_with_adapters"] = adapter_payload.get("full_seq")
+                    bsai_ok = rescue_ok
+                if bsai_ok is True:
+                    bsai_retry_rescued_rows += 1
+                else:
+                    bsai_ok = False
+                    if dna_method and not dna_method.endswith("_bsai_retry_failed"):
+                        dna_method = f"{dna_method}_bsai_retry_failed"
+                    bsai_retry_flagged_rows += 1
+            record["bsai_site_check_ok"] = bsai_ok
             record["dna_method"] = dna_method
             export_rows.append(record)
 
@@ -7845,6 +8058,7 @@ def export_selected_binders(
                     "engine": row.engine,
                     "pdb_id": pdb_id,
                     "epitope": row.epitope or row.epitope_id or ep_key,
+                    "adapter_seed": record["adapter_seed"],
                     "rank_within_epitope": idx,
                     "iptm": iptm_val,
                     "rmsd": rmsd_val,
@@ -7910,6 +8124,11 @@ def export_selected_binders(
     message = f"Exported {total_selected} binders across {len(entries)} selections."
     if invalid:
         message = f"{message} Invalid entries: {', '.join(invalid)}"
+    if bsai_retry_attempted_rows:
+        message = (
+            f"{message} BsaI rescue: {bsai_retry_rescued_rows} rescued,"
+            f" {bsai_retry_flagged_rows} flagged after {bsai_retry_attempt_count} retry attempt(s)."
+        )
     if plot_notes:
         message = f"{message} Scatter exports -> {'; '.join(plot_notes)}"
     return BoltzgenBinderExportResponse(

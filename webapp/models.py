@@ -446,8 +446,16 @@ class BoltzgenBinderExportRequest(BaseModel):
     )
     per_group: int = Field(48, ge=1, description="Binders to export per antigen:epitope group.")
     include_summary: bool = Field(True, description="Whether to emit a summary CSV.")
-    upstream_flank: str = Field("GGAG", min_length=1, description="5' DNA flank for exported binder constructs.")
-    downstream_flank: str = Field("CGCT", min_length=1, description="3' DNA flank for exported binder constructs.")
+    upstream_flank: str = Field(
+        "GGAG",
+        min_length=1,
+        description="Deprecated compatibility field; ignored by binder export adapter generation.",
+    )
+    downstream_flank: str = Field(
+        "CGCT",
+        min_length=1,
+        description="Deprecated compatibility field; ignored by binder export adapter generation.",
+    )
 
 
 class BoltzgenBinderExportPlot(BaseModel):

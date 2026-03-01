@@ -519,8 +519,10 @@
         <div class="bulk-modal-body">
           <p class="help-text">
             Enter PDB:epitope pairs (comma or newline separated). Export selects the top N binders per pair from the
-            diversity roll-up using a combined ipTM + RMSD ranking score. Output CSV includes user flanks plus
-            yeast codon-optimized DNA (DNA Chisel with static fallback), and engine-separated scatter artifacts.
+            diversity roll-up using a combined ipTM + RMSD ranking score.
+            Adapter flanks are generated automatically with constrained deterministic barcodes:
+            left = barcode + <code>ggtctcGCCTCA</code>, right = <code>GGACAGgagaccatcgatcg</code>.
+            Binders with the same PDB+hotspot share the same barcode seed.
           </p>
           <label class="help-text bulk-field">
             <span class="bulk-field-label">Selections (PDB:epitope_#)</span>
@@ -529,12 +531,6 @@
           <div class="bulk-control-row spaced">
             <label>Binders per antigen:epitope
               <input type="number" id="binder-export-count" min="1" value="48">
-            </label>
-            <label>5' flank
-              <input type="text" id="binder-export-upstream-flank" value="GGAG" placeholder="GGAG">
-            </label>
-            <label>3' flank
-              <input type="text" id="binder-export-downstream-flank" value="CGCT" placeholder="CGCT">
             </label>
             <label class="checkbox-inline"><input type="checkbox" id="binder-export-summary" checked> Export summary CSV</label>
           </div>
