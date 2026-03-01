@@ -1,0 +1,1329 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>InitBinder Bulk Processing</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="main-content">
+        <header class="page-header">
+          <div>
+            <h1>InitBinder</h1>
+            <p>Run init/decide/prep, PyMOL exports, insights CSV, and design config exports across many targets.</p>
+          </div>
+          <div class="flex-row bulk-header-actions">
+            <button type="button" id="bulk-readme-btn" class="ghost">README</button>
+            <button type="button" id="bulk-settings-btn" class="ghost">Config</button>
+            <button type="button" id="bulk-algorithm-btn" class="ghost">Algorithm</button>
+            <div id="bulk-status" class="badge" hidden>Idle</div>
+          </div>
+        </header>
+
+        <div class="bulk-layout">
+          <div class="bulk-main">
+            <section id="llm-target-panel" class="llm-target-panel" aria-labelledby="llm-panel-title" aria-busy="false">
+              <div class="llm-panel-header">
+                <div class="llm-panel-heading">
+                  <h2 id="llm-panel-title" class="llm-panel-title">LLM Target Discovery</h2>
+                  <p class="llm-panel-subtitle">Describe the biology, get catalog matches, and keep only the targets you want to run.</p>
+                  <p class="llm-panel-hint">Catalog source: <code>Config</code> -> <code>Input TSV defaults</code>.</p>
+                  <p class="llm-panel-hint">Current merged catalog coverage: Sino Biological + ACROBiosystems (Acro).</p>
+                </div>
+              </div>
+
+              <div class="llm-session-strip">
+                <div class="llm-control-group">
+                  <label class="llm-control-label" for="llm-conversation-select">Conversation</label>
+                  <div class="llm-control-inline">
+                    <select id="llm-conversation-select">
+                      <option value="">New conversation</option>
+                    </select>
+                    <button type="button" id="llm-new-conversation" class="ghost">New</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="llm-grid">
+                <div class="llm-column llm-chat-column">
+                  <div class="llm-composer">
+                    <label class="llm-control-label" for="llm-chat-prompt">Prompt</label>
+                    <textarea id="llm-chat-prompt" rows="3" placeholder="Example: I work on autoimmune disease and need purchasable human immune checkpoints with soluble ectodomains."></textarea>
+                    <div class="llm-composer-actions">
+                      <button type="button" id="llm-suggest-targets">Suggest targets</button>
+                      <span id="llm-suggest-loading" class="llm-loading" hidden>
+                        <span class="llm-spinner" aria-hidden="true"></span>
+                        Waiting for suggestions...
+                      </span>
+                    </div>
+                    <p class="llm-composer-hint">Press Cmd/Ctrl + Enter to send.</p>
+                  </div>
+                  <div class="llm-section-heading">
+                    <h3 class="llm-section-title">Conversation</h3>
+                  </div>
+                  <div id="llm-chat-transcript" class="llm-transcript" aria-live="polite">
+                    <div class="llm-empty">No conversation yet.</div>
+                  </div>
+                </div>
+
+                <div class="llm-column llm-results-column">
+                  <div class="llm-results-scope">
+                    <p class="llm-results-scope-title">Result scope</p>
+                    <div class="llm-results-scope-fields">
+                      <div class="llm-select-field">
+                        <label class="llm-control-label" for="llm-view-mode">View</label>
+                        <select id="llm-view-mode">
+                          <option value="picked">LLM-picked</option>
+                          <option value="all">All targets</option>
+                        </select>
+                      </div>
+                      <div class="llm-select-field">
+                        <label class="llm-control-label" for="llm-catalog-filter">Catalog</label>
+                        <select id="llm-catalog-filter">
+                          <option value="biotin">Biotin only</option>
+                          <option value="all">All</option>
+                        </select>
+                      </div>
+                    </div>
+                    <p class="llm-results-scope-note">Applies to matched/unmatched lists and selected-target preview.</p>
+                  </div>
+                  <div id="llm-matched-panel" class="llm-list-panel" hidden>
+                    <div class="llm-section-heading">
+                      <h3 class="llm-section-title">Matched targets</h3>
+                      <div class="llm-section-meta">Active/total <strong id="llm-matched-count">0/0</strong></div>
+                    </div>
+                    <div id="llm-matched-list" class="llm-list">
+                      <div class="llm-empty">No matched targets yet.</div>
+                    </div>
+                  </div>
+                  <div id="llm-unmatched-panel" class="llm-list-panel" hidden>
+                    <div class="llm-section-heading">
+                      <h3 class="llm-section-title">Unmatched suggestions</h3>
+                      <div class="llm-section-meta">Count <strong id="llm-unmatched-count">0</strong></div>
+                    </div>
+                    <div id="llm-unmatched-list" class="llm-list">
+                      <div class="llm-empty">No unmatched suggestions.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section id="bulk-input-panel" hidden>
+              <h2>Input CSV / TSV</h2>
+              <div class="bulk-help-list">
+                <p class="help-text">Paste your CSV/TSV target list here. If you want a ready-to-use starting file, use <code>targets_catalog/acrobio_plus_sino_biotin_merged.tsv</code>. The preview updates automatically after edits, and large files may take a few seconds.</p>
+                <p class="help-text">Recommended columns are <code>chosen_pdb</code> (or <code>pdb_id</code>) and <code>antigen_url</code>. You can also include <code>vendor_accession</code> and <code>vendor_range</code> for better target initialization. Target-generation style TSVs are also supported.</p>
+                <p class="help-text">Need a refreshed merged catalog? Run the scraper/merge scripts in <code>targets_catalog/webscraper/</code>.</p>
+                <p class="help-text"><strong>LLM features:</strong> actions such as <code>Select epitopes (LLM)</code> require an OpenAI API key. Set it in <code>Config</code> -> <code>LLM</code> (saved to <code>cfg/webapp.local.yaml</code>).</p>
+              </div>
+              <div class="form-row">
+                <label>CSV / TSV rows
+                  <textarea id="bulk-csv-input" rows="6" placeholder="rank	selection	uniprot	gene	...&#10;1	biotin	Q15116	PDCD1	..."></textarea>
+                </label>
+              </div>
+            </section>
+
+            <section id="bulk-preview-panel" class="table-scroll" hidden>
+              <div class="table-toolbar bulk-toolbar">
+                <div class="flex-row bulk-control-row">
+                  <div id="bulk-preview-summary" class="badge"></div>
+                  <button type="button" id="bulk-visualize-epitopes" class="visualize-btn" hidden>Visualize epitopes</button>
+                </div>
+              </div>
+              <h3 class="bulk-toolbar-title">Selected targets</h3>
+              <table id="bulk-preview-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Preset</th>
+                    <th>Protein name</th>
+                    <th>Antigen URL</th>
+                    <th>Accession</th>
+                    <th>Selection</th>
+                    <th>Biotinylated</th>
+                    <th>Tags</th>
+                    <th>PDB ID</th>
+                    <th>Expression host</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </section>
+
+            <section id="epitope-plot-section" hidden>
+              <div class="table-toolbar bulk-toolbar">
+                <h2 class="bulk-toolbar-title">Epitope plots</h2>
+                <div class="flex-row bulk-control-row">
+                  <button type="button" id="epitope-csv-download" class="ghost" hidden>Download CSV</button>
+                  <button type="button" id="epitope-hotspot-csv-download" class="ghost" hidden>Download Hotspot CSV</button>
+                  <button type="button" id="epitope-report-download" class="ghost">Download report (HTML)</button>
+                </div>
+              </div>
+              <div id="epitope-plot-grid" class="catalog-viewer"></div>
+            </section>
+
+            <section id="epitope-metrics-section" hidden></section>
+
+            <section id="boltz-config-panel" class="table-scroll" hidden>
+              <div class="table-toolbar bulk-toolbar-stack">
+                <div class="bulk-toolbar-head">
+                  <h3 class="bulk-toolbar-title">BoltzGen configs</h3>
+                </div>
+                <div class="bulk-control-row">
+                  <label>Epitope design num
+                    <input type="number" id="boltz-design-count" value="100" min="1">
+                  </label>
+                  <label>Max runtime (hours)
+                    <input type="number" id="boltz-time-hours" value="72" min="1" max="240" step="1">
+                  </label>
+                  <label>Crop radius (Å)
+                    <input type="number" id="boltz-crop-radius" value="25" min="0" step="1">
+                  </label>
+                </div>
+                <div class="bulk-control-row">
+                  <button type="button" id="boltz-show-run-range" class="ghost">Generate commands</button>
+                  <button type="button" id="boltz-rerun-range" class="ghost">Select epitopes (LLM)</button>
+                  <button type="button" id="boltz-config-regenerate" class="ghost">Rebuild configs</button>
+                  <button type="button" id="boltz-plot-diversity" class="ghost">Plot antigen diversity</button>
+                </div>
+                <div class="bulk-control-row">
+                  <label>Antigen:Epitope selection
+                    <input class="bulk-input-wide" type="text" id="epitope-diversity-selection" placeholder="5WT9:epitope_1, 3J8F:epitope_4">
+                  </label>
+                </div>
+                <div class="bulk-control-row">
+                  <button type="button" id="epitope-diversity-plot" class="ghost">Plot epitope diversity</button>
+                  <button type="button" id="boltz-show-run-selection" class="ghost">Show run command (selection)</button>
+                </div>
+              </div>
+              <p class="help-text bulk-panel-note">Detected <code>boltzgen_config.yaml</code> files under each target. Click a PDB row to reveal epitopes. Use Command for a copy-paste set of cluster steps.</p>
+              <table id="boltz-config-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Preset</th>
+                    <th>PDB ID</th>
+                    <th>Allowed range</th>
+                    <th>Allowed len</th>
+                    <th>Epitope</th>
+                    <th>Designs</th>
+                    <th>Commands</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </section>
+
+            <section id="diversity-section">
+              <div class="table-toolbar bulk-toolbar">
+                <h2 class="bulk-toolbar-title">Designed binder diversity</h2>
+                <div class="flex-row bulk-control-row">
+                  <button type="button" id="diversity-download-html" class="ghost" hidden>Export HTML</button>
+                  <button type="button" id="diversity-download-csv" class="ghost" hidden>Download CSV</button>
+                  <button type="button" id="diversity-rebuild" class="ghost">Force rebuild</button>
+                </div>
+              </div>
+              <div id="diversity-grid" class="catalog-viewer"></div>
+            </section>
+
+            <section id="boltz-binders-panel" class="table-scroll">
+              <div class="table-toolbar bulk-toolbar-stack">
+                <div class="bulk-toolbar-head">
+                  <h3 class="bulk-toolbar-title">Designed binders</h3>
+                  <div id="boltz-binders-summary" class="badge"></div>
+                </div>
+                <div id="boltz-binders-csv" class="help-text" hidden></div>
+                <div class="bulk-control-row">
+                  <label class="help-text bulk-field">
+                    <span class="bulk-field-label">Filter PDB</span>
+                    <input type="text" id="binder-filter-pdb" placeholder="e.g. 4BQD">
+                  </label>
+                  <label class="help-text bulk-field">
+                    <span class="bulk-field-label">Filter epitope</span>
+                    <input type="text" id="binder-filter-epitope" placeholder="e.g. epitope_1">
+                  </label>
+                  <label class="help-text bulk-field">
+                    <span class="bulk-field-label">Filter engine</span>
+                    <select id="binder-filter-engine">
+                      <option value="">All</option>
+                      <option value="boltzgen">BoltzGen</option>
+                      <option value="rfantibody">RFAntibody</option>
+                    </select>
+                  </label>
+                  <label class="help-text bulk-field">
+                    <span class="bulk-field-label">Order by</span>
+                    <select id="binder-order-by">
+                      <option value="">Original</option>
+                      <option value="iptm">ipTM</option>
+                      <option value="rmsd">RMSD</option>
+                      <option value="rank">Rank</option>
+                      <option value="hotspot">Hotspot dist</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="bulk-control-row">
+                  <button type="button" id="boltz-binders-export" class="ghost">Export selected binders</button>
+                  <button type="button" id="boltz-binders-download" class="ghost">Download CSV</button>
+                  <button type="button" id="boltz-binders-refresh" class="ghost">Refresh</button>
+                </div>
+              </div>
+              <div class="bulk-subcard">
+                <p class="help-text">Latest binders from the diversity roll-up (BoltzGen + RFAntibody). After rsync, click Refresh to rebuild all_design_metrics and update the table.</p>
+                <table id="boltz-binders-table">
+                  <thead>
+                    <tr>
+                      <th>PDB ID</th>
+                      <th>Epitope</th>
+                      <th>Engine</th>
+                      <th>ipTM</th>
+                      <th>RMSD</th>
+                      <th>Hotspot dist (Å)</th>
+                      <th>ipSAE</th>
+                      <th>Design path</th>
+                      <th>PyMOL</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+                <div id="boltz-binders-pagination" class="table-pagination bulk-pagination" hidden>
+                  <button type="button" data-page-nav="prev">&larr; Prev</button>
+                  <span class="page-label" id="boltz-binders-page-label"></span>
+                  <button type="button" data-page-nav="next">Next &rarr;</button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <aside class="job-sidebar">
+            <section>
+              <h2>Job log</h2>
+              <div class="alert" id="job-alert" hidden></div>
+              <div class="status-log" id="job-log">Waiting for commands...</div>
+              <div class="badge" id="job-meta" hidden></div>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </main>
+
+    <div id="boltz-config-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-config"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="bulk-modal-header-group">
+            <h3 id="boltz-config-title">BoltzGen config</h3>
+            <label class="help-text bulk-modal-inline-label">
+              <span>Engine</span>
+              <select id="bulk-config-engine">
+                <option value="boltzgen">BoltzGen</option>
+                <option value="rfantibody">RFA pipeline</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" id="boltz-config-close" class="ghost">Close</button>
+        </div>
+        <pre id="boltz-config-body" class="scrollable"></pre>
+      </div>
+    </div>
+
+    <div id="boltz-log-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-log"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="boltz-log-title">Job log</h3>
+          <button type="button" id="boltz-log-close" class="ghost">Close</button>
+        </div>
+        <pre id="boltz-log-body" class="scrollable">Select a job to view logs.</pre>
+      </div>
+    </div>
+
+    <div id="boltz-run-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-run"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="bulk-modal-header-group">
+            <h3 id="boltz-run-title">Cluster run steps</h3>
+            <div class="alignment-toggle" id="bulk-run-engine" role="tablist" aria-label="Run engine">
+              <button type="button" data-engine="boltzgen" class="active" aria-selected="true">BoltzGen</button>
+              <button type="button" data-engine="rfantibody" aria-selected="false">RFA pipeline</button>
+            </div>
+          </div>
+          <button type="button" id="boltz-run-close" class="ghost">Close</button>
+        </div>
+        <div id="boltz-run-body" class="scrollable">Loading manual run steps…</div>
+      </div>
+    </div>
+
+    <div id="pipeline-rerun-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="pipeline-rerun"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="pipeline-rerun-title">Select epitopes (LLM)</h3>
+          <button type="button" id="pipeline-rerun-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body">
+          <p class="help-text">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
+          <div class="bulk-control-row">
+            <label>Target epitopes
+              <input type="number" id="pipeline-rerun-expected" value="10" min="1" max="32">
+            </label>
+            <label>Decide attempts
+              <input type="number" id="pipeline-rerun-attempts" value="3" min="1" max="5">
+            </label>
+            <label class="bulk-modal-inline-label">
+              <input type="checkbox" id="pipeline-rerun-force" checked>
+              Force re-init
+            </label>
+          </div>
+          <div class="form-row bulk-modal-form">
+            <label>Epitope guidance (optional)
+              <textarea id="pipeline-rerun-prompt" rows="2" placeholder="Optional guidance forwarded to decide-scope."></textarea>
+            </label>
+          </div>
+          <p class="help-text">
+            Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
+            <code>target.yaml</code> and <code>prep/</code> are snapshotted to
+            <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
+          </p>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
+          <button type="button" id="pipeline-rerun-confirm">Select epitopes (LLM)</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-rerun-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-rerun-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Select epitopes (LLM) · rows</h3>
+          <button type="button" id="boltz-rerun-range-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body">
+          <p class="help-text">Run init-target, decide-scope, and prep-target for the selected row range.</p>
+          <div class="bulk-control-row">
+            <label>Row start
+              <input type="number" id="boltz-rerun-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-rerun-range-end" placeholder="End" min="1">
+            </label>
+            <label>Target epitopes
+              <input type="number" id="boltz-rerun-range-expected" value="10" min="1" max="32">
+            </label>
+            <label>Decide attempts
+              <input type="number" id="boltz-rerun-range-attempts" value="3" min="1" max="5">
+            </label>
+            <label class="bulk-modal-inline-label">
+              <input type="checkbox" id="boltz-rerun-range-force" checked>
+              Force re-init
+            </label>
+          </div>
+          <div class="form-row bulk-modal-form">
+            <label>Epitope guidance (optional)
+              <textarea id="boltz-rerun-range-prompt" rows="2" placeholder="Optional guidance forwarded to decide-scope for all rows in range."></textarea>
+            </label>
+          </div>
+          <p class="help-text">
+            Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
+            <code>target.yaml</code> and <code>prep/</code> are snapshotted to
+            <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
+          </p>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="boltz-rerun-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-rerun-range-confirm">Select epitopes (LLM)</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-run-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-run-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Generate commands · rows</h3>
+          <button type="button" id="boltz-run-range-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body">
+          <p class="help-text">Choose a row range to generate manual run commands.</p>
+          <div class="bulk-control-row">
+            <label>Row start
+              <input type="number" id="boltz-run-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-run-range-end" placeholder="End" min="1">
+            </label>
+          </div>
+          <div class="bulk-control-row spaced">
+            <label>Min allowed range length
+              <input type="number" id="boltz-run-range-min-allowed" value="50" min="1">
+            </label>
+            <label>Min epitopes selected
+              <input type="number" id="boltz-run-range-min-epitopes" value="10" min="1" max="32">
+            </label>
+          </div>
+          <p class="help-text" id="boltz-run-range-filter-note">
+            Filters applied to commands (target.yaml): allowed_epitope_range length &gt;= 50; epitopes selected &gt;= 10.
+          </p>
+          <p class="help-text" id="boltz-run-range-allowed-note">
+            allowed_epitope_range is read from target.yaml (allowed_epitope_range or allowed_range). Length is computed by
+            summing inclusive residue spans per token (e.g. A:10-20,B:1-5 -&gt; 16).
+          </p>
+          <p class="help-text" id="boltz-run-range-count-note">
+            Enter a valid row range to preview retained targets.
+          </p>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="boltz-run-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-run-range-confirm">Generate commands</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="boltz-regenerate-range-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="boltz-regenerate-range"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Rebuild configs · rows</h3>
+          <button type="button" id="boltz-regenerate-range-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body">
+          <p class="help-text">Choose a row range to rebuild BoltzGen configs using the Epitope design num value.</p>
+          <div class="bulk-control-row">
+            <label>Row start
+              <input type="number" id="boltz-regenerate-range-start" placeholder="Start" min="1">
+            </label>
+            <label>Row end
+              <input type="number" id="boltz-regenerate-range-end" placeholder="End" min="1">
+            </label>
+          </div>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="boltz-regenerate-range-cancel" class="ghost">Cancel</button>
+          <button type="button" id="boltz-regenerate-range-confirm">Rebuild</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="binder-export-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="binder-export"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Export selected binders</h3>
+          <button type="button" id="binder-export-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body">
+          <p class="help-text">
+            Enter PDB:epitope pairs (comma or newline separated). Export selects the top N binders per pair from the
+            diversity roll-up using a combined ipTM + RMSD ranking score.
+            Adapter flanks are generated automatically with constrained deterministic barcodes:
+            left = barcode + <code>ggtctcGCCTCA</code>, right = <code>GGACAGgagaccatcgatcg</code>.
+            Binders with the same PDB+hotspot share the same barcode seed.
+          </p>
+          <label class="help-text bulk-field">
+            <span class="bulk-field-label">Selections (PDB:epitope_#)</span>
+            <textarea id="binder-export-selections" rows="3" placeholder="5WT9:epitope_8, 4ZFO:epitope_2, 6BGT:epitope_6"></textarea>
+          </label>
+          <div class="bulk-control-row spaced">
+            <label>Binders per antigen:epitope
+              <input type="number" id="binder-export-count" min="1" value="48">
+            </label>
+            <label class="checkbox-inline"><input type="checkbox" id="binder-export-summary" checked> Export summary CSV</label>
+          </div>
+          <div class="bulk-subcard bulk-info-box">
+            <p class="help-text"><strong>Ranking score definition.</strong></p>
+            <p class="help-text">
+              For each antigen:epitope group, normalize ipTM and RMSD within that group:
+            </p>
+            <pre class="bulk-doc-pre tight">
+ipTM_norm = (ipTM - min_ipTM) / (max_ipTM - min_ipTM)
+RMSD_norm = (RMSD - min_RMSD) / (max_RMSD - min_RMSD)
+ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
+            <p class="help-text">
+              Higher ranking_score is better (high ipTM, low RMSD). Ties break by higher ipTM, then lower RMSD.
+              Missing metrics are treated as worst. The summary CSV reports selected_percentile
+              = selected_count / total_binders * 100.
+            </p>
+          </div>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="binder-export-cancel" class="ghost">Cancel</button>
+          <button type="button" id="binder-export-confirm">Export N binders</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="bulk-algorithm-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-algorithm"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Bulk pipeline algorithm</h3>
+          <button type="button" id="bulk-algorithm-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-doc-body">
+          <p class="help-text">
+            Supplementary methods: canonical target construction, epitope definition, hotspot selection, and aggregation.
+          </p>
+          <div class="bulk-doc-content">
+            <p><strong>Notation.</strong> Let <code>S</code> be the vendor-expressed antigen sequence (accession or expressed-sequence override), and let
+              <code>C_j</code> be candidate PDB chains extracted from mmCIF. An epitope is a set of residue spans
+              <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
+            <ol class="bulk-doc-list">
+              <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters. Rows with multi-accession values in the accession field (for example containing <code>&amp;</code>, <code>,</code>, <code>;</code>, <code>/</code>, or <code>and</code>) are excluded from detected targets and execution.</li>
+              <li><strong>target_generation.py (catalog PDB selection).</strong> For each antigen option with an accession and expressed range,
+                align the vendor sequence <code>S</code> (or expressed slice <code>S[a:b]</code>) to every PDB chain sequence <code>C_j</code>
+                (RCSB polymer entities). Keep matches with <code>identity &gt;= 0.95</code> and aligned length &gt;= 10. Each candidate match
+                receives a score:
+                <code>score = 100 * coverage + 10 * identity + (4.0 - resolution) / 2 + 1500 * I_biotin</code>.
+                The chosen PDB is the argmax score; two selections are stored: best biotin-only and best-any (no biotin filter).</li>
+              <li><strong>init_target.py (target construction).</strong> Download mmCIF and parse the vendor product page (SinoBio) to recover
+                accession and expressed range, or accept an expressed-sequence override. Fetch the full NCBI sequence and slice to the expressed
+                range to obtain <code>S</code>. Extract each PDB chain sequence <code>C_j</code> and perform local alignment (biotite) between <code>S</code>
+                and every <code>C_j</code>. If target.yaml already lists chains, prefer those; otherwise select the best alignment by identity/coverage.
+                Write <code>targets/&lt;PDB&gt;/target.yaml</code> with chain IDs, sequence blocks, alignment summary, and
+                <code>allowed_epitope_range</code> derived from aligned chain ranges (plus <code>allowed_epitope_range_auth</code> in auth numbering when available).
+                <em>No SASA filtering is performed at this stage.</em></li>
+              <li><strong>decide_scope.py (epitope proposal).</strong> When epitopes are absent (or forced), propose spans using LLM + rule-based
+                constraints, restricted to <code>allowed_epitope_range</code>. Write epitope spans and rationales back to target.yaml.
+                <em>No SASA filtering is performed at this stage.</em></li>
+              <li><strong>prep_target.py (epitope preparation).</strong> Expand spans into residue masks, validate against mmCIF coverage, and optionally
+                compute SASA (Shrake-Rupley) in <code>--check</code> mode to restrict candidates to solvent-exposed residues. Emit epitope
+                metadata under <code>prep/</code> and <code>configs/epitope_*/epitope_stats.json</code>. If no epitopes exist, create an
+                Epitope_1 placeholder from <code>allowed_epitope_range</code> or the first chain fallback. SASA filtering is applied to
+                hotspot <em>selection</em> (not epitope deletion): hotspots are chosen from residues with SASA &gt;= cutoff, with a fallback
+                to unfiltered picks if no residues pass.</li>
+              <li><strong>Config + run.</strong> Generate BoltzGen configs (and optional RFAntibody scripts), submit jobs, and store designs under
+                <code>targets/&lt;PDB&gt;/designs/</code>.</li>
+              <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> and RFAntibody produces
+                <code>af3_rankings.tsv</code>. Bulk diversity merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
+            </ol>
+            <p><strong>SASA filtering by stage (summary).</strong> SASA is computed only during <code>prep_target.py --check</code>. The bulk UI can
+              optionally <em>remove</em> epitopes from manual run command generation if any stored hotspot falls below the SASA cutoff; this is a UI-level
+              filter and does not delete epitope spans from <code>target.yaml</code>.</p>
+            <p><strong>Hotspot selection (prep_target.py).</strong> For an epitope with spans <code>E</code>, define total length
+              <code>L = sum_k (end_k - start_k + 1)</code>. The default hotspot count is <code>n</code> (clamped 1..5; default 3). In minimal mode,
+              select evenly spaced ranks:</p>
+            <pre class="bulk-doc-pre">
+for i = 1..n_eff:
+    r_i = round(i * (L + 1) / (n_eff + 1))
+    hotspot_i = rank_to_position(E, r_i)
+            </pre>
+            <p>When <code>--check</code> is enabled, restrict candidates to <code>A = { (chain, pos) : SASA(chain,pos) >= tau }</code> and sample evenly
+              from <code>A</code>. If <code>L</code> is large, the algorithm probes up to <code>n_probe = min(200, max(20, 20*n))</code> ranks rather than
+              expanding all positions (cap <code>MAX_EXPAND_POSITIONS = 20000</code>). If filtering yields no candidates, fall back to unfiltered picks.</p>
+            <p><strong>GUI SASA filtering (no regeneration).</strong> The bulk UI can optionally screen existing hotspot residues against a fresh SASA
+              calculation on the prepared/raw mmCIF without regenerating epitope definitions. For each epitope, the GUI checks the stored hotspot
+              residue list and flags the epitope when any hotspot falls below the SASA cutoff (default 20 Å<sup>2</sup>, or the value recorded under
+              <code>prep_target.sasa_cutoff</code> in <code>target.yaml</code> if present). Filtered epitopes are labeled “SASA filtered” in the BoltzGen
+              config table and are excluded from Run command generation. If SASA cannot be computed (missing structure or Biopython SASA), the UI
+              skips filtering and leaves all epitopes available.</p>
+            <p><strong>Example (computed from code).</strong> Using <code>targets/8GYE/target.yaml</code>, epitope
+              <code>N-terminal_Cysteine-rich_Domain_1</code> has span <code>B:2-16</code> (so <code>L=15</code>, <code>n=3</code>). The formula yields
+              ranks <code>r = (4, 8, 12)</code>, mapping to hotspots <code>B:5</code>, <code>B:9</code>, <code>B:13</code>.</p>
+            <p><strong>Additional examples (computed from target.yaml).</strong></p>
+            <ul class="bulk-doc-list">
+              <li><code>8XSF</code>: <code>A:19-35</code> (L=17, r=4,9,14) -&gt; <code>A:22,A:27,A:32</code></li>
+              <li><code>8SR0</code>: <code>A:129-138</code> (L=10, r=3,6,8) -&gt; <code>A:131,A:134,A:136</code></li>
+              <li><code>7E5N</code>: <code>A:33-38</code> (L=6, r=2,4,5) -&gt; <code>A:34,A:36,A:37</code></li>
+              <li><code>4ZNE</code>: <code>A:99-105</code> (L=7, r=2,4,6) -&gt; <code>A:100,A:102,A:104</code></li>
+              <li><code>2HEY</code>: <code>C:5-18</code> (L=14, r=4,8,11) -&gt; <code>C:8,C:12,C:15</code></li>
+              <li><code>6MGP</code>: <code>B:33-45</code> (L=13, r=4,7,10) -&gt; <code>B:36,B:39,B:42</code></li>
+              <li><code>4R6U</code>: <code>A:35-53</code> (L=19, r=5,10,15) -&gt; <code>A:39,A:44,A:49</code></li>
+              <li><code>5MXA</code>: <code>B:30-45</code> (L=16, r=4,8,13) -&gt; <code>B:33,B:37,B:42</code></li>
+              <li><code>7FJD</code>: <code>D:33-40</code> (L=8, r=2,4,7) -&gt; <code>D:34,D:36,D:39</code></li>
+            </ul>
+            <p><strong>mmCIF vs PDB numbering (raw CIF example).</strong> The app reads label-asym/label-seq from
+              <code>targets/8GYE/raw/8GYE.cif</code> and maps to auth-asym/auth-seq for cross-checking:</p>
+            <pre class="bulk-doc-pre">_atom_site (raw CIF)
+label_asym_id B label_seq_id 2   -&gt; auth_asym_id D auth_seq_id 25
+label_asym_id B label_seq_id 70  -&gt; auth_asym_id D auth_seq_id 93
+label_asym_id B label_seq_id 139 -&gt; auth_asym_id D auth_seq_id 162
+
+target.yaml (derived)
+allowed_epitope_range (label): B:2-139
+allowed_epitope_range_auth (auth): D:25-162</pre>
+            <p>BoltzGen configs always use the raw mmCIF path plus label numbering (<code>allowed_epitope_range</code>);
+              <code>allowed_epitope_range_auth</code> is stored for cross-referencing against PDB-style annotations.</p>
+            <p><strong>Worked examples (tabbed).</strong> Each tab is a full CSV-to-epitope trace.</p>
+            <div class="bulk-example-tabs" data-example-tabs="bulk">
+              <div class="bulk-example-tablist" role="tablist">
+                <button type="button" class="bulk-example-tab is-active" data-example-tab="8GYE" aria-selected="true">8GYE</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="7TNG" aria-selected="false">7TNG</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="1J55" aria-selected="false">1J55</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="3Q2C" aria-selected="false">3Q2C</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="5DZO" aria-selected="false">5DZO</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="1HKF" aria-selected="false">1HKF</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="5VZ3" aria-selected="false">5VZ3</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="7M3Z" aria-selected="false">7M3Z</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="2JOP" aria-selected="false">2JOP</button>
+                <button type="button" class="bulk-example-tab" data-example-tab="4GOS" aria-selected="false">4GOS</button>
+              </div>
+              <div class="bulk-example-panels">
+                <section class="bulk-example-panel is-active" data-example-panel="8GYE">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 2
+selection: biotin
+uniprot: Q07011
+gene: TNFRSF9
+protein_name: Tumor necrosis factor receptor superfamily member 9
+organism: Homo sapiens
+chosen_pdb: 8GYE
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-cd137-10041-h08h-b
+vendor_accession: NP_001552.2
+vendor_range: 1-186</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 8GYE
+csv_matched_chain: A
+selected_chain_ids: B
+allowed_epitope_range: B:2-139
+allowed_epitope_range_auth: D:25-162
+alignment_identity: 1.0
+alignment_coverage: 0.7419
+alignment_chain_ranges: {'B': '2-139'}
+vendor_range: 1-186
+vendor_aligned_range: 25-162
+vendor_overlap_range: 25-162
+expressed_aa (length 186):
+MGNSCYNIVATLLLVLNFERTRSL<span style="background:#fde68a;">QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQR
+TCDICRQCKGVFRTRKECSSTSNAECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDC
+CFGTFNDQKRGICRPWTNCSLDGKSVLVNGTKERDVVCGPSP</span>ADLSPGASSVTPPAPARE
+PGHSPQ
+pdb_chain_sequences:
+A:
+QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQRTCDICRQCKGVFRTRKECSSTSNA
+ECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDCCFGTFNDQKRGICRPWTNCSLDGK
+SVLVNGTKERDVVCGPS
+B:
+<span style="background:#fde68a;">QDPCSNCPAGTFCDNNRNQICSPCPPNSFSSAGGQRTCDICRQCKGVFRTRKECSSTSNA
+ECDCTPGFHCLGAGCSMCEQDCKQGQELTKKGCKDCCFGTFNDQKRGICRPWTNCSLDGK
+SVLVNGTKERDVVCGPSP</span>
+C:
+QVQLQESGPGLVKPSETLSLTCTVSGSSLTSYGVHWVRQPPGKGLEGLGVIWPGGSTNYN
+SALMSRVTISKDNSKSQVSLKMSSLTAADTAVYYCARVTGTWYFDVWGQGTTVTVSSAST
+KGPSVFPLAPCSRSTSESTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLY
+SLSSVVTVPSSSLGTKTYTCNVDHKPSNTKVDKRVD
+D:
+DIQMTQSPSSLSASLGDRVTISCSASQGISNYLNWYQQKPDGTVKLLIYYTSTLHSGVPS
+RFSGSGSGTDYTLTISSLQPEDIATYYCQQYSKLPWTFGGGTKLEIKRTVAAPSVFIFPP
+SDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLT
+LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGE
+E:
+QVQLQESGPGLVKPSETLSLTCTVSGSSLTSYGVHWVRQPPGKGLEGLGVIWPGGSTNYN
+SALMSRVTISKDNSKSQVSLKMSSLTAADTAVYYCARVTGTWYFDVWGQGTTVTVSSAST
+KGPSVFPLAPCSRSTSESTAALGCLVKDYFPEPVTVSWNSGALTSGVHTFPAVLQSSGLY
+SLSSVVTVPSSSLGTKTYTCNVDHKPSNTKVDKRVD
+F:
+DIQMTQSPSSLSASLGDRVTISCSASQGISNYLNWYQQKPDGTVKLLIYYTSTLHSGVPS
+RFSGSGSGTDYTLTISSLQPEDIATYYCQQYSKLPWTFGGGTKLEIKRTVAAPSVFIFPP
+SDEQLKSGTASVVCLLNNFYPREAKVQWKVDNALQSGNSQESVTEQDSKDSTYSLSSTLT
+LSKADYEKHKVYACEVTHQGLSSPVTKSFNRGE</pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Cysteine-rich_Domain_1
+residues: B:2-16
+hotspots: B:5,B:9,B:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id B label_seq_id 2 -> auth_asym_id D auth_seq_id 25
+label_asym_id B label_seq_id 70 -> auth_asym_id D auth_seq_id 93
+label_asym_id B label_seq_id 139 -> auth_asym_id D auth_seq_id 162
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="7TNG">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 174
+selection: biotin
+uniprot: Q01973
+gene: ROR1
+protein_name: Inactive tyrosine-protein kinase transmembrane receptor ROR1
+organism: Homo sapiens
+chosen_pdb: 7TNG
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-ror1-13968-hcch1-b
+vendor_accession: NP_005003.2
+vendor_range: 1-403</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 7TNG
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:3-84
+allowed_epitope_range_auth: A:312-393
+alignment_identity: 1.0
+alignment_coverage: 0.2035
+alignment_chain_ranges: {'A': '3-84'}
+vendor_range: 1-403
+vendor_aligned_range: 312-393
+vendor_overlap_range: 312-393
+expressed_aa (length 403):
+MHRPRRRGTRPPLLALLAALLLAARGAAAQETELSVSAELVPTSSWNISSELNKDSYLTL
+DEPMNNITTSLGQTAELHCKVSGNPPPTIRWFKNDAPVVQEPRRLSFRSTIYGSRLRIRN
+LDTTDTGYFQCVATNGKEVVSSTGVLFVKFGPPPTASPGYSDEYEEDGFCQPYRGIACAR
+FIGNRTVYMESLHMQGEIENQITAAFTMIGTSSHLSDKCSQFAIPSLCHYAFPYCDETSS
+VPKPRDLCRDECEILENVLCQTEYIFARSNPMILMRLKLPNCEDLPQPESPEAANCIRIG
+IPMADPINKNH<span style="background:#fde68a;">KCYNSTGVDYRGTVSVTKSGRQCQPWNSQYPHTHTFTALRFPELNGGHS
+YCRNPGNQKEAPWCFTLDENFKSDLCDIPACDS</span>KDSKEKNKME
+pdb_chain_sequences:
+A:
+GS<span style="background:#fde68a;">KCYNSTGVDYRGTVSVTKSGRQCQPWNSQYPHTHTFTALRFPELNGGHSYCRNPGNQK
+EAPWCFTLDENFKSDLCDIPACDS</span>AAA</pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Loop
+residues: A:3-10
+hotspots: A:4,A:6,A:9</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 3 -> auth_asym_id A auth_seq_id 312
+label_asym_id A label_seq_id 43 -> auth_asym_id A auth_seq_id 352
+label_asym_id A label_seq_id 84 -> auth_asym_id A auth_seq_id 393
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="1J55">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 179
+selection: biotin
+uniprot: P25815
+gene: S100P
+protein_name: Protein S100-P
+organism: Homo sapiens
+chosen_pdb: 1J55
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-s100p-12635-hnae-b
+vendor_accession: P25815
+vendor_range: 1-95</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 1J55
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:1-94
+allowed_epitope_range_auth: A:1-94
+alignment_identity: 1.0
+alignment_coverage: 0.9263
+alignment_chain_ranges: {'A': '1-94'}
+vendor_range: 1-95
+vendor_aligned_range: 1-94
+vendor_overlap_range: 1-94
+expressed_aa (length 95):
+<span style="background:#fde68a;">MTELETAMGMIIDVFSRYSGSEGSTQTLTKGELKVLMEKELPGFLQSGKDKDAVDKLLKD
+LDANGDAQVDFSEFIVFVAAITSACHKYFEKAGL</span>K
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">MTELETAMGMIIDVFSRYSGSEGSTQTLTKGELKVLMEKELPGFLDAVDKLLKDLDANGD
+AQVDFSEFIVFVAAITSACHKYFEKAGL</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Helix
+residues: A:3-18
+hotspots: A:6,A:10,A:15</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 1 -> auth_asym_id A auth_seq_id 1
+label_asym_id A label_seq_id 94 -> auth_asym_id A auth_seq_id 94
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="3Q2C">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 139
+selection: biotin
+uniprot: Q8N6C8
+gene: LILRA3
+protein_name: Leukocyte immunoglobulin-like receptor subfamily A member 3
+organism: Homo sapiens
+chosen_pdb: 3Q2C
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-lilra3-13549-h08h-b
+vendor_accession: AAH28208.1
+vendor_range: 1-439</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 3Q2C
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:2-97
+allowed_epitope_range_auth: A:2-97
+alignment_identity: 1.0
+alignment_coverage: 0.2187
+alignment_chain_ranges: {'A': '2-97'}
+vendor_range: 1-439
+vendor_aligned_range: 25-120
+vendor_overlap_range: 25-120
+expressed_aa (length 439):
+MTSILTVLICLGLSLDPRTHVQAG<span style="background:#fde68a;">PLPKPTLWAEPGSVITQGSPVTLRCQGSLETQEYHL
+YREKKTALWITRIPQELVKKGQFPILSITWEHAGRYCCIYGSHTVGLSESSDPLELVVTG</span>
+AYSKPTLSALPSPVVTSGGNVTIQCDSQVAFDGFILCKEGEDEHPQCLNSHSHARGSSRA
+IFSVGPVSPSRRWSYRCYGYDSRAPYVWSLPSDLLGLLVPGVSKKPSLSVQPGPVVAPGE
+KLTFQCGSDAGYDRFVLYKEWGRDFLQRPGRQPQAGLSQANFTLGPVSRSYGGQYTCSGA
+YNLSSEWSAPSDPLDILITGQIRARPFLSVRPGPTVASGENVTLLCQSQGGMHTFLLTKE
+GAADSPLRLKSKRQSHKYQAEFPMSPVTSAHAGTYRCYGSLSSNPYLLTHPSDPLELVVS
+GAAETLSPPQNKSDSKAGE
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">PLPKPTLWAEPGSVITQGSPVTLRCQGSLETQEYHLYREKKTALWITRIPQELVKKGQFP
+ILSITWEHAGRYCCIYGSHTVGLSESSDPLELVVTG</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Ig-like_Loop
+residues: A:2-10
+hotspots: A:3,A:6,A:9</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 2 -> auth_asym_id A auth_seq_id 2
+label_asym_id A label_seq_id 49 -> auth_asym_id A auth_seq_id 49
+label_asym_id A label_seq_id 97 -> auth_asym_id A auth_seq_id 97
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="5DZO">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 194
+selection: biotin
+uniprot: Q96D42
+gene: HAVCR1
+protein_name: Hepatitis A virus cellular receptor 1
+organism: Homo sapiens
+chosen_pdb: 5DZO
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-tim-1-11051-h49h-b
+vendor_accession: AAC39862.1
+vendor_range: 21-290</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 5DZO
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:2-107
+allowed_epitope_range_auth: A:5-110
+alignment_identity: 1.0
+alignment_coverage: 0.3926
+alignment_chain_ranges: {'A': '2-107'}
+vendor_range: 21-290
+vendor_aligned_range: 22-127
+vendor_overlap_range: 22-127
+expressed_aa (length 270):
+S<span style="background:#fde68a;">VKVGGEAGPSVTLPCHYSGAVTSMCWNRGSCSLFTCQNGIVWTNGTHVTYRKDTRYKLL
+GDLSRRDVSLTIENTAVSDSGVYCCRVEHRGWFNDMKITVSLEIVPP</span>KVTTTPIVTTVPT
+VTTVRTSTTVPTTTTVPTTTVPTTMSIPTTTTVPTTMTVSTTTSVPTTTSIPTTTSVPVT
+TTVSTFVPPMPLPRQNHEPVATSPSSPQPAETHPTTLQGAIRREPTSSPLYSYTTDGNDT
+VTESSDGLWNNNQTQLFLEHSLLTANTTKG
+pdb_chain_sequences:
+A:
+M<span style="background:#fde68a;">VKVGGEAGPSVTLPCHYSGAVTSMCWNRGSCSLFTCQNGIVWTNGTHVTYRKDTRYKLL
+GDLSRRDVSLTIENTAVSDSGVYCCRVEHRGWFNDMKITVSLEIVPP</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_IgV_Beta-Strand_Epitope
+residues: A:2-15
+hotspots: A:5,A:9,A:12</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 2 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 54 -> auth_asym_id A auth_seq_id 57
+label_asym_id A label_seq_id 107 -> auth_asym_id A auth_seq_id 110
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="1HKF">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 148
+selection: biotin
+uniprot: O95944
+gene: NCR2
+protein_name: Natural cytotoxicity triggering receptor 2
+organism: Homo sapiens
+chosen_pdb: 1HKF
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-nkp44-ncr2-11550-h08h-b
+vendor_accession: NP_004819.2
+vendor_range: 1-190</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 1HKF
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:15-122
+allowed_epitope_range_auth: A:5-112
+alignment_identity: 1.0
+alignment_coverage: 0.5684
+alignment_chain_ranges: {'A': '15-122'}
+vendor_range: 1-190
+vendor_aligned_range: 23-130
+vendor_overlap_range: 23-130
+expressed_aa (length 190):
+MAWRALHPLLLLLLLFPGSQAQ<span style="background:#fde68a;">SKAQVLQSVAGQTLTVRCQYPPTGSLYEKKGWCKEASA
+LVCIRLVTSSKPRTMAWTSRFTIWDDPDAGFFTVTMTDLREEDSGHYWCRIYRPSDNSVS
+KSVRFYLVVS</span>PASASTQTSWTPRDLVSSQTQTQSCVPPTAGARQAPESPSTIPVPSQPQN
+STLRPGPAAP
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">SKAQVLQSVAGQTLTVRCQYPPTGSLYEKKGWCKEASALVCIRLVTSSKPRTMAWTSRFT
+IWDDPDAGFFTVTMTDLREEDSGHYWCRIYRPSDNSVSKSVRFYLVVS</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Ig-like_Loop
+residues: A:15-25
+hotspots: A:17,A:20,A:23</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 15 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 68 -> auth_asym_id A auth_seq_id 58
+label_asym_id A label_seq_id 122 -> auth_asym_id A auth_seq_id 112
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="5VZ3">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 88
+selection: biotin
+uniprot: Q99988
+gene: GDF15
+protein_name: Growth/differentiation factor 15
+organism: Homo sapiens
+chosen_pdb: 5VZ3
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-gdf15-10936-h44e-b
+vendor_accession: NP_004855.2
+vendor_range: 197-308</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 5VZ3
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:5-112
+allowed_epitope_range_auth: A:5-112
+alignment_identity: 1.0
+alignment_coverage: 0.9643
+alignment_chain_ranges: {'A': '5-112'}
+vendor_range: 197-308
+vendor_aligned_range: 201-308
+vendor_overlap_range: 201-308
+expressed_aa (length 112):
+ARNG<span style="background:#fde68a;">DHCPLGPGRCCRLHTVRASLEDLGWADWVLSPREVQVTMCIGACPSQFRAANMHAQ
+IKTSLHRLKPDTVPAPCCVPASYNPMVLIQKTDTGVSLQTYDDLLAKDCHCI</span>
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">DHCPLGPGRCCRLHTVRASLEDLGWADWVLSPREVQVTMCIGACPSQFRAANMHAQIKTS
+LHRLKPDTVPAPCCVPASYNPMVLIQKTDTGVSLQTYDDLLAKDCHCI</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Accessible_Loop
+residues: A:5-15
+hotspots: A:7,A:10,A:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 5 -> auth_asym_id A auth_seq_id 5
+label_asym_id A label_seq_id 58 -> auth_asym_id A auth_seq_id 58
+label_asym_id A label_seq_id 112 -> auth_asym_id A auth_seq_id 112
+SASA check (history/20251222_180939):
+sasa_cutoff: 10.0
+declared_count: 9
+exposed_count: 7
+exposed_fraction: 0.778
+sasa_exposed_total: 526.17
+rsa_mean: 0.395</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="7M3Z">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 228
+selection: biotin
+uniprot: Q8TDQ0
+gene: HAVCR2
+protein_name: Hepatitis A virus cellular receptor 2
+organism: Homo sapiens
+chosen_pdb: 7M3Z
+matched_chain: A
+antigen_url: https://www.sinobiological.com/recombinant-proteins/human-tim-3-10390-h08h-b
+vendor_accession: AAL65157.1
+vendor_range: 1-200</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 7M3Z
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:1-109
+allowed_epitope_range_auth: A:1-109
+alignment_identity: 1.0
+alignment_coverage: 0.545
+alignment_chain_ranges: {'A': '1-109'}
+vendor_range: 1-200
+vendor_aligned_range: 22-130
+vendor_overlap_range: 22-130
+expressed_aa (length 200):
+MFSHLPFDCVLLLLLLLLTRS<span style="background:#fde68a;">SEVEYRAEVGQNAYLPCFYTPAAPGNLVPVCWGKGACPV
+FECGNVVLRTDERDVNYWTSRYWLNGDFRKGDVSLTIENVTLADSGIYCCRIQIPGIMND
+EKFNLKLVIK</span>PAKVTPAPTLQRDFTAAFPRMLTTRGHGPAETQTLGSLPDINLTQISTLA
+NELRDSRLANDLRDSGATIR
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">SEVEYRAEVGQNAYLPCFYTPAAPGNLVPVCWGKGACPVFECGNVVLRTDERDVNYWTSR
+YWLNGDFRKGDVSLTIENVTLADSGIYCCRIQIPGIMNDEKFNLKLVIK</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_IgV_Loop
+residues: A:22-32
+hotspots: A:24,A:27,A:30</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 1 -> auth_asym_id A auth_seq_id 1
+label_asym_id A label_seq_id 55 -> auth_asym_id A auth_seq_id 55
+label_asym_id A label_seq_id 109 -> auth_asym_id A auth_seq_id 109
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="2JOP">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 44
+selection: biotin
+uniprot: P06127
+gene: CD5
+protein_name: T-cell surface glycoprotein CD5
+organism: Homo sapiens
+chosen_pdb: 2JOP
+matched_chain: A
+antigen_url: https://www.sinobiological.com/search?keywords=11027-H27H-B
+vendor_accession: NP_055022.2
+vendor_range: 1-372</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 2JOP
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:22-131
+allowed_epitope_range_auth: A:25-134
+alignment_identity: 0.9818
+alignment_coverage: 0.2957
+alignment_chain_ranges: {'A': '22-131'}
+vendor_range: 1-372
+vendor_aligned_range: 25-134
+vendor_overlap_range: 25-134
+expressed_aa (length 372):
+MPMGSLQPLATLYLLGMLVASCLG<span style="background:#fde68a;">RLSWYDPDFQARLTRSNSKCQGQLEVYLKDGWHMVC
+SQSWGRSSKQWEDPSQASKVCQRLNCGVPLSLGPFLVTYTPQSSIICYGQLGSFSNCSHS
+RNDMCHSLGLTCLE</span>PQKTTPPTTRPPPTTTPEPTAPPRLQLVAQSGGQHCAGVVEFYSGS
+LGGTISYEAQDKTQDLENFLCNNLQCGSFLKHLPETEAGRAQDPGEPREHQPLPIQWKIQ
+NSSCTSLEHCFRKIKPQKSGRVLALLCSGFQPKVQSRLVGGSSICEGTVEVRQGAQWAAL
+CDSSSARSSLRWEEVCREQQCGSVNSYRVLDAGDPTSRGLFCPHQKLSQCHELWERNSYC
+KKVFVTCQDPNP
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">RLSWYDPDFQARLTRSNSKCQGQLEVYLKDGWHMVCSQSWGRSSKQWEDPSQASKVCQRL
+NCGDPLSLGPFLKTYTPQSSIICYGQLGSFSNCSHSRNDMCHSLGLTCLE</span></pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_Loop_Epitope
+residues: A:22-30
+hotspots: A:23,A:26,A:29</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 22 -> auth_asym_id A auth_seq_id 25
+label_asym_id A label_seq_id 76 -> auth_asym_id A auth_seq_id 79
+label_asym_id A label_seq_id 131 -> auth_asym_id A auth_seq_id 134
+SASA check (hotspot_bundle.json):
+sasa_cutoff: null (check disabled)</pre>
+                </section>
+                <section class="bulk-example-panel" data-example-panel="4GOS">
+                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <pre class="bulk-doc-pre">rank: 17
+selection: biotin
+uniprot: Q7Z7D3
+gene: VTCN1
+protein_name: V-set domain-containing T-cell activation inhibitor 1
+organism: Homo sapiens
+chosen_pdb: 4GOS
+matched_chain: A
+antigen_url: https://www.sinobiological.com/search?keywords=10738-H27H-B
+vendor_accession: NP_078902.2
+vendor_range: 29-258</pre>
+                  <p><strong>Derived target.yaml fields.</strong></p>
+                  <pre class="bulk-doc-pre">PDB ID: 4GOS
+csv_matched_chain: A
+selected_chain_ids: A
+allowed_epitope_range: A:6-119
+allowed_epitope_range_auth: A:35-148
+alignment_identity: 1.0
+alignment_coverage: 0.4957
+alignment_chain_ranges: {'A': '6-119'}
+vendor_range: 29-258
+vendor_aligned_range: 35-148
+vendor_overlap_range: 35-148
+expressed_aa (length 230):
+FGISGR<span style="background:#fde68a;">HSITVTTVASAGNIGEDGILSCTFEPDIKLSDIVIQWLKEGVLGLVHEFKEGKD
+ELSEQDEMFRGRTAVFADQVIVGNASLRLKNVQLTDAGTYKCYIITSKGKGNANLEYKTG</span>
+AFSMPEVNVDYNASSETLRCEAPRWFPQPTVVWASQVDQGANFSEVSNTSFELNSENVTM
+KVVSVLYNVTINNTYSCMIENDIAKATGDIKVTESEIKRRSHLQLLNSKA
+pdb_chain_sequences:
+A:
+<span style="background:#fde68a;">HSITVTTVASAGNIGEDGILSCTFEPDIKLSDIVIQWLKEGVLGLVHEFKEGKDELSEQD
+EMFRGRTAVFADQVIVGNASLRLKNVQLTDAGTYKCYIITSKGKGNANLEYKTG</span>H</pre>
+                  <p class="help-text bulk-doc-help">Aligned segment highlighted in gold (expressed_aa uses vendor_aligned_range; PDB chains use chain_ranges).</p>
+                  <p><strong>Epitope index 1.</strong></p>
+                  <pre class="bulk-doc-pre">epitope_1 name: N-terminal_IgV_Loop
+residues: A:6-15
+hotspots: A:8,A:11,A:13</pre>
+                  <p><strong>Numbering + SASA checks.</strong></p>
+                  <pre class="bulk-doc-pre">mmCIF label->auth (raw CIF):
+label_asym_id A label_seq_id 6 -> auth_asym_id A auth_seq_id 35
+label_asym_id A label_seq_id 62 -> auth_asym_id A auth_seq_id 91
+label_asym_id A label_seq_id 119 -> auth_asym_id A auth_seq_id 148
+SASA check (history/20260115_031825):
+sasa_cutoff: 10.0
+declared_count: 9
+exposed_count: 8
+exposed_fraction: 0.889
+sasa_exposed_total: 469.567
+rsa_mean: 0.386</pre>
+                </section>
+              </div>
+            </div>
+            <p><strong>SASA check examples.</strong> When <code>prep_target</code> is run with <code>--sasa-cutoff</code>, per-epitope SASA
+              statistics and top-exposed residues are recorded in <code>epitopes_metadata.json</code>.</p>
+            <p><strong>Example A (5VZ3, Epitope_1_Site; sasa_cutoff=10.0 A^2).</strong></p>
+            <pre class="bulk-doc-pre">source: targets/5VZ3/history/20251222_180939/prep/epitopes_metadata.json
+declared_count: 9
+exposed_count: 7
+exposed_fraction: 0.778
+sasa_summary: declared_total=529.216, exposed_total=526.17, exposed_mean=75.167, exposed_p25=46.235, exposed_median=61.372, exposed_p75=91.656, exposed_skew=0.992, n_gt_100A2=1
+top_exposed_residues:
+  A:13 ARG (charged) sasa=152.317 rsa=0.556
+  A:11 PRO (hydrophobic) sasa=91.656 rsa=0.576
+  A:16 ARG (charged) sasa=89.371 rsa=0.326
+  A:17 LEU (hydrophobic) sasa=61.372 rsa=0.305
+  A:18 HIS (charged) sasa=50.579 rsa=0.226
+  A:10 GLY (polar) sasa=46.235 rsa=0.445
+  A:12 GLY (polar) sasa=34.641 rsa=0.333</pre>
+            <p><strong>Example B (3Q0H, Epitope_1_N_terminal_strand_region; sasa_cutoff=10.0 A^2).</strong></p>
+            <pre class="bulk-doc-pre">source: targets/3Q0H/history/20260115_003657/prep/epitopes_metadata.json
+declared_count: 5
+exposed_count: 5
+exposed_fraction: 1.0
+sasa_summary: declared_total=285.035, exposed_total=285.035, exposed_mean=57.007, exposed_p25=39.126, exposed_median=52.576, exposed_p75=77.104, exposed_skew=0.03, n_gt_100A2=0
+top_exposed_residues:
+  B:28 GLU (charged) sasa=78.973 rsa=0.354
+  B:26 THR (polar) sasa=75.234 rsa=0.437
+  B:25 GLY (polar) sasa=52.576 rsa=0.506
+  B:29 THR (polar) sasa=45.466 rsa=0.264
+  B:27 ILE (hydrophobic) sasa=32.786 rsa=0.166</pre>
+<p class="help-text bulk-doc-help-zero">
+              <strong>allowed_epitope_range length</strong> is computed by summing inclusive spans per token
+              (e.g. A:10-20,B:1-5 =&gt; 16). The GUI uses this length for filter thresholds.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="bulk-settings-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-settings"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Bulk settings</h3>
+          <button type="button" id="bulk-settings-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-settings-body">
+          <p class="help-text bulk-settings-meta" id="bulk-settings-meta">Edits are saved to <code>cfg/webapp.local.yaml</code>.</p>
+
+          <section class="settings-section">
+            <h4>Cluster base</h4>
+            <div class="settings-grid">
+              <label>SSH alias
+                <input type="text" id="bulk-settings-ssh-alias" placeholder="e.g. rfacluster">
+              </label>
+              <label>Remote root
+                <input type="text" id="bulk-settings-remote-root" placeholder="/pub/.../initbinder">
+              </label>
+              <label>Target root
+                <input type="text" id="bulk-settings-target-root" placeholder="/pub/.../initbinder/targets">
+              </label>
+              <label>conda env (BoltzGen installed)
+                <input type="text" id="bulk-settings-conda" placeholder="conda activate ...">
+              </label>
+              <label>PyMOL executable path
+                <input type="text" id="bulk-settings-pymol-path" placeholder="pymol or /Applications/PyMOL.app">
+              </label>
+              <label>PyMOL conda env (local)
+                <input type="text" id="bulk-settings-pymol-conda-env" placeholder="takashi">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>BoltzGen defaults</h4>
+            <div class="settings-grid">
+              <label>Partition
+                <input type="text" id="bulk-settings-boltz-partition" placeholder="gpu">
+              </label>
+              <label>Account
+                <input type="text" id="bulk-settings-boltz-account" placeholder="ccl_lab_gpu">
+              </label>
+              <label>GPUs
+                <input type="text" id="bulk-settings-boltz-gpus" placeholder="A30:1">
+              </label>
+              <label>CPUs
+                <input type="number" id="bulk-settings-boltz-cpus" min="1" max="256" placeholder="8">
+              </label>
+              <label>Memory (GB)
+                <input type="number" id="bulk-settings-boltz-mem" min="1" max="2048" placeholder="64">
+              </label>
+              <label>Time (hours)
+                <input type="number" id="bulk-settings-boltz-time" min="1" max="240" placeholder="12">
+              </label>
+              <label>Default designs/epitope
+                <input type="number" id="bulk-settings-boltz-designs" min="1" max="50000" placeholder="100">
+              </label>
+              <label class="settings-span-all">Nanobody scaffold paths (one per line)
+                <textarea id="bulk-settings-boltz-scaffolds" rows="4" placeholder="&lt;boltzgen-path-on-cluster&gt;/nanobody_scaffolds/7eow.yaml&#10;&lt;boltzgen-path-on-cluster&gt;/nanobody_scaffolds/7xl0.yaml&#10;&lt;boltzgen-path-on-cluster&gt;/nanobody_scaffolds/8coh.yaml&#10;&lt;boltzgen-path-on-cluster&gt;/nanobody_scaffolds/8z8v.yaml"></textarea>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>LLM</h4>
+            <div class="settings-grid">
+              <label>OpenAI API key
+                <input type="password" id="bulk-settings-openai-key" placeholder="sk-...">
+              </label>
+              <label>OpenAI model
+                <input type="text" id="bulk-settings-openai-model" placeholder="gpt-4.1-2025-04-14">
+              </label>
+            </div>
+            <p class="help-text bulk-settings-note">Saved to local config (<code>cfg/webapp.local.yaml</code>) so editor changes are not required.</p>
+          </section>
+
+          <section class="settings-section">
+            <h4>Input TSV defaults</h4>
+            <div class="settings-grid">
+              <label>Default input file path
+                <input type="text" id="bulk-settings-input-path" placeholder="targets_catalog/acrobio_plus_sino_biotin_merged.tsv">
+              </label>
+            </div>
+            <div class="flex-row bulk-settings-toggle-row">
+              <label class="help-text bulk-autoload-label">
+                <input type="checkbox" id="bulk-settings-auto-load">
+                Auto-load this file on page open when input is empty
+              </label>
+              <button type="button" id="bulk-settings-load-default" class="ghost">Load default file now</button>
+            </div>
+          </section>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="bulk-settings-cancel" class="ghost">Cancel</button>
+          <button type="button" id="bulk-settings-save">Save settings</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="bulk-readme-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="bulk-readme"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="bulk-readme-title">GUI README</h3>
+          <button type="button" id="bulk-readme-close" class="ghost">Close</button>
+        </div>
+        <pre id="bulk-readme-body" class="scrollable">Loading README...</pre>
+      </div>
+    </div>
+
+    <script type="module" src="/static/js/bulk.js"></script>
+  </body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Antigen DMS Library</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell target-generation-shell">
+      <div id="dms-library-content">
+        <header class="page-header">
+          <div>
+            <h1>Antigen DMS Library</h1>
+            <p>Design per-residue mutation libraries for antigen escape profiling and launch PyMOL to review coverage.</p>
+            <nav class="page-nav">
+              <a href="/">Back to Bulk</a>
+              <a href="/target-generation">Target generation workspace</a>
+              <a href="/dashboard">Legacy dashboard</a>
+            </nav>
+          </div>
+        </header>
+
+        <section class="card" id="dms-config-card">
+          <h2>Design configuration</h2>
+          <p class="help-text">Provide a prepared antigen structure and chain ID. By default the prepared target at <code>targets/&lt;PDB&gt;/prep/prepared.pdb</code> is used.</p>
+          <form id="dms-form" class="form-grid">
+            <label>
+              PDB ID (optional)
+              <input type="text" id="dms-pdb-id" name="pdb_id" maxlength="4" placeholder="6M17">
+            </label>
+            <label>
+              Override PDB path (optional)
+              <input type="text" id="dms-pdb-path" name="pdb_path" placeholder="/path/to/prepared.pdb">
+            </label>
+            <label>
+              Target chain ID
+              <input type="text" id="dms-chain-id" name="chain_id" maxlength="2" required>
+            </label>
+            <label>
+              Mutation menu
+              <select id="dms-mutation-kind" name="mutation_kind">
+                <option value="SSM">Full site-saturation</option>
+                <option value="alanine">Alanine scan</option>
+                <option value="charge">Charge flip</option>
+              </select>
+            </label>
+            <label>
+              RSA threshold
+              <input type="number" id="dms-rsa-threshold" name="rsa_threshold" step="0.05" min="0" max="1" value="0.25">
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="dms-surface-only" name="target_surface_only" checked>
+              <span>Only mutate residues with RSA ≥ threshold</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="dms-vendor-range" name="restrict_to_expressed_region" checked>
+              <span>Restrict to vendor expressed / soluble region when available</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="dms-glycan" name="include_glycan_toggles" checked>
+              <span>Add glycan gain/loss toggles</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="dms-conservative" name="add_conservative_swaps" checked>
+              <span>Add conservative swaps</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="dms-controls" name="add_controls" checked>
+              <span>Include WT controls</span>
+            </label>
+            <label>
+              Attach barcodes (count)
+              <input type="number" id="dms-barcodes" name="add_barcodes" min="0" placeholder="0">
+            </label>
+            <label>
+              Preview rows
+              <input type="number" id="dms-preview-limit" name="preview_limit" min="10" max="1000" value="200">
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="dms-submit">Generate library</button>
+              <span class="badge" id="dms-status" hidden>Idle</span>
+            </div>
+          </form>
+        </section>
+
+        <section class="card" id="dms-results-card" hidden>
+          <div class="card-header">
+            <div>
+              <h2>Library summary</h2>
+              <p class="help-text" id="dms-summary"></p>
+            </div>
+            <div class="card-actions">
+              <a id="dms-download" class="secondary" href="#" download>Download CSV</a>
+              <button type="button" id="dms-launch-pymol" disabled>Open in PyMOL</button>
+            </div>
+          </div>
+          <dl class="insight-details" id="dms-meta"></dl>
+          <div id="dms-mutated-residues" class="mutated-summary"></div>
+          <div class="table-wrapper">
+            <table id="dms-preview-table">
+              <thead>
+                <tr>
+                  <th>Residue</th>
+                  <th>WT</th>
+                  <th>Mut</th>
+                  <th>Category</th>
+                  <th>RSA</th>
+                  <th>Barcode</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" id="dms-log-card" hidden>
+          <h2>Activity</h2>
+          <pre id="dms-log"></pre>
+        </section>
+      </div>
+    </main>
+    <script src="/static/js/dms-library.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+fastapi>=0.111
+uvicorn[standard]>=0.30
+PyYAML>=6.0
+pandas>=2.1
+numpy>=1.26
+matplotlib>=3.8
+requests>=2.31
+biopython>=1.83
+jsonschema>=4.22
+beautifulsoup4>=4.12
+biotite>=0.41
+playwright>=1.46
+openai>=1.40
+dnachisel>=3.2

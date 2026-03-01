@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Target Generation – InitBinder</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell target-generation-shell">
+      <div id="target-generation-content">
+        <header class="page-header">
+          <div>
+            <h1>Target Generation</h1>
+            <p>Browse discovery TSV/CSV files and launch new target generation jobs.</p>
+          </div>
+          <nav class="page-nav">
+            <a href="/">&#8592; Back to Bulk</a>
+            <a href="/dashboard">Legacy dashboard</a>
+          </nav>
+        </header>
+
+        <section class="catalog-section">
+          <div class="catalog-layout has-resizer" id="tg-catalog-layout">
+            <div class="catalog-column">
+              <div class="catalog-header">
+                <h2>Catalog files</h2>
+                <button type="button" id="catalog-refresh">Refresh</button>
+              </div>
+              <p class="help-text">Located in <code>targets_catalog/</code></p>
+              <ul id="catalog-list" class="catalog-list" role="list"></ul>
+            </div>
+            <div
+              class="catalog-resizer"
+              id="catalog-resizer"
+              role="separator"
+              aria-label="Resize catalog panels"
+              aria-orientation="vertical"
+              tabindex="0"
+            ></div>
+            <div class="catalog-column">
+              <div class="catalog-header">
+                <h2>Preview</h2>
+                <div class="catalog-meta">
+                  <span id="catalog-selected-name" class="catalog-selected">Select a file to preview</span>
+                  <span id="catalog-selected-info" class="badge" hidden></span>
+                </div>
+              </div>
+              <div class="catalog-controls">
+                <label>
+                  Rows to preview
+                  <input type="number" id="preview-limit" value="200" min="10" max="2000">
+                </label>
+                <button type="button" id="catalog-copy" class="ghost" disabled>Copy preview</button>
+                <button type="button" id="catalog-download" class="secondary" disabled>Download</button>
+              </div>
+              <div id="catalog-viewer" class="catalog-viewer" role="region" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Launch target generation</h2>
+          <form id="target-generation-form" class="form-grid">
+            <label class="form-span-2">
+              Instruction
+              <textarea id="tg-instruction" rows="4" required placeholder="Describe the targets to find"></textarea>
+            </label>
+            <div class="form-row">
+              <label>
+                Max targets
+                <input type="number" id="tg-max-targets" min="1" max="1000" placeholder="e.g. 200">
+              </label>
+              <label>
+                Species filter
+                <input type="text" id="tg-species" placeholder="e.g. human">
+              </label>
+              <label>
+                Preferred tags
+                <input type="text" id="tg-prefer-tags" placeholder="e.g. biotin">
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                Output prefix
+                <input type="text" id="tg-prefix" placeholder="Optional custom prefix">
+              </label>
+              <label>
+                Extra CLI args
+                <input type="text" id="tg-extra" placeholder="--no_browser_popup --sleep 0">
+              </label>
+              <label class="checkbox-inline">
+                <input type="checkbox" id="tg-no-browser" checked>
+                Disable browser popup
+              </label>
+            </div>
+            <label class="form-span-2">
+              Avoid TSVs
+              <select id="tg-avoid" multiple size="6"></select>
+              <span class="help-text">Hold Cmd/Ctrl to choose multiple TSV outputs to avoid duplicates (CSV previews are browse-only).</span>
+            </label>
+            <div class="form-actions">
+              <button type="submit" id="tg-submit">Run target_generation.py</button>
+              <span id="tg-status" class="badge" hidden>Idle</span>
+            </div>
+          </form>
+        </section>
+
+        <section>
+          <div class="catalog-header">
+            <h2>Run status</h2>
+            <button type="button" id="tg-clear-log" class="secondary">Clear log</button>
+          </div>
+          <div class="job-status-grid">
+            <div>
+              <div class="status-line">Job ID: <span id="tg-job-id">—</span></div>
+              <div class="status-line">Status: <span id="tg-job-status">Idle</span></div>
+              <div class="status-line">Message: <span id="tg-job-message">—</span></div>
+            </div>
+            <button type="button" id="tg-refresh" class="secondary" disabled>Refresh status</button>
+          </div>
+          <pre id="tg-log" class="log-viewer" aria-live="polite"></pre>
+        </section>
+      </div>
+    </main>
+    <script src="/static/js/target-generation.js" defer></script>
+  </body>
+</html>
