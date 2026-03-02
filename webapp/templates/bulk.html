@@ -365,74 +365,82 @@
       </div>
     </div>
 
-    <div id="manual-epitope-modal" class="modal wide-modal" hidden>
-      <div class="modal-backdrop" data-close="manual-epitope"></div>
+    <div id="epitope-select-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="epitope-select"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3 id="manual-epitope-title">Manual hotspot editor</h3>
-          <button type="button" id="manual-epitope-close" class="ghost">Close</button>
-        </div>
-        <div class="bulk-modal-body manual-epitope-body">
-          <div class="bulk-control-row">
-            <label>Epitope name (optional)
-              <input type="text" id="manual-epitope-name" placeholder="manual_epitope_1" maxlength="160">
-            </label>
-            <label class="bulk-modal-inline-label manual-epitope-toggle">
-              <input type="checkbox" id="manual-epitope-allowed-only" checked>
-              <span>Show allowed residues only</span>
-            </label>
-          </div>
-          <p id="manual-epitope-allowed-range" class="help-text">Allowed range: loading residue options…</p>
-          <div id="manual-epitope-chain-tabs" class="manual-chain-tabs" role="tablist" aria-label="Chain selector"></div>
-          <div id="manual-epitope-sequence-grid" class="manual-sequence-grid" aria-live="polite"></div>
-          <div class="manual-selected-header">
-            <strong>Selected residues</strong>
-            <span id="manual-epitope-selection-count" class="help-text">0 selected</span>
-          </div>
-          <div id="manual-epitope-selected" class="manual-selected-chips"></div>
-        </div>
-        <div class="bulk-modal-actions">
-          <button type="button" id="manual-epitope-cancel" class="ghost">Cancel</button>
-          <button type="button" id="manual-epitope-confirm">Add epitope</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="pipeline-rerun-modal" class="modal" hidden>
-      <div class="modal-backdrop" data-close="pipeline-rerun"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3 id="pipeline-rerun-title">Select epitopes (LLM)</h3>
-          <button type="button" id="pipeline-rerun-close" class="ghost">Close</button>
+          <h3 id="epitope-select-title">Select epitopes</h3>
+          <button type="button" id="epitope-select-close" class="ghost">Close</button>
         </div>
         <div class="bulk-modal-body">
-          <p class="help-text">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
-          <div class="bulk-control-row">
-            <label>Target epitopes
-              <input type="number" id="pipeline-rerun-expected" value="10" min="1" max="32">
-            </label>
-            <label>Decide attempts
-              <input type="number" id="pipeline-rerun-attempts" value="3" min="1" max="5">
-            </label>
-            <label class="bulk-modal-inline-label">
-              <input type="checkbox" id="pipeline-rerun-force" checked>
-              Force re-init
-            </label>
+          <div id="epitope-select-tabs" class="bulk-example-tabs" data-example-tabs="epitope-select">
+            <div class="bulk-example-tablist" role="tablist" aria-label="Epitope selection mode">
+              <button type="button" class="bulk-example-tab is-active" data-example-tab="llm" aria-selected="true">Select epitopes (LLM)</button>
+              <button type="button" class="bulk-example-tab" data-example-tab="manual" aria-selected="false">Select epitope (manual)</button>
+            </div>
+
+            <section class="bulk-example-panel is-active" data-example-panel="llm">
+              <h4 id="pipeline-rerun-title">Select epitopes (LLM)</h4>
+              <p class="help-text">This will run init-target, decide-scope, and prep-target for the selected antigen.</p>
+              <div class="bulk-control-row">
+                <label>Target epitopes
+                  <input type="number" id="pipeline-rerun-expected" value="10" min="1" max="32">
+                </label>
+                <label>Decide attempts
+                  <input type="number" id="pipeline-rerun-attempts" value="3" min="1" max="5">
+                </label>
+                <label class="bulk-modal-inline-label">
+                  <input type="checkbox" id="pipeline-rerun-force" checked>
+                  Force re-init
+                </label>
+              </div>
+              <div class="form-row bulk-modal-form">
+                <label>Epitope guidance (optional)
+                  <textarea id="pipeline-rerun-prompt" rows="2" placeholder="Optional guidance forwarded to decide-scope."></textarea>
+                </label>
+              </div>
+              <p class="help-text">
+                Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
+                <code>target.yaml</code> and <code>prep/</code> are snapshotted to
+                <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
+              </p>
+              <div class="bulk-modal-actions">
+                <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
+                <button type="button" id="pipeline-rerun-confirm">Select epitopes (LLM)</button>
+              </div>
+            </section>
+
+            <section class="bulk-example-panel" data-example-panel="manual">
+              <h4 id="manual-epitope-title">Select epitope (manual)</h4>
+              <div class="bulk-modal-body manual-epitope-body">
+                <div id="manual-epitope-unavailable" class="empty-note" hidden>
+                  <div id="manual-epitope-unavailable-message">Target is not initialized yet. Run Select epitopes (LLM) first.</div>
+                  <button type="button" id="manual-epitope-switch-llm" class="ghost">Switch to Select epitopes (LLM)</button>
+                </div>
+                <div class="bulk-control-row">
+                  <label>Epitope name (optional)
+                    <input type="text" id="manual-epitope-name" placeholder="manual_epitope_1" maxlength="160">
+                  </label>
+                  <label class="bulk-modal-inline-label manual-epitope-toggle">
+                    <input type="checkbox" id="manual-epitope-allowed-only" checked>
+                    <span>Show allowed residues only</span>
+                  </label>
+                </div>
+                <p id="manual-epitope-allowed-range" class="help-text">Allowed range: loading residue options…</p>
+                <div id="manual-epitope-chain-tabs" class="manual-chain-tabs" role="tablist" aria-label="Chain selector"></div>
+                <div id="manual-epitope-sequence-grid" class="manual-sequence-grid" aria-live="polite"></div>
+                <div class="manual-selected-header">
+                  <strong>Selected residues</strong>
+                  <span id="manual-epitope-selection-count" class="help-text">0 selected</span>
+                </div>
+                <div id="manual-epitope-selected" class="manual-selected-chips"></div>
+              </div>
+              <div class="bulk-modal-actions">
+                <button type="button" id="manual-epitope-cancel" class="ghost">Cancel</button>
+                <button type="button" id="manual-epitope-confirm">Add epitope</button>
+              </div>
+            </section>
           </div>
-          <div class="form-row bulk-modal-form">
-            <label>Epitope guidance (optional)
-              <textarea id="pipeline-rerun-prompt" rows="2" placeholder="Optional guidance forwarded to decide-scope."></textarea>
-            </label>
-          </div>
-          <p class="help-text">
-            Force re-init regenerates epitopes and prep outputs and replaces configs. Previous
-            <code>target.yaml</code> and <code>prep/</code> are snapshotted to
-            <code>targets/&lt;PDB&gt;/history/&lt;timestamp&gt;/</code>.
-          </p>
-        </div>
-        <div class="bulk-modal-actions">
-          <button type="button" id="pipeline-rerun-cancel" class="ghost">Cancel</button>
-          <button type="button" id="pipeline-rerun-confirm">Select epitopes (LLM)</button>
         </div>
       </div>
     </div>

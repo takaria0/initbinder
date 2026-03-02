@@ -37,6 +37,8 @@ const state = {
   manualEpitopeContext: null,
   manualEpitopeSelected: new Set(),
   manualEpitopeOptions: null,
+  manualEpitopeUnavailableMessage: null,
+  manualEpitopeLoading: false,
   uiSettings: null,
   guiReadme: null,
   llmConversations: [],
@@ -270,19 +272,26 @@ const el = {
   boltzRunBody: document.querySelector('#boltz-run-body'),
   boltzRunEngine: document.querySelector('#bulk-run-engine'),
   boltzRunClose: document.querySelector('#boltz-run-close'),
-  manualEpitopeModal: document.querySelector('#manual-epitope-modal'),
-  manualEpitopeClose: document.querySelector('#manual-epitope-close'),
+  epitopeSelectModal: document.querySelector('#epitope-select-modal'),
+  epitopeSelectTabs: document.querySelector('#epitope-select-tabs'),
+  epitopeSelectTitle: document.querySelector('#epitope-select-title'),
+  epitopeSelectClose: document.querySelector('#epitope-select-close'),
+  manualEpitopeModal: document.querySelector('#epitope-select-modal'),
+  manualEpitopeClose: document.querySelector('#epitope-select-close'),
   manualEpitopeCancel: document.querySelector('#manual-epitope-cancel'),
   manualEpitopeConfirm: document.querySelector('#manual-epitope-confirm'),
   manualEpitopeTitle: document.querySelector('#manual-epitope-title'),
   manualEpitopeName: document.querySelector('#manual-epitope-name'),
   manualEpitopeAllowedOnly: document.querySelector('#manual-epitope-allowed-only'),
   manualEpitopeAllowedRange: document.querySelector('#manual-epitope-allowed-range'),
+  manualEpitopeUnavailable: document.querySelector('#manual-epitope-unavailable'),
+  manualEpitopeUnavailableMessage: document.querySelector('#manual-epitope-unavailable-message'),
+  manualEpitopeSwitchLlm: document.querySelector('#manual-epitope-switch-llm'),
   manualEpitopeChainTabs: document.querySelector('#manual-epitope-chain-tabs'),
   manualEpitopeSequenceGrid: document.querySelector('#manual-epitope-sequence-grid'),
   manualEpitopeSelected: document.querySelector('#manual-epitope-selected'),
   manualEpitopeSelectionCount: document.querySelector('#manual-epitope-selection-count'),
-  pipelineRerunModal: document.querySelector('#pipeline-rerun-modal'),
+  pipelineRerunModal: document.querySelector('#epitope-select-modal'),
   pipelineRerunTitle: document.querySelector('#pipeline-rerun-title'),
   pipelineRerunExpected: document.querySelector('#pipeline-rerun-expected'),
   pipelineRerunAttempts: document.querySelector('#pipeline-rerun-attempts'),
@@ -290,7 +299,7 @@ const el = {
   pipelineRerunPrompt: document.querySelector('#pipeline-rerun-prompt'),
   pipelineRerunConfirm: document.querySelector('#pipeline-rerun-confirm'),
   pipelineRerunCancel: document.querySelector('#pipeline-rerun-cancel'),
-  pipelineRerunClose: document.querySelector('#pipeline-rerun-close'),
+  pipelineRerunClose: document.querySelector('#epitope-select-close'),
 };
 
 function formatRangeLabel(value) {
@@ -681,21 +690,18 @@ function getVisibleBoltzTargets(targets = null) {
 }
 
 function getActiveTargetPdbIds() {
-  const byCatalogRows = getVisibleBulkRows(state.bulkPreviewRows || []);
-  const byCatalogIds = Array.from(new Set(
-    byCatalogRows
-      .map((row) => normalizePdbId(row?.resolved_pdb_id || row?.pdb_id))
+  const visibleTargets = getVisibleBoltzTargets(state.boltzConfigs || []);
+  const targetIds = Array.from(new Set(
+    visibleTargets
+      .map((target) => normalizePdbId(target?.pdb_id))
       .filter(Boolean),
   ));
-  const picked = getLlmPickedPdbSet();
-  if (picked.size) {
-    return byCatalogIds.filter((id) => picked.has(id));
-  }
-  if (byCatalogIds.length) return byCatalogIds;
-  const byCatalogTargets = getVisibleBoltzTargets(state.boltzConfigs || []);
+  if (targetIds.length) return targetIds;
+
+  const visibleRows = getVisibleBulkRows(state.bulkPreviewRows || []);
   return Array.from(new Set(
-    byCatalogTargets
-      .map((target) => normalizePdbId(target?.pdb_id))
+    visibleRows
+      .map((row) => normalizePdbId(row?.resolved_pdb_id || row?.pdb_id))
       .filter(Boolean),
   ));
 }
@@ -1419,10 +1425,26 @@ function renderManualSequenceGrid() {
 
 function renderManualEpitopeEditor() {
   const options = getManualEpitopeOptions();
+  const unavailableMessage = String(state.manualEpitopeUnavailableMessage || '').trim();
+  if (el.manualEpitopeUnavailable) {
+    el.manualEpitopeUnavailable.hidden = !unavailableMessage;
+  }
+  if (el.manualEpitopeUnavailableMessage && unavailableMessage) {
+    el.manualEpitopeUnavailableMessage.textContent = unavailableMessage;
+  }
+  const manualDisabled = Boolean(unavailableMessage) || Boolean(state.manualEpitopeLoading);
+  if (el.manualEpitopeName) el.manualEpitopeName.disabled = manualDisabled;
+  if (el.manualEpitopeAllowedOnly) el.manualEpitopeAllowedOnly.disabled = manualDisabled;
+  if (el.manualEpitopeConfirm) {
+    const hasSelection = getManualSelectedTokens().length > 0;
+    el.manualEpitopeConfirm.disabled = manualDisabled || !hasSelection;
+  }
   if (el.manualEpitopeAllowedRange) {
-    const text = options?.allowed_epitope_range
-      ? `Allowed range: ${options.allowed_epitope_range}`
-      : 'Allowed range: not set (all residues selectable)';
+    const text = unavailableMessage
+      ? 'Allowed range: unavailable until target initialization completes.'
+      : (options?.allowed_epitope_range
+        ? `Allowed range: ${options.allowed_epitope_range}`
+        : 'Allowed range: not set (all residues selectable)');
     el.manualEpitopeAllowedRange.textContent = text;
   }
   renderManualChainTabs();
@@ -1436,7 +1458,10 @@ async function fetchManualEpitopeOptions(pdbId) {
   const res = await fetch(`/api/bulk/boltzgen/epitopes/options?${params.toString()}`);
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.detail || `Failed to load epitope options (${res.status})`);
+    const err = new Error(detail.detail || `Failed to load epitope options (${res.status})`);
+    err.status = res.status;
+    err.detail = detail?.detail || null;
+    throw err;
   }
   return res.json();
 }
@@ -1459,37 +1484,154 @@ function toggleManualResidueToken(rawToken) {
   renderManualEpitopeEditor();
 }
 
-async function openManualEpitopeModal(pdbId, triggerBtn = null) {
-  const normalizedPdb = String(pdbId || '').trim().toUpperCase();
-  if (!normalizedPdb) {
-    showAlert('Missing PDB ID for manual hotspot edit.');
+function getEpitopeSelectModal() {
+  return el.epitopeSelectModal || el.pipelineRerunModal || el.manualEpitopeModal || null;
+}
+
+function activateExampleTab(container, key) {
+  if (!container || !key) return;
+  if (typeof container.__activateExampleTab === 'function') {
+    container.__activateExampleTab(key);
     return;
   }
+  const tabs = Array.from(container.querySelectorAll('[data-example-tab]'));
+  const panels = Array.from(container.querySelectorAll('[data-example-panel]'));
+  tabs.forEach((btn) => {
+    const active = btn.dataset.exampleTab === key;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  panels.forEach((panel) => {
+    panel.classList.toggle('is-active', panel.dataset.examplePanel === key);
+  });
+}
+
+function getActiveExampleTab(container) {
+  if (!container) return null;
+  const active = container.querySelector('[data-example-tab].is-active');
+  if (active?.dataset?.exampleTab) return active.dataset.exampleTab;
+  return container.dataset.activeExampleTab || null;
+}
+
+function activateEpitopeSelectionTab(tabKey) {
+  activateExampleTab(el.epitopeSelectTabs, tabKey);
+}
+
+function setManualTabEnabled(enabled = true) {
+  if (!el.epitopeSelectTabs) return;
+  const manualBtn = el.epitopeSelectTabs.querySelector('[data-example-tab="manual"]');
+  if (!manualBtn) return;
+  manualBtn.disabled = !enabled;
+  if (!enabled && getActiveExampleTab(el.epitopeSelectTabs) === 'manual') {
+    activateEpitopeSelectionTab('llm');
+  }
+}
+
+function resetManualEpitopeState(pdbId) {
+  state.manualEpitopeContext = { pdbId, activeChain: null };
+  state.manualEpitopeSelected = new Set();
+  state.manualEpitopeOptions = null;
+  state.manualEpitopeUnavailableMessage = null;
+  state.manualEpitopeLoading = false;
+  if (el.manualEpitopeName) el.manualEpitopeName.value = '';
+  if (el.manualEpitopeAllowedOnly) el.manualEpitopeAllowedOnly.checked = true;
+  if (el.manualEpitopeAllowedRange) el.manualEpitopeAllowedRange.textContent = 'Loading residue options...';
+}
+
+async function ensureManualEpitopeOptionsLoaded() {
+  const ctx = getManualEpitopeContext();
+  const pdbId = String(ctx?.pdbId || '').trim().toUpperCase();
+  if (!pdbId) return;
+  if (state.manualEpitopeLoading) return;
+  const loadedForCurrent = String(state.manualEpitopeOptions?.pdb_id || '').trim().toUpperCase() === pdbId;
+  if (loadedForCurrent || state.manualEpitopeUnavailableMessage) {
+    renderManualEpitopeEditor();
+    return;
+  }
+
+  state.manualEpitopeLoading = true;
+  state.manualEpitopeUnavailableMessage = null;
+  if (el.manualEpitopeAllowedRange) el.manualEpitopeAllowedRange.textContent = 'Loading residue options...';
+  renderManualEpitopeEditor();
+  try {
+    const payload = await fetchManualEpitopeOptions(pdbId);
+    state.manualEpitopeOptions = payload;
+    state.manualEpitopeUnavailableMessage = null;
+    const chains = Array.isArray(payload?.chains) ? payload.chains : [];
+    ctx.activeChain = chains[0]?.chain_id || null;
+  } catch (err) {
+    state.manualEpitopeOptions = {
+      pdb_id: pdbId,
+      chains: [],
+      allowed_epitope_range: null,
+    };
+    if (Number(err?.status) === 404) {
+      state.manualEpitopeUnavailableMessage = `Target is not initialized yet for ${pdbId}. Run Select epitopes (LLM) first.`;
+    } else {
+      state.manualEpitopeUnavailableMessage = null;
+      showAlert(err.message || 'Failed to open manual epitope editor.');
+    }
+  } finally {
+    state.manualEpitopeLoading = false;
+    renderManualEpitopeEditor();
+  }
+}
+
+async function openEpitopeSelectionModal({ pdbId, antigenUrl = null, defaultTab = 'llm', triggerBtn = null } = {}) {
+  const normalizedPdb = String(pdbId || '').trim().toUpperCase();
+  if (!normalizedPdb) {
+    showAlert('Missing PDB ID for epitope selection.');
+    return;
+  }
+  const modal = getEpitopeSelectModal();
+  if (!modal) return;
   if (triggerBtn) triggerBtn.disabled = true;
   try {
-    state.manualEpitopeContext = { pdbId: normalizedPdb, activeChain: null };
-    state.manualEpitopeSelected = new Set();
-    state.manualEpitopeOptions = null;
-    if (el.manualEpitopeTitle) {
-      el.manualEpitopeTitle.textContent = `Manual hotspot editor · ${normalizedPdb}`;
+    modal.dataset.pdbId = normalizedPdb;
+    delete modal.dataset.bulkIds;
+    if (antigenUrl) {
+      modal.dataset.antigenUrl = antigenUrl;
+    } else {
+      delete modal.dataset.antigenUrl;
     }
-    if (el.manualEpitopeName) el.manualEpitopeName.value = '';
-    if (el.manualEpitopeAllowedOnly) el.manualEpitopeAllowedOnly.checked = true;
-    if (el.manualEpitopeAllowedRange) el.manualEpitopeAllowedRange.textContent = 'Loading residue options...';
+    if (el.epitopeSelectTitle) {
+      el.epitopeSelectTitle.textContent = `Select epitopes · ${normalizedPdb}`;
+    }
+    if (el.pipelineRerunTitle) {
+      el.pipelineRerunTitle.textContent = `Select epitopes (LLM) · ${normalizedPdb}`;
+    }
+    if (el.manualEpitopeTitle) {
+      el.manualEpitopeTitle.textContent = `Select epitope (manual) · ${normalizedPdb}`;
+    }
+    if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
+    if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
+    if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
+    if (el.pipelineRerunPrompt) el.pipelineRerunPrompt.value = '';
+
+    resetManualEpitopeState(normalizedPdb);
+    setManualTabEnabled(true);
     renderManualEpitopeEditor();
-    toggleModal(el.manualEpitopeModal, true);
-    const payload = await fetchManualEpitopeOptions(normalizedPdb);
-    state.manualEpitopeOptions = payload;
-    const chains = Array.isArray(payload?.chains) ? payload.chains : [];
-    const ctx = getManualEpitopeContext();
-    ctx.activeChain = chains[0]?.chain_id || null;
-    renderManualEpitopeEditor();
+    toggleModal(modal, true);
+
+    const tab = defaultTab === 'manual' ? 'manual' : 'llm';
+    activateEpitopeSelectionTab(tab);
+    if (tab === 'manual') {
+      await ensureManualEpitopeOptionsLoaded();
+    }
   } catch (err) {
-    toggleModal(el.manualEpitopeModal, false);
-    showAlert(err.message || 'Failed to open manual hotspot editor.');
+    toggleModal(modal, false);
+    showAlert(err.message || 'Failed to open epitope selector.');
   } finally {
     if (triggerBtn) triggerBtn.disabled = false;
   }
+}
+
+async function openManualEpitopeModal(pdbId, triggerBtn = null) {
+  await openEpitopeSelectionModal({
+    pdbId,
+    defaultTab: 'manual',
+    triggerBtn,
+  });
 }
 
 async function submitManualEpitope(triggerBtn = null) {
@@ -1499,6 +1641,10 @@ async function submitManualEpitope(triggerBtn = null) {
     showAlert('Missing PDB ID for manual epitope add.');
     return;
   }
+  if (state.manualEpitopeUnavailableMessage) {
+    showAlert(state.manualEpitopeUnavailableMessage);
+    return;
+  }
   const tokens = getManualSelectedTokens();
   if (!tokens.length) {
     showAlert('Select at least one residue hotspot.');
@@ -1506,7 +1652,7 @@ async function submitManualEpitope(triggerBtn = null) {
   }
   const designCount = getBoltzDesignCount();
   if (!designCount) {
-    showAlert('Enter a valid Epitope design num before adding manual hotspots.');
+    showAlert('Enter a valid Epitope design num before adding manual epitopes.');
     return;
   }
   const epitopeName = String(el.manualEpitopeName?.value || '').trim() || null;
@@ -2637,35 +2783,31 @@ async function launchBoltzPymol(pdbId, epitopeName = null, triggerBtn = null) {
 }
 
 function openPipelineRerunModal(pdbId, antigenUrl = null) {
-  if (!el.pipelineRerunModal) return;
-  if (!pdbId) {
-    showAlert('Missing PDB ID for pipeline rerun.');
-    return;
-  }
-  el.pipelineRerunModal.dataset.pdbId = pdbId;
-  if (antigenUrl) {
-    el.pipelineRerunModal.dataset.antigenUrl = antigenUrl;
-  } else {
-    delete el.pipelineRerunModal.dataset.antigenUrl;
-  }
-  if (el.pipelineRerunTitle) el.pipelineRerunTitle.textContent = `Select epitopes (LLM) · ${pdbId}`;
-  if (el.pipelineRerunExpected) el.pipelineRerunExpected.value = '10';
-  if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
-  if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
-  if (el.pipelineRerunPrompt) el.pipelineRerunPrompt.value = '';
-  toggleModal(el.pipelineRerunModal, true);
+  openEpitopeSelectionModal({
+    pdbId,
+    antigenUrl,
+    defaultTab: 'llm',
+  });
 }
 
 function openPipelineRerunModalBulk(targets = []) {
-  if (!el.pipelineRerunModal) return;
+  const modal = getEpitopeSelectModal();
+  if (!modal) return;
   const ids = targets.map((t) => (t?.pdb_id || '').trim().toUpperCase()).filter(Boolean);
   if (!ids.length) {
     showAlert('No targets selected for pipeline rerun.');
     return;
   }
-  el.pipelineRerunModal.dataset.bulkIds = ids.join(',');
-  el.pipelineRerunModal.dataset.pdbId = '';
-  el.pipelineRerunModal.dataset.antigenUrl = '';
+  modal.dataset.bulkIds = ids.join(',');
+  modal.dataset.pdbId = '';
+  modal.dataset.antigenUrl = '';
+  setManualTabEnabled(false);
+  resetManualEpitopeState('');
+  state.manualEpitopeUnavailableMessage = 'Manual selection is only available for a single target.';
+  renderManualEpitopeEditor();
+  if (el.epitopeSelectTitle) {
+    el.epitopeSelectTitle.textContent = `Select epitopes · ${ids.length} targets`;
+  }
   if (el.pipelineRerunTitle) {
     el.pipelineRerunTitle.textContent = `Select epitopes (LLM) · ${ids.length} targets`;
   }
@@ -2673,7 +2815,8 @@ function openPipelineRerunModalBulk(targets = []) {
   if (el.pipelineRerunAttempts) el.pipelineRerunAttempts.value = '3';
   if (el.pipelineRerunForce) el.pipelineRerunForce.checked = true;
   if (el.pipelineRerunPrompt) el.pipelineRerunPrompt.value = '';
-  toggleModal(el.pipelineRerunModal, true);
+  activateEpitopeSelectionTab('llm');
+  toggleModal(modal, true);
 }
 
 function findBulkRowForPdb(pdbId) {
@@ -3233,22 +3376,14 @@ function renderBoltzConfigs() {
     manualBtn.dataset.scope = 'target';
     cmdCell.appendChild(manualBtn);
 
-    const rerunBtn = document.createElement('button');
-    rerunBtn.type = 'button';
-    rerunBtn.textContent = 'Select epitopes (LLM)';
-    rerunBtn.className = 'ghost';
-    rerunBtn.dataset.action = 'rerun-pipeline';
-    rerunBtn.dataset.pdbId = target.pdb_id || '';
-    if (target.antigen_url) rerunBtn.dataset.antigenUrl = target.antigen_url;
-    cmdCell.appendChild(rerunBtn);
-
-    const hotspotBtn = document.createElement('button');
-    hotspotBtn.type = 'button';
-    hotspotBtn.textContent = 'Manual hotspot';
-    hotspotBtn.className = 'ghost';
-    hotspotBtn.dataset.action = 'manual-hotspot';
-    hotspotBtn.dataset.pdbId = target.pdb_id || '';
-    cmdCell.appendChild(hotspotBtn);
+    const selectEpBtn = document.createElement('button');
+    selectEpBtn.type = 'button';
+    selectEpBtn.textContent = 'Select epitopes';
+    selectEpBtn.className = 'ghost';
+    selectEpBtn.dataset.action = 'select-epitopes';
+    selectEpBtn.dataset.pdbId = target.pdb_id || '';
+    if (target.antigen_url) selectEpBtn.dataset.antigenUrl = target.antigen_url;
+    cmdCell.appendChild(selectEpBtn);
 
     const pymolBtn = document.createElement('button');
     pymolBtn.type = 'button';
@@ -4953,10 +5088,13 @@ function handleBoltzTableClick(event) {
     launchBoltzPymol(pdbId, null, btn);
   } else if (action === 'pymol-epitope') {
     launchBoltzPymol(pdbId, btn.dataset.epitopeName || null, btn);
-  } else if (action === 'rerun-pipeline') {
-    openPipelineRerunModal(pdbId, btn.dataset.antigenUrl || null);
-  } else if (action === 'manual-hotspot') {
-    openManualEpitopeModal(pdbId, btn);
+  } else if (action === 'select-epitopes') {
+    openEpitopeSelectionModal({
+      pdbId,
+      antigenUrl: btn.dataset.antigenUrl || null,
+      defaultTab: 'llm',
+      triggerBtn: btn,
+    });
   } else if (action === 'remove-epitope') {
     removeManualEpitope(
       pdbId,
@@ -6153,6 +6291,7 @@ function setupExampleTabs() {
     if (!tabs.length || !panels.length) return;
 
     const activate = (key) => {
+      if (!key) return;
       tabs.forEach((btn) => {
         const active = btn.dataset.exampleTab === key;
         btn.classList.toggle('is-active', active);
@@ -6161,7 +6300,10 @@ function setupExampleTabs() {
       panels.forEach((panel) => {
         panel.classList.toggle('is-active', panel.dataset.examplePanel === key);
       });
+      container.dataset.activeExampleTab = key;
+      container.dispatchEvent(new CustomEvent('exampletabchange', { detail: { key } }));
     };
+    container.__activateExampleTab = activate;
 
     tabs.forEach((btn) => {
       btn.addEventListener('click', () => activate(btn.dataset.exampleTab));
@@ -6188,6 +6330,17 @@ function init() {
   loadCommandDefaults();
   loadBulkUiSettings({ autoLoadInput: true });
   setupExampleTabs();
+  if (el.epitopeSelectTabs) {
+    el.epitopeSelectTabs.addEventListener('exampletabchange', (event) => {
+      const key = String(event?.detail?.key || '').trim().toLowerCase();
+      if (key === 'manual') {
+        ensureManualEpitopeOptionsLoaded();
+      }
+    });
+  }
+  if (el.manualEpitopeSwitchLlm) {
+    el.manualEpitopeSwitchLlm.addEventListener('click', () => activateEpitopeSelectionTab('llm'));
+  }
   if (el.llmConversationSelect) {
     el.llmConversationSelect.addEventListener('change', () => {
       const id = String(el.llmConversationSelect.value || '').trim();
@@ -6451,11 +6604,10 @@ function init() {
     if (closeTarget === 'boltz-config') toggleModal(el.boltzConfigModal, false);
     if (closeTarget === 'boltz-log') toggleModal(el.boltzLogModal, false);
     if (closeTarget === 'boltz-run') toggleModal(el.boltzRunModal, false);
-    if (closeTarget === 'manual-epitope') toggleModal(el.manualEpitopeModal, false);
+    if (closeTarget === 'epitope-select') toggleModal(getEpitopeSelectModal(), false);
     if (closeTarget === 'boltz-rerun-range') toggleModal(el.boltzRerunRangeModal, false);
     if (closeTarget === 'boltz-run-range') toggleModal(el.boltzRunRangeModal, false);
     if (closeTarget === 'boltz-regenerate-range') toggleModal(el.boltzRegenerateRangeModal, false);
-    if (closeTarget === 'pipeline-rerun') toggleModal(el.pipelineRerunModal, false);
     if (closeTarget === 'bulk-algorithm') toggleModal(el.bulkAlgorithmModal, false);
     if (closeTarget === 'bulk-readme') toggleModal(el.bulkReadmeModal, false);
     if (closeTarget === 'bulk-settings') {

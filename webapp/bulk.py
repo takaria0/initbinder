@@ -2542,13 +2542,18 @@ def _target_dir_for_pdb(pdb_id: str) -> Path:
     return (targets_dir / str(pdb_id or "").strip().upper()).resolve()
 
 
+def _target_not_initialized_message(pdb_id: str) -> str:
+    upper = str(pdb_id or "").strip().upper()
+    return f"Target is not initialized for {upper}. Run Select epitopes (LLM) first."
+
+
 def _load_target_yaml_strict(pdb_id: str) -> Tuple[Path, Path, dict]:
     target_dir = _target_dir_for_pdb(pdb_id)
     target_yaml = target_dir / "target.yaml"
     if not target_dir.exists():
-        raise FileNotFoundError(f"Target directory not found for {pdb_id}: {target_dir}")
+        raise FileNotFoundError(_target_not_initialized_message(pdb_id))
     if not target_yaml.exists():
-        raise FileNotFoundError(f"target.yaml not found for {pdb_id}: {target_yaml}")
+        raise FileNotFoundError(_target_not_initialized_message(pdb_id))
     try:
         data = yaml.safe_load(target_yaml.read_text()) or {}
     except Exception as exc:

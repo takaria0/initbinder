@@ -65,8 +65,9 @@ Practical next steps:
 1) Run `Select epitopes (LLM)` and then `Rebuild configs`.
    - `Rebuild configs` updates only BoltzGen config files for active targets (LLM-picked first; otherwise currently visible rows).
    - Binder stats/CSV are not regenerated here.
-2) Add manual hotspot epitopes when needed:
-   - open a target row and click `Manual hotspot`,
+2) Add manual epitopes when needed:
+   - open a target row and click `Select epitopes`,
+   - switch to the `Select epitope (manual)` tab,
    - click residues in the sequence editor,
    - submit to append a new epitope and auto-regenerate BoltzGen configs.
 3) Validate epitopes using `Config` and `PyMOL`.

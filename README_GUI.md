@@ -74,9 +74,10 @@ Action:
   - `Crop radius`
 - Refresh epitope proposals when needed:
   - `Select epitopes (LLM)` for row ranges.
-  - Per-target `Select epitopes (LLM)` in table commands.
-- Add manual hotspot epitopes when needed:
-  - click per-target `Manual hotspot`,
+  - Per-target `Select epitopes` in table commands.
+- Add manual epitopes when needed:
+  - click per-target `Select epitopes`,
+  - switch to the `Select epitope (manual)` tab,
   - choose chain tabs and click residue buttons,
   - optionally name the epitope, then click `Add epitope`.
 - Click `Rebuild configs` after epitope updates or design-count changes.

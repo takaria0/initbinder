@@ -84,6 +84,21 @@ def test_get_boltzgen_epitope_options_returns_allowed_and_occupied_flags(
     assert residues["A:106"].allowed is False
 
 
+def test_get_boltzgen_epitope_options_missing_target_has_actionable_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_config(monkeypatch, tmp_path)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        bulk_mod.get_boltzgen_epitope_options("1abc")
+
+    message = str(excinfo.value)
+    assert "Target is not initialized for 1ABC." in message
+    assert "Run Select epitopes (LLM) first." in message
+    assert str(tmp_path) not in message
+
+
 def test_add_manual_boltzgen_epitope_writes_yaml_metadata_and_prep_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

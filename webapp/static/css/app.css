@@ -2179,6 +2179,13 @@ body.modal-open {
   gap: 12px;
 }
 
+#manual-epitope-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .manual-epitope-toggle {
   margin-left: auto;
   align-self: flex-end;
