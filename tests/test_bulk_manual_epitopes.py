@@ -121,6 +121,7 @@ def test_add_manual_boltzgen_epitope_writes_yaml_metadata_and_prep_files(
     assert len(target_data["epitopes"]) == 1
     added = target_data["epitopes"][0]
     assert added["name"] == "manual_epitope_1"
+    assert str(added.get("epitope_uid") or "").startswith("epu_")
     assert added["hotspots"] == ["A:103", "A:104"]
     assert added["mask_residues"] == ["A:103", "A:104"]
     assert added["residues"] == ["A:103-104"]
@@ -133,11 +134,13 @@ def test_add_manual_boltzgen_epitope_writes_yaml_metadata_and_prep_files(
     metadata = json.loads((prep_dir / "epitopes_metadata.json").read_text(encoding="utf-8"))
     assert len(metadata["epitopes"]) == 1
     assert metadata["epitopes"][0]["name"] == "manual_epitope_1"
+    assert metadata["epitopes"][0].get("epitope_uid") == added.get("epitope_uid")
     assert metadata["epitopes"][0]["hotspots"] == ["A:103", "A:104"]
     assert regen_calls == [(["1ABC"], 120, 18.0)]
 
     assert response.action == "added"
     assert response.epitope_name == "manual_epitope_1"
+    assert response.epitope_uid == added.get("epitope_uid")
     assert response.configs_written == 3
 
 
@@ -153,6 +156,7 @@ def test_remove_manual_boltzgen_epitope_soft_deactivates_and_preserves_files(
             epitopes=[
                 {
                     "name": "manual_epitope_1",
+                    "epitope_uid": "epu_manual_1",
                     "display_name": "manual epitope 1",
                     "residues": ["A:103-104"],
                     "hotspots": ["A:103", "A:104"],
@@ -185,6 +189,7 @@ def test_remove_manual_boltzgen_epitope_soft_deactivates_and_preserves_files(
                 "epitopes": [
                     {
                         "name": "manual_epitope_1",
+                        "epitope_uid": "epu_manual_1",
                         "files": {
                             "mask_json": "epitope_manual_epitope_1.json",
                             "hotspots_json": "epitope_manual_epitope_1_hotspotsA.json",
@@ -211,7 +216,7 @@ def test_remove_manual_boltzgen_epitope_soft_deactivates_and_preserves_files(
     response = bulk_mod.remove_manual_boltzgen_epitope(
         BoltzgenEpitopeRemoveRequest(
             pdb_id="1ABC",
-            epitope_name="manual_epitope_1",
+            epitope_uid="epu_manual_1",
             design_count=90,
             boltzgen_crop_radius=16,
         )
@@ -241,6 +246,7 @@ def test_remove_manual_boltzgen_epitope_soft_deactivates_and_preserves_files(
 
     assert response.action == "deactivated"
     assert response.epitope_name == "manual_epitope_1"
+    assert response.epitope_uid == "epu_manual_1"
 
 
 def test_remove_manual_boltzgen_epitope_allows_deactivate_when_binders_exist(

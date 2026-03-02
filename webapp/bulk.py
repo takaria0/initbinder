@@ -18,6 +18,7 @@ import sys
 import subprocess
 import importlib.util
 import threading
+import uuid
 from functools import lru_cache
 from difflib import SequenceMatcher
 from collections import Counter, defaultdict
@@ -159,6 +160,70 @@ def _mark_epitope_inactive(
         entry["archived_at"] = timestamp
     if not _normalize(entry.get("archived_reason")):
         entry["archived_reason"] = reason
+
+
+def _new_epitope_uid() -> str:
+    return f"epu_{uuid.uuid4().hex}"
+
+
+def _ensure_epitope_uids(epitopes: object) -> bool:
+    if not isinstance(epitopes, list):
+        return False
+    changed = False
+    seen: set[str] = set()
+    for entry in epitopes:
+        if not isinstance(entry, dict):
+            continue
+        raw_uid = _normalize(entry.get("epitope_uid"))
+        if raw_uid and raw_uid not in seen:
+            seen.add(raw_uid)
+            continue
+        uid = _new_epitope_uid()
+        while uid in seen:
+            uid = _new_epitope_uid()
+        entry["epitope_uid"] = uid
+        seen.add(uid)
+        changed = True
+    return changed
+
+
+def _sync_metadata_epitope_uids(meta_epitopes: object, target_epitopes: object) -> bool:
+    if not isinstance(meta_epitopes, list) or not isinstance(target_epitopes, list):
+        return False
+    changed = False
+    target_by_name: Dict[str, str] = {}
+    for entry in target_epitopes:
+        if not isinstance(entry, dict):
+            continue
+        uid = _normalize(entry.get("epitope_uid"))
+        if not uid:
+            continue
+        for key in ("name", "display_name", "epitope_name", "epitope_id"):
+            val = _normalize(entry.get(key))
+            if val and val.lower() not in target_by_name:
+                target_by_name[val.lower()] = uid
+    for idx, entry in enumerate(meta_epitopes):
+        if not isinstance(entry, dict):
+            continue
+        if _normalize(entry.get("epitope_uid")):
+            continue
+        uid_hint = None
+        if idx < len(target_epitopes):
+            target_entry = target_epitopes[idx]
+            if isinstance(target_entry, dict):
+                uid_hint = _normalize(target_entry.get("epitope_uid"))
+        if not uid_hint:
+            for key in ("name", "display_name", "epitope_name", "epitope_id"):
+                val = _normalize(entry.get(key))
+                if not val:
+                    continue
+                uid_hint = target_by_name.get(val.lower())
+                if uid_hint:
+                    break
+        if uid_hint:
+            entry["epitope_uid"] = uid_hint
+            changed = True
+    return changed
 
 
 def _clean_pdb_id(value: Optional[str]) -> Optional[str]:
@@ -937,6 +1002,7 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
         "name": name,
         "display_name": display_name,
         "epitope_id": _normalize(ep.get("epitope_id")),
+        "epitope_uid": _normalize(ep.get("epitope_uid")),
         "active": _is_epitope_active(ep),
         "archived_at": _normalize(ep.get("archived_at")),
         "archived_reason": _normalize(ep.get("archived_reason")),
@@ -951,13 +1017,34 @@ def _load_epitopes_for_target(pdb_id: str, *, include_inactive: bool = False) ->
     target_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper()
     prep_dir = target_dir / "prep"
     meta_path = prep_dir / "epitopes_metadata.json"
+    target_uid_by_name: Dict[str, str] = {}
+    target_uid_by_pos: Dict[int, str] = {}
+    target_yaml_path = target_dir / "target.yaml"
+    if target_yaml_path.exists():
+        try:
+            target_data = yaml.safe_load(target_yaml_path.read_text()) or {}
+        except Exception:
+            target_data = {}
+        if isinstance(target_data, dict):
+            target_eps = target_data.get("epitopes")
+            if isinstance(target_eps, list):
+                for raw_idx, entry in enumerate(target_eps, start=1):
+                    if not isinstance(entry, dict):
+                        continue
+                    uid = _normalize(entry.get("epitope_uid"))
+                    if not uid:
+                        continue
+                    target_uid_by_pos[raw_idx] = uid
+                    for key in ("name", "display_name", "epitope_name", "epitope_id"):
+                        val = _normalize(entry.get(key))
+                        if val and val.lower() not in target_uid_by_name:
+                            target_uid_by_name[val.lower()] = uid
 
     def _fallback_from_target_yaml() -> List[dict]:
-        target_yaml = target_dir / "target.yaml"
-        if not target_yaml.exists():
+        if not target_yaml_path.exists():
             return []
         try:
-            data = yaml.safe_load(target_yaml.read_text()) or {}
+            data = yaml.safe_load(target_yaml_path.read_text()) or {}
         except Exception:
             return []
         entries = []
@@ -975,6 +1062,7 @@ def _load_epitopes_for_target(pdb_id: str, *, include_inactive: bool = False) ->
                     "name": name,
                     "display_name": ep.get("display_name"),
                     "epitope_id": _normalize(ep.get("epitope_id")) or f"epitope_{ep_idx}",
+                    "epitope_uid": _normalize(ep.get("epitope_uid")),
                     "active": is_active,
                     "archived_at": _normalize(ep.get("archived_at")),
                     "archived_reason": _normalize(ep.get("archived_reason")),
@@ -1019,10 +1107,22 @@ def _load_epitopes_for_target(pdb_id: str, *, include_inactive: bool = False) ->
     epitopes = data.get("epitopes") or []
     parsed_any = False
     output = []
-    for ep in epitopes:
+    for meta_idx, ep in enumerate(epitopes, start=1):
         parsed = _parse_epitope_metadata(ep, prep_dir)
         if parsed:
             parsed_any = True
+            if not _normalize(parsed.get("epitope_uid")):
+                uid_hint = None
+                for key in ("name", "display_name", "epitope_id"):
+                    key_val = _normalize(parsed.get(key))
+                    if key_val:
+                        uid_hint = target_uid_by_name.get(key_val.lower())
+                        if uid_hint:
+                            break
+                if not uid_hint:
+                    uid_hint = target_uid_by_pos.get(meta_idx)
+                if uid_hint:
+                    parsed["epitope_uid"] = uid_hint
             if include_inactive or parsed.get("active", True):
                 output.append(parsed)
     if output:
@@ -1115,6 +1215,7 @@ def _epitope_hotspot_map(epitopes: Sequence[dict]) -> Dict[str, List[str]]:
             ep.get("name"),
             ep.get("display_name"),
             ep.get("epitope_id"),
+            ep.get("epitope_uid"),
         ]
         for cand in candidates:
             key = _normalize_epitope_token(cand)
@@ -1784,6 +1885,7 @@ def _epitope_stats_payload(
         "pdb_path": str(prepared_pdb),
         "epitope_index": ep_index,
         "epitope_name": name,
+        "epitope_uid": _normalize(ep_data.get("epitope_uid")),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "selected_residues": selected_residues,
         "hotspots": hotspots,
@@ -2134,7 +2236,11 @@ def _epitope_labels_from_target(target_dir: Path) -> Dict[int, dict]:
         active_idx += 1
         name = entry.get("display_name") or entry.get("name") or f"Epitope {active_idx}"
         residues = entry.get("residues") or []
-        labels[active_idx] = {"name": str(name).strip(), "residues": residues}
+        labels[active_idx] = {
+            "name": str(name).strip(),
+            "residues": residues,
+            "epitope_uid": _normalize(entry.get("epitope_uid")),
+        }
     return labels
 
 
@@ -2265,6 +2371,7 @@ def _discover_boltzgen_configs(pdb_id: str) -> List[dict]:
             "epitope_id": parent,
             "epitope_index": ep_idx,
             "epitope_name": ep_label.get("name") or parent,
+            "epitope_uid": ep_label.get("epitope_uid"),
             "binding_label": parsed.get("binding_label"),
             "include_label": parsed.get("include_label"),
             "hotspot_count": parsed.get("hotspot_count"),
@@ -2422,6 +2529,7 @@ def _archived_epitopes_from_yaml(data: dict) -> List[dict]:
             {
                 "epitope_id": _normalize(entry.get("epitope_id")) or f"epitope_{raw_idx}",
                 "epitope_name": name,
+                "epitope_uid": _normalize(entry.get("epitope_uid")),
                 "archived_at": _normalize(entry.get("archived_at")),
             }
         )
@@ -2680,11 +2788,21 @@ def get_boltzgen_epitope_options(pdb_id: str) -> BoltzgenEpitopeOptionsResponse:
 def _resolve_epitope_index(
     epitopes: Sequence[dict],
     *,
+    epitope_uid: Optional[str] = None,
     epitope_id: Optional[str],
     epitope_name: Optional[str],
     include_inactive: bool = False,
 ) -> Optional[int]:
     scoped_entries = list(_iter_epitopes(epitopes, include_inactive=include_inactive))
+    uid_text = _normalize(epitope_uid)
+    if uid_text:
+        uid_lower = uid_text.lower()
+        for raw_idx, entry in scoped_entries:
+            if not isinstance(entry, dict):
+                continue
+            val = _normalize(entry.get("epitope_uid"))
+            if val and val.lower() == uid_lower:
+                return raw_idx
     id_text = _normalize(epitope_id)
     name_text = _normalize(epitope_name)
     if id_text:
@@ -2769,6 +2887,7 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
     if not isinstance(epitopes, list):
         epitopes = []
         data["epitopes"] = epitopes
+    _ensure_epitope_uids(epitopes)
 
     requested_name = _normalize(request.epitope_name)
     if requested_name:
@@ -2784,6 +2903,15 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
         epitope_name = _next_manual_epitope_name(epitopes)
 
     epitope_index = sum(1 for _idx, _entry in _iter_epitopes(epitopes, include_inactive=False)) + 1
+    existing_uids = {
+        _normalize(entry.get("epitope_uid"))
+        for entry in epitopes
+        if isinstance(entry, dict)
+    }
+    existing_uids.discard(None)
+    epitope_uid = _new_epitope_uid()
+    while epitope_uid in existing_uids:
+        epitope_uid = _new_epitope_uid()
     stem = _sanitize_epitope_stem(epitope_name)
     mask_name = f"epitope_{stem}.json"
     hotspots_name = f"epitope_{stem}_hotspotsA.json"
@@ -2799,6 +2927,7 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
     ep_record = {
         "name": epitope_name,
         "display_name": epitope_name.replace("_", " "),
+        "epitope_uid": epitope_uid,
         "residues": residues_compact,
         "rationale": "Manual hotspot selection from Bulk UI.",
         "hotspots": normalized_tokens,
@@ -2829,6 +2958,7 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
     meta_eps = meta_data.get("epitopes")
     if not isinstance(meta_eps, list):
         meta_eps = []
+    _sync_metadata_epitope_uids(meta_eps, epitopes)
     meta_data["metadata_version"] = int(meta_data.get("metadata_version") or 3)
     meta_data["generated_at"] = _utc_now_iso()
     meta_data["pdb_id"] = pdb_id
@@ -2844,6 +2974,7 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
         {
             "name": epitope_name,
             "display_name": epitope_name.replace("_", " "),
+            "epitope_uid": epitope_uid,
             "residues": residues_compact,
             "mask_residues": normalized_tokens,
             "hotspots": normalized_tokens,
@@ -2874,6 +3005,7 @@ def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenE
     return BoltzgenEpitopeMutationResponse(
         pdb_id=pdb_id,
         action="added",
+        epitope_uid=epitope_uid,
         epitope_id=f"epitope_{epitope_index}",
         epitope_name=epitope_name,
         configs_written=configs_written,
@@ -2885,19 +3017,21 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
     pdb_id = str(request.pdb_id or "").strip().upper()
     if not pdb_id:
         raise ValueError("Missing PDB ID.")
-    if not _normalize(request.epitope_id) and not _normalize(request.epitope_name):
-        raise ValueError("Provide epitope_id or epitope_name.")
+    if not _normalize(request.epitope_uid) and not _normalize(request.epitope_id) and not _normalize(request.epitope_name):
+        raise ValueError("Provide epitope_uid, epitope_id, or epitope_name.")
 
     target_dir, target_yaml, data = _load_target_yaml_strict(pdb_id)
     epitopes = data.get("epitopes")
     if not isinstance(epitopes, list) or not epitopes:
         raise ValueError(f"No epitopes available for {pdb_id}.")
+    _ensure_epitope_uids(epitopes)
     active_entries = list(_iter_epitopes(epitopes, include_inactive=False))
     if not active_entries:
         raise ValueError(f"No active epitopes available for {pdb_id}.")
 
     remove_idx = _resolve_epitope_index(
         epitopes,
+        epitope_uid=request.epitope_uid,
         epitope_id=request.epitope_id,
         epitope_name=request.epitope_name,
         include_inactive=False,
@@ -2905,6 +3039,7 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
     if remove_idx is None:
         existing_idx = _resolve_epitope_index(
             epitopes,
+            epitope_uid=request.epitope_uid,
             epitope_id=request.epitope_id,
             epitope_name=request.epitope_name,
             include_inactive=True,
@@ -2929,6 +3064,12 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
         or _normalize(removed_entry.get("display_name") if isinstance(removed_entry, dict) else None)
         or f"epitope_{active_pos}"
     )
+    removed_uid = None
+    if isinstance(removed_entry, dict):
+        removed_uid = _normalize(removed_entry.get("epitope_uid"))
+        if not removed_uid:
+            removed_uid = _new_epitope_uid()
+            removed_entry["epitope_uid"] = removed_uid
     archived_at = _utc_now_iso()
     if isinstance(removed_entry, dict):
         _mark_epitope_inactive(removed_entry, timestamp=archived_at, reason="manual_deactivate")
@@ -2945,9 +3086,11 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
         if isinstance(meta_data, dict):
             meta_eps = meta_data.get("epitopes")
             if isinstance(meta_eps, list):
+                _sync_metadata_epitope_uids(meta_eps, epitopes)
                 remove_ep_id = _normalize(request.epitope_id) or f"epitope_{active_pos}"
                 meta_idx = _resolve_epitope_index(
                     meta_eps,
+                    epitope_uid=removed_uid or request.epitope_uid,
                     epitope_id=remove_ep_id,
                     epitope_name=removed_name,
                     include_inactive=False,
@@ -2962,6 +3105,8 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
                 if meta_idx is not None and 0 <= meta_idx < len(meta_eps):
                     entry = meta_eps[meta_idx]
                     if isinstance(entry, dict):
+                        if removed_uid and not _normalize(entry.get("epitope_uid")):
+                            entry["epitope_uid"] = removed_uid
                         _mark_epitope_inactive(entry, timestamp=archived_at, reason="manual_deactivate")
                 meta_data["epitopes"] = meta_eps
                 meta_data["generated_at"] = archived_at
@@ -2978,6 +3123,7 @@ def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> Bol
     return BoltzgenEpitopeMutationResponse(
         pdb_id=pdb_id,
         action="deactivated",
+        epitope_uid=removed_uid,
         epitope_id=f"epitope_{active_pos}",
         epitope_name=removed_name,
         configs_written=configs_written,
@@ -3064,6 +3210,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 BoltzgenEpitopeConfig(
                     epitope_id=cfg_entry.get("epitope_id"),
                     epitope_name=cfg_entry.get("epitope_name"),
+                    epitope_uid=cfg_entry.get("epitope_uid"),
                     config_path=cfg_entry.get("config_path"),
                     binding_label=cfg_entry.get("binding_label"),
                     include_label=cfg_entry.get("include_label"),
@@ -6728,15 +6875,27 @@ def build_boltzgen_diversity_report(
         f"rfa_metrics_targets={len(rfa_metrics)}"
     )
     seen_metrics: set[str] = set()
-    metrics_files: List[Dict[str, str]] = []
+    metrics_files: List[Dict[str, object]] = []
     epitope_residues: Dict[str, Dict[str, str]] = defaultdict(dict)
     epitope_index_map: Dict[str, Dict[str, int]] = defaultdict(dict)
+    epitope_uid_map: Dict[str, Dict[str, str]] = defaultdict(dict)
     cif_chain_cache: Dict[str, Dict[str, dict]] = {}
     cif_index_cache: Dict[str, Dict[str, Path]] = {}
     binding_cache: Dict[str, Dict[str, List[int]]] = {}
 
     for pdb_dir in target_dirs:
         pdb_id = pdb_dir.name.upper()
+        config_uid_by_path: Dict[str, str] = {}
+        try:
+            for cfg_entry in _discover_boltzgen_configs(pdb_id):
+                uid = str(cfg_entry.get("epitope_uid") or "").strip()
+                rel = str(cfg_entry.get("config_path") or "").strip()
+                if not uid or not rel:
+                    continue
+                abs_cfg = (pdb_dir / rel).resolve()
+                config_uid_by_path[str(abs_cfg)] = uid
+        except Exception:
+            config_uid_by_path = {}
 
         # Collect epitope residue labels (shifted preferred) from epitope stats.
         stats_root = pdb_dir / "configs"
@@ -6746,6 +6905,7 @@ def build_boltzgen_diversity_report(
                 data = json.loads(stats_file.read_text())
                 dir_name = stats_file.parent.name
                 ep_name = str(data.get("epitope_name") or "").strip() or dir_name
+                ep_uid = str(data.get("epitope_uid") or "").strip()
                 raw_index = data.get("epitope_index")
                 try:
                     ep_index = int(raw_index) if raw_index is not None else None
@@ -6755,6 +6915,10 @@ def build_boltzgen_diversity_report(
                     epitope_index_map[pdb_id][ep_name] = ep_index
                     if dir_name:
                         epitope_index_map[pdb_id][dir_name] = ep_index
+                if ep_uid:
+                    epitope_uid_map[pdb_id][ep_name] = ep_uid
+                    if dir_name:
+                        epitope_uid_map[pdb_id][dir_name] = ep_uid
                 residues = data.get("hotspots")
                 residues = [str(r).strip() for r in residues if str(r).strip()]
                 if residues:
@@ -6813,6 +6977,7 @@ def build_boltzgen_diversity_report(
                     {
                         "pdb_id": pdb_id,
                         "epitope_name": epitope_name,
+                        "epitope_uid": (epitope_uid_map.get(pdb_id, {}) or {}).get(epitope_name),
                         "datetime": run_label,
                         "path": str(metrics_path),
                     }
@@ -6825,6 +6990,10 @@ def build_boltzgen_diversity_report(
                             record: Dict[str, object] = dict(row)
                             record.setdefault("PDB_ID", pdb_id)
                             record.setdefault("epitope_name", epitope_name)
+                            if not record.get("epitope_uid"):
+                                uid_hint = (epitope_uid_map.get(pdb_id, {}) or {}).get(epitope_name)
+                                if uid_hint:
+                                    record["epitope_uid"] = uid_hint
                             record.setdefault("datetime", run_label)
                             record.setdefault("source_path", str(metrics_path))
                             record.setdefault("binder_chain_id", None)
@@ -6857,6 +7026,9 @@ def build_boltzgen_diversity_report(
                                     epitope_index_map.get(pdb_id, {}),
                                 )
                                 if config_path and config_path.exists():
+                                    config_uid = config_uid_by_path.get(str(config_path.resolve()))
+                                    if config_uid and not record.get("epitope_uid"):
+                                        record["epitope_uid"] = config_uid
                                     config_key = str(config_path.resolve())
                                     binding_info = binding_cache.get(config_key)
                                     if binding_info is None:
@@ -7926,9 +8098,10 @@ def build_epitope_diversity_report_for_selection(
 def _binder_config_map(entries: List[dict]) -> Dict[str, dict]:
     mapping: Dict[str, dict] = {}
     for entry in entries:
+        ep_uid = str(entry.get("epitope_uid") or "").strip()
         ep_id = str(entry.get("epitope_id") or "").strip()
         ep_name = str(entry.get("epitope_name") or "").strip()
-        for key in (ep_id, ep_name):
+        for key in (ep_uid, ep_id, ep_name):
             if key and key not in mapping:
                 mapping[key] = entry
     return mapping
@@ -7951,6 +8124,7 @@ def _epitope_activity_lookup_for_pdb(pdb_id: str) -> Dict[str, bool]:
             continue
         active = _is_epitope_active(entry)
         candidates = [
+            entry.get("epitope_uid"),
             entry.get("epitope_id"),
             entry.get("name"),
             entry.get("display_name"),
@@ -7973,12 +8147,13 @@ def _epitope_activity_lookup_for_pdb(pdb_id: str) -> Dict[str, bool]:
 def _resolve_epitope_active_flag(
     lookup: Dict[str, bool],
     *,
+    epitope_uid: Optional[str] = None,
     epitope_id: Optional[str],
     epitope_name: Optional[str],
 ) -> Optional[bool]:
     if not lookup:
         return None
-    for raw in (epitope_id, epitope_name):
+    for raw in (epitope_uid, epitope_id, epitope_name):
         text = _normalize(raw)
         if not text:
             continue
@@ -8025,6 +8200,13 @@ def _load_binder_rows_from_csv(
                 engine = "boltzgen"
 
             epitope = (raw.get("epitope_name") or raw.get("spec") or raw.get("epitope") or "").strip() or None
+            epitope_uid = (
+                raw.get("epitope_uid")
+                or raw.get("ep_uid")
+                or raw.get("epitope_uuid")
+                or ""
+            )
+            epitope_uid = str(epitope_uid).strip() or None
             antigen_url = (
                 raw.get("antigen_url")
                 or raw.get("antigen url")
@@ -8091,7 +8273,12 @@ def _load_binder_rows_from_csv(
                 if pdb_id not in config_cache:
                     cfg_entries = _discover_boltzgen_configs(pdb_id)
                     config_cache[pdb_id] = _binder_config_map(cfg_entries)
-                cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+                lookup = config_cache.get(pdb_id, {})
+                cfg_meta = (
+                    (lookup.get(epitope_uid) if epitope_uid else None)
+                    or (lookup.get(epitope or "") if epitope else None)
+                    or {}
+                )
             if pdb_id not in epitope_activity_cache:
                 epitope_activity_cache[pdb_id] = _epitope_activity_lookup_for_pdb(pdb_id)
             epitope_id = cfg_meta.get("epitope_id")
@@ -8099,8 +8286,11 @@ def _load_binder_rows_from_csv(
                 ep_norm = str(epitope).strip()
                 if re.match(r"^epitope_\\d+$", ep_norm, flags=re.IGNORECASE):
                     epitope_id = ep_norm
+            if not epitope_uid:
+                epitope_uid = str(cfg_meta.get("epitope_uid") or "").strip() or None
             epitope_active = _resolve_epitope_active_flag(
                 epitope_activity_cache.get(pdb_id, {}),
+                epitope_uid=epitope_uid,
                 epitope_id=str(epitope_id or "") if epitope_id is not None else None,
                 epitope_name=str(epitope or "") if epitope is not None else None,
             )
@@ -8132,6 +8322,7 @@ def _load_binder_rows_from_csv(
                     pdb_id=pdb_id,
                     epitope=epitope,
                     epitope_id=epitope_id,
+                    epitope_uid=epitope_uid,
                     antigen_url=antigen_url,
                     engine=engine,
                     rank=rank_val,
@@ -8576,6 +8767,7 @@ _BINDER_EXPORT_COLUMNS = [
     "pdb_id",
     "epitope",
     "epitope_id",
+    "epitope_uid",
     "engine",
     "rank",
     "iptm",

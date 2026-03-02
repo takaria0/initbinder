@@ -1539,19 +1539,20 @@ async function submitManualEpitope(triggerBtn = null) {
   }
 }
 
-async function removeManualEpitope(pdbId, epitopeId = null, epitopeName = null, triggerBtn = null) {
+async function removeManualEpitope(pdbId, epitopeUid = null, epitopeId = null, epitopeName = null, triggerBtn = null) {
   const normalizedPdb = String(pdbId || '').trim().toUpperCase();
   if (!normalizedPdb) {
     showAlert('Missing PDB ID for epitope deactivation.');
     return;
   }
-  const display = epitopeName || epitopeId || 'epitope';
+  const display = epitopeName || epitopeId || epitopeUid || 'epitope';
   const confirmMsg = `Deactivate ${display} on ${normalizedPdb}? Existing prep/design folders are retained, and configs will be rebuilt.`;
   if (!window.confirm(confirmMsg)) return;
 
   const designCount = getBoltzDesignCount() || 100;
   const payload = {
     pdb_id: normalizedPdb,
+    epitope_uid: epitopeUid || null,
     epitope_id: epitopeId || null,
     epitope_name: epitopeName || null,
     design_count: designCount,
@@ -3340,6 +3341,7 @@ function renderBoltzConfigs() {
       removeBtn.className = 'ghost';
       removeBtn.dataset.action = 'remove-epitope';
       removeBtn.dataset.pdbId = target.pdb_id || '';
+      removeBtn.dataset.epitopeUid = cfg.epitope_uid || '';
       removeBtn.dataset.epitopeId = cfg.epitope_id || '';
       removeBtn.dataset.epitopeName = cfg.epitope_name || epitopeLabel(cfg, cfgIdx + 1);
       removeBtn.title = 'Deactivate this epitope and rebuild configs. Existing prep/design files are retained.';
@@ -4958,6 +4960,7 @@ function handleBoltzTableClick(event) {
   } else if (action === 'remove-epitope') {
     removeManualEpitope(
       pdbId,
+      btn.dataset.epitopeUid || null,
       btn.dataset.epitopeId || null,
       btn.dataset.epitopeName || null,
       btn,

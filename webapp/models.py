@@ -414,6 +414,7 @@ class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None
     epitope_id: Optional[str] = None
+    epitope_uid: Optional[str] = None
     antigen_url: Optional[str] = None
     engine: Optional[str] = None
     rank: int
@@ -435,6 +436,7 @@ class BoltzgenBinderRow(BaseModel):
 class BoltzgenArchivedEpitope(BaseModel):
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None
+    epitope_uid: Optional[str] = None
     archived_at: Optional[str] = None
 
 
@@ -588,6 +590,7 @@ class BulkGuiReadmeResponse(BaseModel):
 class BoltzgenEpitopeConfig(BaseModel):
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None
+    epitope_uid: Optional[str] = None
     config_path: str
     binding_label: Optional[str] = None
     include_label: Optional[str] = None
@@ -662,6 +665,7 @@ class BoltzgenEpitopeAddRequest(BaseModel):
 
 class BoltzgenEpitopeRemoveRequest(BaseModel):
     pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$")
+    epitope_uid: Optional[str] = Field(None, max_length=160)
     epitope_id: Optional[str] = Field(None, max_length=160)
     epitope_name: Optional[str] = Field(None, max_length=160)
     design_count: int = Field(100, ge=1, le=50000)
@@ -675,6 +679,7 @@ class BoltzgenEpitopeRemoveRequest(BaseModel):
 class BoltzgenEpitopeMutationResponse(BaseModel):
     pdb_id: str
     action: Literal["added", "removed", "deactivated"]
+    epitope_uid: Optional[str] = None
     epitope_id: Optional[str] = None
     epitope_name: Optional[str] = None
     configs_written: int = 0
