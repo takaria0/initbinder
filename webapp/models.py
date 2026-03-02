@@ -414,6 +414,7 @@ class BoltzgenBinderRow(BaseModel):
     pdb_id: str
     epitope: Optional[str] = None
     epitope_id: Optional[str] = None
+    antigen_url: Optional[str] = None
     engine: Optional[str] = None
     rank: int
     iptm: Optional[float] = None

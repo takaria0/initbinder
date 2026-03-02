@@ -7224,6 +7224,15 @@ def _load_binder_rows_from_csv(
                 engine = "boltzgen"
 
             epitope = (raw.get("epitope_name") or raw.get("spec") or raw.get("epitope") or "").strip() or None
+            antigen_url = (
+                raw.get("antigen_url")
+                or raw.get("antigen url")
+                or raw.get("vendor_url")
+                or raw.get("vendor url")
+                or raw.get("url")
+                or ""
+            )
+            antigen_url = str(antigen_url).strip() or None
             run_label = (raw.get("datetime") or raw.get("run_label") or "").strip() or None
             iptm_val = _safe_float(
                 raw.get("iptm")
@@ -7315,6 +7324,7 @@ def _load_binder_rows_from_csv(
                     pdb_id=pdb_id,
                     epitope=epitope,
                     epitope_id=epitope_id,
+                    antigen_url=antigen_url,
                     engine=engine,
                     rank=rank_val,
                     iptm=iptm_val,
@@ -7334,6 +7344,31 @@ def _load_binder_rows_from_csv(
 
     all_rows.sort(key=lambda r: (r.pdb_id, r.epitope or "", r.rank))
     return all_rows
+
+
+def _antigen_url_for_pdb(pdb_id: str) -> Optional[str]:
+    upper = str(pdb_id or "").strip().upper()
+    if not upper:
+        return None
+    try:
+        cfg = load_config()
+        target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / upper / "target.yaml"
+        if not target_yaml.exists():
+            return None
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+        return str(data.get("antigen_catalog_url") or data.get("antigen_url") or "").strip() or None
+    except Exception:
+        return None
+
+
+def _antigen_url_lookup_for_pdb_ids(pdb_ids: Sequence[str]) -> Dict[str, Optional[str]]:
+    lookup: Dict[str, Optional[str]] = {}
+    for raw in pdb_ids:
+        upper = str(raw or "").strip().upper()
+        if not upper or upper in lookup:
+            continue
+        lookup[upper] = _antigen_url_for_pdb(upper)
+    return lookup
 
 
 _BINDER_EXPORT_MAP_COLUMNS = [
@@ -7766,6 +7801,7 @@ _BINDER_EXPORT_COLUMNS = [
 _BINDER_EXPORT_SUMMARY_COLUMNS = [
     "pdb_id",
     "epitope",
+    "antigen_url",
     "total_binders",
     "selected_count",
     "selected_percentile",
@@ -7886,6 +7922,7 @@ def export_selected_binders(
             continue
         key = f"{row.pdb_id}:{ep_key}"
         group_map[key].append(row)
+    antigen_url_by_pdb = _antigen_url_lookup_for_pdb_ids([pdb_id for pdb_id, _ in entries])
 
     export_rows: List[Dict[str, object]] = []
     summary_rows: List[Dict[str, object]] = []
@@ -7903,12 +7940,17 @@ def export_selected_binders(
         total = len(group_rows)
         selected_count = min(per_group, total)
         selected_percentile = (selected_count / total * 100) if total else 0.0
+        antigen_url = (
+            next((row.antigen_url for row in group_rows if row.antigen_url), None)
+            or antigen_url_by_pdb.get(pdb_id)
+        )
 
         if not total:
             summary_rows.append(
                 {
                     "pdb_id": pdb_id,
                     "epitope": ep_key,
+                    "antigen_url": antigen_url_by_pdb.get(pdb_id),
                     "total_binders": 0,
                     "selected_count": 0,
                     "selected_percentile": 0,
@@ -8081,6 +8123,7 @@ def export_selected_binders(
             {
                 "pdb_id": pdb_id,
                 "epitope": ep_key,
+                "antigen_url": antigen_url,
                 "total_binders": total,
                 "selected_count": selected_count,
                 "selected_percentile": _format_float(selected_percentile, 2),

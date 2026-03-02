@@ -1,153 +1,138 @@
 # InitBinder Bulk GUI README
 
-This guide is for first-time users of the Bulk page. It walks from input paste to final binder review using the current GUI controls.
+This guide is for first-time users of the Bulk page. It walks through the current LLM-first workflow from target discovery to binder export.
 
 ## Start Here (30 seconds)
 
-Use this page to process many targets at once: detect targets, prepare epitopes, generate BoltzGen/RFA run commands, then review diversity and binders.
+Use this page to process many targets at once: discover and curate targets, prepare epitopes, generate BoltzGen/RFA run commands, then review diversity and binders.
 When started with `scripts/run_bulk_local.sh`, the UI defaults to port `8000` and automatically shifts to the next free local port if needed.
 
 Before starting, have these ready:
-- A CSV/TSV table of targets.
+- A catalog `.tsv`/`.csv` path (for example in `targets_catalog/`).
 - Working cluster settings (SSH alias, roots, conda command).
-- OpenAI API key if you will use `Select epitopes (LLM)` actions.
+- OpenAI API key for LLM-powered actions.
 - Optional OpenAI model override (default is `gpt-4.1-mini`).
 
 Page map:
-- `LLM Target Discovery` -> `Input CSV / TSV` -> `Selected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
+- `LLM Target Discovery` -> `Selected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
 
-Use `README` for this guide and `Algorithm` for deeper method details.
+Use `README` for quickstart/context and `Algorithm` for method details.
 
-## Before You Paste Anything (first-time setup)
+## Step 0: Configure Once
 
 Action:
 - Click `Config`.
 - In `Cluster base`, verify `SSH alias`, `Remote root`, `Target root`, and `Cluster conda (BoltzGen installed)`.
 - If PyMOL launch fails, set `PyMOL executable path` in `Cluster base` (for example `pymol` or `/Applications/PyMOL.app` on macOS).
 - In `BoltzGen defaults`, verify partition/account/GPU/CPU/memory/time and default designs.
-- For BoltzGen nanobody design mode, set `Nanobody scaffold paths` (one scaffold YAML path per line).
-- In `LLM`, set `OpenAI API key` (required) and `OpenAI model` (optional) if you plan to use LLM epitope selection.
-- Optional: in `Input TSV defaults`, set `Default input file path` and enable auto-load.
-- No `cfg/env.py` edit is required for GUI-driven workflows.
+- For BoltzGen nanobody mode, set `Nanobody scaffold paths` (one scaffold YAML path per line).
+- In `LLM`, set `OpenAI API key` and optional `OpenAI model`.
+- In `Input TSV defaults`, set `Default input file path` to your catalog file and optionally enable auto-load.
 - Click `Save settings`.
 
 Expect:
-- Settings are saved and reused.
-- The modal indicates updates are written to `cfg/webapp.local.yaml`.
+- Settings persist in `cfg/webapp.local.yaml` and reload on next start.
 
-If not:
-- Re-open `Config`, correct the values, and save again before running commands.
-
-## Step 1: Load Input
+## Step 1: Discover Targets with LLM
 
 Action:
-- The `Input CSV / TSV` editor is hidden in this workflow.
-- Set `Config` -> `Input TSV defaults` -> `Default input file path` to your catalog TSV/CSV.
-- The app auto-loads that configured file on page load and after settings save.
-
-LLM-first option:
-- Use `LLM Target Discovery` at the top of the page.
-- Pick or create a `Conversation` to keep separate target discussions.
-- Set `Config` -> `Input TSV defaults` -> `Default input file path` to your catalog TSV/CSV in `targets_catalog/`.
-- Enter a prompt, and click `Suggest targets`.
-- Continue chatting in the same conversation to accumulate additional target suggestions.
-- In `Matched targets`, use per-target `Delete` / `Undelete` to curate the active list.
-- Switch `View mode` between `LLM-picked` and `All targets`.
-
-Recommended columns:
-- `chosen_pdb` or `pdb_id`
-- `antigen_url`
-- optional `vendor_accession`
-- optional `vendor_range`
-
-Accepted alternatives:
-- Target-generation style TSV is supported.
-- If no direct PDB is provided, the app may infer from presets or existing targets.
-
-Important input rule:
-- Rows are skipped when a single accession cell appears to contain multiple accessions.
-- Examples: `NP_1 & NP_2`, `NP_1, NP_2`, `NP_1; NP_2`, `NP_1/NP_2`, `NP_1 and NP_2`.
+- In `LLM Target Discovery`, pick or create a `Conversation`.
+- Enter a prompt and click `Suggest targets`.
+- Continue chatting in the same conversation to refine or expand suggestions.
 
 Expect:
-- Preview updates automatically.
-- Summary text similar to: `Parsed N rows · X ready · Y need PDB IDs · Z skipped (multi-accession accession field)`.
+- `Matched targets` fills with candidates found in your configured catalog.
+- `Unmatched suggestions` appears when the model suggests entities not currently mapped.
 
-If not:
-- If preview is empty, check delimiter/header formatting and ensure data was pasted into the input box.
+Useful controls:
+- `View`: `LLM-picked` vs `All targets`
+- `Catalog`: `Biotin only` vs `All`
+- Per-target `Delete` / `Undelete` in `Matched targets`
+- Per-unmatched-item discovery actions when available
 
-## Step 2: Confirm Detection
+## Step 2: Confirm Curated Target Set
 
 Action:
-- Review the `Selected targets` table and the `Notes` column.
-- Check that each row has a resolved PDB in `PDB ID`.
+- Review `Selected targets` table and `Notes` column.
+- Confirm each retained row has a resolved `PDB ID`.
 
 Expect:
-- Most rows should be `ready`.
-- `Notes` may include:
-  - `PDB inferred from existing target directory.`
-  - `Missing PDB ID; add pdb_id column or map preset.`
+- Summary message like: `Parsed N rows · X ready · Y need PDB IDs ...`.
+- Most retained rows should be `ready`.
 
 If not:
-- If many rows need PDB IDs, add `chosen_pdb`/`pdb_id` in input and paste again.
+- Add stronger constraints in your LLM prompt (species, assay type, family).
+- Switch `View` to `All targets` to inspect non-picked catalog rows.
+- Resolve missing PDB mappings for rows marked as needing PDB IDs.
 
-## Step 3: Choose Your Workflow Path
-
-Path A (quick validation):
-- Action: click `Visualize epitopes`.
-- Expect: pipeline prep runs without design submission; job progress appears in `Job log`; epitope outputs become available.
-- Use this when you want to validate target/epitope prep first.
-
-Path B (production path):
-- Action: continue to Step 4 and Step 5 for config prep and cluster command generation.
-- Use this when you are ready to run design jobs.
-
-## Step 4: Prepare Epitopes and Configs
+## Step 3: Select Epitopes
 
 Action:
 - In `BoltzGen configs`, set:
   - `Epitope design num`
   - `Max runtime (hours)`
   - `Crop radius`
-- Run epitope refresh when needed:
+- Refresh epitope proposals when needed:
   - `Select epitopes (LLM)` for row ranges.
-  - Per-target `Select epitopes (LLM)` in the table command column.
-- Click `Rebuild configs` after changing design count or refreshing epitopes.
+  - Per-target `Select epitopes (LLM)` in table commands.
+- Click `Rebuild configs` after epitope updates or design-count changes.
 
 Expect:
-- `BoltzGen configs` table populates with target rows and expandable epitope rows.
+- `BoltzGen configs` populates by target.
 - Clicking a target row reveals epitope-level actions (`Config`, `Debug`, `Command`, `PyMOL`).
 
-If not:
-- If an epitope is SASA-filtered, it may appear filtered/dim and its `Command` can be disabled.
-- Re-run epitope selection or adjust your selection/range to recover usable epitopes.
+## Step 4: Check Epitopes Before Submit
 
-## Step 5: Generate and Run Commands
+Action:
+- Open per-target/per-epitope `Config` and verify selected ranges/hotspots look correct.
+- Use `PyMOL` to visually inspect hotspot placement and residue context when needed.
+
+Expect:
+- `Config` shows the exact generated YAML/script content for the selected row.
+- `PyMOL` launches or prepares a hotspot bundle when prep/hotspot artifacts are available.
+
+If not:
+- If `PyMOL` is unavailable, prep/hotspot artifacts are likely missing for that target.
+- Re-run prep flow (`Select epitopes (LLM)` + `Rebuild configs`) and verify target assets exist.
+
+## Step 5: Generate Ready-to-Run Commands
 
 Action:
 - Use one of these command entry points:
-  - `Generate commands` (row range modal).
-  - Per-target or per-epitope `Command` button in the config table.
-  - `Show run command (selection)` using `Antigen:Epitope selection`.
+  - `Generate commands` (row range modal)
+  - Per-target / per-epitope `Command`
+  - `Show run command (selection)` with `PDB:epitope` pairs
 
 Selection format:
-- Use `PDB:epitope` pairs, comma or newline separated.
+- `PDB:epitope` pairs, comma or newline separated.
 - Example: `5WT9:epitope_1, 3J8F:epitope_4`.
 
 Expect:
-- `Cluster run steps` modal opens with command blocks.
-- Generated blocks include run commands plus monitor/pull patterns (for example `squeue` and `rsync` sections).
+- `Cluster run steps` modal opens with command blocks (run, monitor, and pull patterns).
+- Each block includes a `Copy` button so you can execute steps in order.
 
 Important:
-- Commands are generated for manual execution. Copy and run them in your cluster shell.
+- Commands are generated for manual execution.
 
-If not:
-- If commands are missing, check:
-  - Row range values.
-  - Range filters in the modal (`Min allowed range length`, `Min epitopes selected`).
-  - Selection formatting (`PDB:epitope_#`).
-  - SASA-filtered epitopes.
+## Step 6: Execute Commands One by One (Local vs Cluster)
 
-## Step 6: Review Outputs
+Run the `Cluster run steps` blocks in order. Use this execution boundary:
+
+| Command block pattern | Where to run |
+|---|---|
+| `rsync ...`, `mkdir -p ...` | Local terminal |
+| `ssh <cluster> "ls ..."`, `ssh <cluster> "squeue ..."`, `ssh <cluster> "tail ..."` | Local terminal |
+| BoltzGen launch block (`conda activate ...`, `python ... pipeline ... --submit`) | Cluster shell after SSH login |
+| RFA launch block (`ssh <cluster> "cd ... && bash ..."`) | Local terminal (as generated) |
+
+Recommended per-target loop:
+1. Sync target/config/tools to cluster.
+2. Verify config/launcher paths on cluster.
+3. Launch jobs.
+4. Monitor queue/logs.
+5. Pull results back to local target directories.
+
+## Step 7: Pull Results and Review Scores
 
 Epitope outputs:
 - In `Epitope plots`, use:
@@ -156,54 +141,57 @@ Epitope outputs:
   - `Download Hotspot CSV`
 
 Diversity outputs:
-- In `Designed binder diversity`, click `Force rebuild` when new results were synced.
+- In `Designed binder diversity`, click `Force rebuild` when new results are synced.
 - Use `Export HTML` and `Download CSV` when available.
 
 Binder table:
-- In `Designed binders`, filter by PDB/epitope/engine, set sort order, then:
-  - `Refresh`
-  - `Download CSV`
-  - `Export selected binders`
+- In `Designed binders`, click `Refresh` after pulling results.
+- If summary tables are stale, use `Force rebuild` in diversity, then `Refresh`.
+- Check binder quality fields directly in the table:
+  - `ipTM`
+  - `RMSD`
+  - `Hotspot dist (Å)`
+  - `ipSAE`
+- Use `Filter engine` and `Order by` (`ipTM`, `RMSD`, `Rank`, `Hotspot dist`) for triage.
+- Use `Download CSV` and `Export selected binders` when needed.
 
-Export selected binders:
-- Provide `PDB:epitope` entries.
-- Example: `5WT9:epitope_8, 4ZFO:epitope_2`.
-
-PyMOL caveat:
-- `PyMOL` actions depend on prepared hotspot data. If prep/hotspot artifacts are missing, launch may be unavailable.
+`Export selected binders` quick note:
+- Input `PDB:epitope` pairs.
+- Export includes top binders by ranking score plus adapter/DNA fields.
+- Adapter+insert BsaI checks are applied; unresolved rows remain exported with `bsai_site_check_ok=False`.
+- Export can also return scatter artifacts (`ipTM` vs `RMSD`) and mapping CSVs.
 
 ## Troubleshooting by Symptom
 
-`Preview is empty`
-- Cause: CSV/TSV format or delimiter issue.
-- Fix: confirm header row and delimiter, then paste again.
+`No LLM suggestions or LLM actions fail`
+- Cause: missing/invalid API key or model config.
+- Fix: set `OpenAI API key` (and optional model) in `Config` -> `LLM`, save, retry.
 
-`Many rows show need PDB IDs`
-- Cause: missing `chosen_pdb`/`pdb_id`, no preset/target match.
-- Fix: add explicit PDB IDs or map presets more clearly.
+`No matched targets`
+- Cause: prompt constraints too narrow, or catalog path/filter mismatch.
+- Fix: verify `Default input file path`, switch `Catalog` filter to `All`, broaden prompt.
+
+`Many rows need PDB IDs`
+- Cause: unresolved mappings in catalog rows.
+- Fix: enrich catalog with `chosen_pdb`/`pdb_id` where possible or use clearer constraints.
 
 `No run commands generated`
-- Cause: row range excludes data, selection format mismatch, missing configs, or SASA-filtered epitopes.
-- Fix: verify range, use valid `PDB:epitope_#` format, rebuild configs, and re-check filtered epitopes.
+- Cause: range excludes rows, selection format mismatch, missing configs, or SASA-filtered epitopes.
+- Fix: verify range/format (`PDB:epitope_#`), rebuild configs, and re-check filtered epitopes.
 
 `No binders after cluster run`
 - Cause: results not synced or aggregate cache not rebuilt.
-- Fix: sync outputs to expected target/design paths, then click `Refresh` in `Designed binders` and/or `Force rebuild` in diversity.
-
-`Select epitopes (LLM) fails`
-- Cause: missing/invalid API keys.
-- Fix: set `OpenAI API key` (and optional `OpenAI model`) in `Config` -> `LLM`, save, then retry.
+- Fix: sync outputs to expected paths, then click `Refresh` in `Designed binders` and/or `Force rebuild` in diversity.
 
 ## Quick Happy Path Checklist
 
 - [ ] Open Bulk page and click `Config`.
-- [ ] Verify cluster settings and click `Save settings`.
-- [ ] Paste CSV/TSV into `Input CSV / TSV`.
-- [ ] Confirm `Selected targets` summary shows rows `ready`.
-- [ ] Fix unresolved PDB rows if needed.
+- [ ] Verify cluster settings, LLM key/model, and default catalog path; click `Save settings`.
+- [ ] Use `LLM Target Discovery` and click `Suggest targets`.
+- [ ] Curate matched targets with `Delete`/`Undelete` and verify `Selected targets` are ready.
 - [ ] Set `Epitope design num`, runtime, and crop radius.
 - [ ] Run `Select epitopes (LLM)` if epitope refresh is needed.
 - [ ] Click `Rebuild configs`.
-- [ ] Generate commands (`Generate commands` or table `Command`) and run them on cluster.
+- [ ] Generate commands and run them on cluster.
 - [ ] Sync results back, then use `Refresh` / `Force rebuild`.
-- [ ] Review `Designed binders` and export selected binders.
+- [ ] Review `Designed binders` and run `Export selected binders`.

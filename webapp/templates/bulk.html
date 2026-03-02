@@ -114,10 +114,10 @@
             <section id="bulk-input-panel" hidden>
               <h2>Input CSV / TSV</h2>
               <div class="bulk-help-list">
-                <p class="help-text">Paste your CSV/TSV target list here. If you want a ready-to-use starting file, use <code>targets_catalog/acrobio_plus_sino_biotin_merged.tsv</code>. The preview updates automatically after edits, and large files may take a few seconds.</p>
+                <p class="help-text">Advanced/manual input panel. In the default workflow, use <code>LLM Target Discovery</code> with a configured catalog path in <code>Config</code> -> <code>Input TSV defaults</code>. This editor is available when you need direct table import.</p>
                 <p class="help-text">Recommended columns are <code>chosen_pdb</code> (or <code>pdb_id</code>) and <code>antigen_url</code>. You can also include <code>vendor_accession</code> and <code>vendor_range</code> for better target initialization. Target-generation style TSVs are also supported.</p>
                 <p class="help-text">Need a refreshed merged catalog? Run the scraper/merge scripts in <code>targets_catalog/webscraper/</code>.</p>
-                <p class="help-text"><strong>LLM features:</strong> actions such as <code>Select epitopes (LLM)</code> require an OpenAI API key. Set it in <code>Config</code> -> <code>LLM</code> (saved to <code>cfg/webapp.local.yaml</code>).</p>
+                <p class="help-text"><strong>LLM features:</strong> <code>Suggest targets</code> and <code>Select epitopes (LLM)</code> require an OpenAI API key. Set it in <code>Config</code> -> <code>LLM</code> (saved to <code>cfg/webapp.local.yaml</code>).</p>
               </div>
               <div class="form-row">
                 <label>CSV / TSV rows
@@ -573,7 +573,7 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
               <code>C_j</code> be candidate PDB chains extracted from mmCIF. An epitope is a set of residue spans
               <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
             <ol class="bulk-doc-list">
-              <li><strong>Input CSV.</strong> Parse bulk rows into PDB ID, antigen URL, accession/range overrides, and run parameters. Rows with multi-accession values in the accession field (for example containing <code>&amp;</code>, <code>,</code>, <code>;</code>, <code>/</code>, or <code>and</code>) are excluded from detected targets and execution.</li>
+              <li><strong>Target intake.</strong> Parse target rows (from the configured catalog and/or manual table import) into PDB ID, antigen URL, accession/range overrides, and run parameters. Rows with multi-accession values in the accession field (for example containing <code>&amp;</code>, <code>,</code>, <code>;</code>, <code>/</code>, or <code>and</code>) are excluded from detected targets and execution.</li>
               <li><strong>target_generation.py (catalog PDB selection).</strong> For each antigen option with an accession and expressed range,
                 align the vendor sequence <code>S</code> (or expressed slice <code>S[a:b]</code>) to every PDB chain sequence <code>C_j</code>
                 (RCSB polymer entities). Keep matches with <code>identity &gt;= 0.95</code> and aligned length &gt;= 10. Each candidate match
@@ -648,7 +648,7 @@ allowed_epitope_range (label): B:2-139
 allowed_epitope_range_auth (auth): D:25-162</pre>
             <p>BoltzGen configs always use the raw mmCIF path plus label numbering (<code>allowed_epitope_range</code>);
               <code>allowed_epitope_range_auth</code> is stored for cross-referencing against PDB-style annotations.</p>
-            <p><strong>Worked examples (tabbed).</strong> Each tab is a full CSV-to-epitope trace.</p>
+            <p><strong>Worked examples (tabbed).</strong> Each tab is a full catalog-row-to-epitope trace.</p>
             <div class="bulk-example-tabs" data-example-tabs="bulk">
               <div class="bulk-example-tablist" role="tablist">
                 <button type="button" class="bulk-example-tab is-active" data-example-tab="8GYE" aria-selected="true">8GYE</button>
@@ -664,7 +664,7 @@ allowed_epitope_range_auth (auth): D:25-162</pre>
               </div>
               <div class="bulk-example-panels">
                 <section class="bulk-example-panel is-active" data-example-panel="8GYE">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 2
 selection: biotin
 uniprot: Q07011
@@ -736,7 +736,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="7TNG">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 174
 selection: biotin
 uniprot: Q01973
@@ -786,7 +786,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="1J55">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 179
 selection: biotin
 uniprot: P25815
@@ -830,7 +830,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="3Q2C">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 139
 selection: biotin
 uniprot: Q8N6C8
@@ -881,7 +881,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="5DZO">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 194
 selection: biotin
 uniprot: Q96D42
@@ -929,7 +929,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="1HKF">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 148
 selection: biotin
 uniprot: O95944
@@ -976,7 +976,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="5VZ3">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 88
 selection: biotin
 uniprot: Q99988
@@ -1026,7 +1026,7 @@ sasa_exposed_total: 526.17
 rsa_mean: 0.395</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="7M3Z">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 228
 selection: biotin
 uniprot: Q8TDQ0
@@ -1073,7 +1073,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="2JOP">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 44
 selection: biotin
 uniprot: P06127
@@ -1123,7 +1123,7 @@ SASA check (hotspot_bundle.json):
 sasa_cutoff: null (check disabled)</pre>
                 </section>
                 <section class="bulk-example-panel" data-example-panel="4GOS">
-                  <p><strong>CSV input (target_generation TSV row).</strong></p>
+                  <p><strong>Catalog row (target_generation TSV format).</strong></p>
                   <pre class="bulk-doc-pre">rank: 17
 selection: biotin
 uniprot: Q7Z7D3

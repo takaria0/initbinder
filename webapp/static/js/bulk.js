@@ -2720,7 +2720,7 @@ function renderBoltzConfigs() {
     const emptyCell = document.createElement('td');
     emptyCell.colSpan = 8;
     emptyCell.className = 'empty-note';
-    emptyCell.textContent = 'No BoltzGen configs yet. Paste CSV/TSV above to auto-detect targets.';
+    emptyCell.textContent = 'No BoltzGen configs yet. Use LLM Target Discovery or load a default catalog in Config to detect targets.';
     emptyRow.appendChild(emptyCell);
     tbody.appendChild(emptyRow);
     if (el.boltzSummary) el.boltzSummary.hidden = true;
@@ -5241,7 +5241,7 @@ async function previewBulkCsv(options = {}) {
   const { silent = false } = options;
   const csvText = el.bulkCsvInput?.value || '';
   if (!csvText.trim()) {
-    if (!silent) showAlert('Paste a CSV/TSV payload first.');
+    if (!silent) showAlert('No target table is loaded. Use LLM Target Discovery or set Config -> Input TSV defaults -> Default input file path.');
     return;
   }
   const numEpitopes = (() => {
@@ -5315,7 +5315,7 @@ async function startBulkRun(options = {}) {
   } = options;
   const csvText = el.bulkCsvInput?.value || '';
   if (!csvText.trim()) {
-    showAlert('Paste a CSV/TSV payload first.');
+    showAlert('No target table is loaded. Use LLM Target Discovery or set Config -> Input TSV defaults -> Default input file path.');
     return;
   }
   const numEpitopes = (() => {

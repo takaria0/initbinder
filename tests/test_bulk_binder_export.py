@@ -440,3 +440,72 @@ def test_export_response_backwards_compatible_fields_exist(tmp_path: Path, monke
     assert response.csv_name
     assert response.summary_csv_name
     assert isinstance(response.plot_exports, list)
+
+
+def test_export_selected_binders_summary_includes_antigen_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _prepare_export_env(
+        tmp_path,
+        monkeypatch,
+        rows=[
+            {
+                "PDB_ID": "5WT9",
+                "epitope_name": "epitope_1",
+                "antigen_url": "https://example.org/antigen/5WT9",
+                "engine": "boltzgen",
+                "iptm": "0.82",
+                "rmsd": "1.35",
+                "designed_chain_sequence": "ACDEFGHIK",
+                "rank": "1",
+            }
+        ],
+    )
+    request = BoltzgenBinderExportRequest(
+        selections=["5WT9:epitope_1"],
+        per_group=1,
+        include_summary=True,
+    )
+    response = bulk_mod.export_selected_binders(request)
+    assert response.summary_csv_name
+    rows = _read_csv(tmp_path / response.summary_csv_name)
+    assert len(rows) == 1
+    assert "antigen_url" in rows[0]
+    assert rows[0]["antigen_url"] == "https://example.org/antigen/5WT9"
+
+
+def test_export_selected_binders_summary_antigen_url_fallback_by_pdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _prepare_export_env(
+        tmp_path,
+        monkeypatch,
+        rows=[
+            {
+                "PDB_ID": "5WT9",
+                "epitope_name": "epitope_1",
+                "engine": "boltzgen",
+                "iptm": "0.82",
+                "rmsd": "1.35",
+                "designed_chain_sequence": "ACDEFGHIK",
+                "rank": "1",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        bulk_mod,
+        "_antigen_url_lookup_for_pdb_ids",
+        lambda _ids: {"5WT9": "https://example.org/from-target-yaml/5WT9"},
+    )
+    request = BoltzgenBinderExportRequest(
+        selections=["5WT9:epitope_1"],
+        per_group=1,
+        include_summary=True,
+    )
+    response = bulk_mod.export_selected_binders(request)
+    assert response.summary_csv_name
+    rows = _read_csv(tmp_path / response.summary_csv_name)
+    assert len(rows) == 1
+    assert rows[0]["antigen_url"] == "https://example.org/from-target-yaml/5WT9"
