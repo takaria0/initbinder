@@ -123,6 +123,22 @@ def _parse_res_token(token: object) -> tuple[str, int] | None:
     return chain.strip().upper(), pos
 
 
+def _is_epitope_active(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    raw = entry.get("active")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    return True
+
+
 def _allowed_ranges_from_yaml(target_yaml: Path) -> dict[str, tuple[int, int]]:
     if not target_yaml.exists():
         return {}
@@ -180,8 +196,12 @@ def _validate_epitopes_within_ranges(pdb_id: str, target_yaml: Path, log: Option
 
     filtered_eps: list[dict] = []
     removed: list[str] = []
+    active_kept = 0
     for ep in epitopes:
         if not isinstance(ep, dict):
+            continue
+        if not _is_epitope_active(ep):
+            filtered_eps.append(dict(ep))
             continue
         res_list = ep.get("residues") or []
         keep_tokens = [tok for tok in res_list if _is_valid(tok)]
@@ -189,6 +209,7 @@ def _validate_epitopes_within_ranges(pdb_id: str, target_yaml: Path, log: Option
         ep_filtered["residues"] = keep_tokens
         if keep_tokens:
             filtered_eps.append(ep_filtered)
+            active_kept += 1
         else:
             removed.append(str(ep.get("name") or "epitope"))
 
@@ -196,7 +217,7 @@ def _validate_epitopes_within_ranges(pdb_id: str, target_yaml: Path, log: Option
         log(f"[decide-scope] Removed epitopes outside allowed/mmCIF ranges: {', '.join(removed)}")
     data["epitopes"] = filtered_eps
     target_yaml.write_text(yaml.safe_dump(data, sort_keys=False))
-    if not filtered_eps:
+    if active_kept == 0:
         raise PipelineError("No valid epitopes within allowed range or mmCIF chain coverage after decide-scope.")
 
 
@@ -530,6 +551,8 @@ def _extract_epitopes(data: dict, metadata_map: dict[str, dict]) -> list[dict[st
     for idx, entry in enumerate(data.get("epitopes", []) or []):
         if not isinstance(entry, dict):
             continue
+        if not _is_epitope_active(entry):
+            continue
         name_raw = entry.get("name")
         name = str(name_raw).strip() if name_raw is not None else f"Epitope {idx + 1}"
         residues_raw = entry.get("residues") or []
@@ -757,7 +780,11 @@ def _load_target_details(target_yaml: Path, prep_dir: Path) -> dict[str, object]
         return {"epitopes": [], "chains": [], "antigen": {}}
     data = _safe_yaml_load(target_yaml)
     metadata_map = _load_epitope_metadata(prep_dir)
-    expected_epitopes = len(data.get("epitopes") or [])
+    expected_epitopes = sum(
+        1
+        for ep in (data.get("epitopes") or [])
+        if isinstance(ep, dict) and _is_epitope_active(ep)
+    )
     meta_entries = len(metadata_map)
     if expected_epitopes == 0:
         meta_state = "none"

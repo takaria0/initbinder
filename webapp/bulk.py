@@ -54,6 +54,12 @@ from .models import (
     BoltzgenConfigRunRequest,
     BoltzgenConfigRunResponse,
     BoltzgenEpitopeConfig,
+    BoltzgenEpitopeChainOption,
+    BoltzgenEpitopeResidueOption,
+    BoltzgenEpitopeOptionsResponse,
+    BoltzgenEpitopeAddRequest,
+    BoltzgenEpitopeRemoveRequest,
+    BoltzgenEpitopeMutationResponse,
     BoltzgenTargetConfig,
     BoltzgenDiversityResponse,
     BoltzgenDiversityPlot,
@@ -112,6 +118,47 @@ def _normalize(value: Optional[str]) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _is_epitope_active(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    raw = entry.get("active")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    return True
+
+
+def _iter_epitopes(
+    entries: Sequence[object],
+    *,
+    include_inactive: bool = False,
+) -> Iterable[Tuple[int, dict]]:
+    for idx, entry in enumerate(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        if include_inactive or _is_epitope_active(entry):
+            yield idx, entry
+
+
+def _mark_epitope_inactive(
+    entry: dict,
+    *,
+    timestamp: str,
+    reason: str = "manual_deactivate",
+) -> None:
+    entry["active"] = False
+    if not _normalize(entry.get("archived_at")):
+        entry["archived_at"] = timestamp
+    if not _normalize(entry.get("archived_reason")):
+        entry["archived_reason"] = reason
 
 
 def _clean_pdb_id(value: Optional[str]) -> Optional[str]:
@@ -827,8 +874,14 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
     name = (ep.get("name") or "").strip()
     if not name:
         return None
-    mask = ep.get("files", {}).get("mask_json")
+    display_name = _normalize(ep.get("display_name"))
     mask_residues: List[str] = []
+    for raw_mask in (ep.get("mask_residues"), ep.get("residues")):
+        if isinstance(raw_mask, list):
+            mask_residues = [str(x).strip() for x in raw_mask if str(x).strip()]
+            if mask_residues:
+                break
+    mask = ep.get("files", {}).get("mask_json")
     if mask:
         mask_path = prep_dir / mask
         if mask_path.exists():
@@ -837,7 +890,7 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
                 if isinstance(mask_data, list):
                     mask_residues = [str(x).strip() for x in mask_data if str(x).strip()]
             except Exception:
-                mask_residues = []
+                pass
     hotspots = ep.get("hotspots") or []
     hotspots = [str(h).strip() for h in hotspots if str(h).strip()]
 
@@ -882,13 +935,18 @@ def _parse_epitope_metadata(ep: dict, prep_dir: Path) -> Optional[dict]:
     }
     return {
         "name": name,
+        "display_name": display_name,
+        "epitope_id": _normalize(ep.get("epitope_id")),
+        "active": _is_epitope_active(ep),
+        "archived_at": _normalize(ep.get("archived_at")),
+        "archived_reason": _normalize(ep.get("archived_reason")),
         "hotspots": hotspots,
         "mask_residues": mask_residues,
         "metrics": metrics,
     }
 
 
-def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
+def _load_epitopes_for_target(pdb_id: str, *, include_inactive: bool = False) -> List[dict]:
     cfg = load_config()
     target_dir = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb_id.upper()
     prep_dir = target_dir / "prep"
@@ -903,8 +961,11 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
         except Exception:
             return []
         entries = []
-        for ep in data.get("epitopes") or []:
+        for ep_idx, ep in enumerate(data.get("epitopes") or [], start=1):
             if not isinstance(ep, dict):
+                continue
+            is_active = _is_epitope_active(ep)
+            if not include_inactive and not is_active:
                 continue
             name = (ep.get("name") or ep.get("display_name") or "").strip()
             if not name:
@@ -913,8 +974,12 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
                 {
                     "name": name,
                     "display_name": ep.get("display_name"),
+                    "epitope_id": _normalize(ep.get("epitope_id")) or f"epitope_{ep_idx}",
+                    "active": is_active,
+                    "archived_at": _normalize(ep.get("archived_at")),
+                    "archived_reason": _normalize(ep.get("archived_reason")),
                     "hotspots": ep.get("hotspots") or [],
-                    "mask_residues": ep.get("residues") or [],
+                    "mask_residues": ep.get("mask_residues") or ep.get("residues") or [],
                     "metrics": ep.get("metrics") or {},
                 }
             )
@@ -936,7 +1001,7 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
             entries: List[dict] = []
             for ep in data.get("epitopes") or []:
                 parsed = _parse_epitope_metadata(ep, prep_dir)
-                if parsed:
+                if parsed and (include_inactive or parsed.get("active", True)):
                     entries.append(parsed)
             if entries:
                 return entries
@@ -952,13 +1017,18 @@ def _load_epitopes_for_target(pdb_id: str) -> List[dict]:
         return bundle_eps if bundle_eps else _fallback_from_target_yaml()
 
     epitopes = data.get("epitopes") or []
+    parsed_any = False
     output = []
     for ep in epitopes:
         parsed = _parse_epitope_metadata(ep, prep_dir)
         if parsed:
-            output.append(parsed)
+            parsed_any = True
+            if include_inactive or parsed.get("active", True):
+                output.append(parsed)
     if output:
         return output
+    if parsed_any:
+        return []
     bundle_eps = _fallback_from_bundle()
     if bundle_eps:
         return bundle_eps
@@ -2059,10 +2129,12 @@ def _epitope_labels_from_target(target_dir: Path) -> Dict[int, dict]:
     except Exception:
         return {}
     labels: Dict[int, dict] = {}
-    for idx, entry in enumerate(data.get("epitopes") or [], start=1):
-        name = entry.get("display_name") or entry.get("name") or f"Epitope {idx}"
+    active_idx = 0
+    for _raw_idx, entry in _iter_epitopes(data.get("epitopes") or [], include_inactive=False):
+        active_idx += 1
+        name = entry.get("display_name") or entry.get("name") or f"Epitope {active_idx}"
         residues = entry.get("residues") or []
-        labels[idx] = {"name": str(name).strip(), "residues": residues}
+        labels[active_idx] = {"name": str(name).strip(), "residues": residues}
     return labels
 
 
@@ -2329,8 +2401,588 @@ def _extract_expressed_range(data: dict) -> Tuple[Optional[str], Optional[int]]:
 def _epitope_count_from_yaml(data: dict) -> Optional[int]:
     epitopes = data.get("epitopes")
     if isinstance(epitopes, list):
-        return len(epitopes)
+        return sum(1 for _idx, _entry in _iter_epitopes(epitopes, include_inactive=False))
     return None
+
+
+def _archived_epitopes_from_yaml(data: dict) -> List[dict]:
+    rows: List[dict] = []
+    epitopes = data.get("epitopes")
+    if not isinstance(epitopes, list):
+        return rows
+    for raw_idx, entry in enumerate(epitopes, start=1):
+        if not isinstance(entry, dict) or _is_epitope_active(entry):
+            continue
+        name = (
+            _normalize(entry.get("name"))
+            or _normalize(entry.get("display_name"))
+            or f"Epitope {raw_idx}"
+        )
+        rows.append(
+            {
+                "epitope_id": _normalize(entry.get("epitope_id")) or f"epitope_{raw_idx}",
+                "epitope_name": name,
+                "archived_at": _normalize(entry.get("archived_at")),
+            }
+        )
+    return rows
+
+
+def _target_dir_for_pdb(pdb_id: str) -> Path:
+    cfg = load_config()
+    targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    return (targets_dir / str(pdb_id or "").strip().upper()).resolve()
+
+
+def _load_target_yaml_strict(pdb_id: str) -> Tuple[Path, Path, dict]:
+    target_dir = _target_dir_for_pdb(pdb_id)
+    target_yaml = target_dir / "target.yaml"
+    if not target_dir.exists():
+        raise FileNotFoundError(f"Target directory not found for {pdb_id}: {target_dir}")
+    if not target_yaml.exists():
+        raise FileNotFoundError(f"target.yaml not found for {pdb_id}: {target_yaml}")
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception as exc:
+        raise ValueError(f"Failed to parse target.yaml for {pdb_id}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid target.yaml structure for {pdb_id}: expected mapping")
+    return target_dir, target_yaml, data
+
+
+def _parse_residue_number_list(raw_numbers: object, expected_len: int) -> List[int]:
+    if expected_len <= 0:
+        return []
+    parsed: List[int] = []
+    if isinstance(raw_numbers, list):
+        for value in raw_numbers:
+            num = _parse_residue_index_token(value)
+            if num is not None:
+                parsed.append(int(num))
+    if len(parsed) >= expected_len:
+        return parsed[:expected_len]
+    return list(range(1, expected_len + 1))
+
+
+def _residue_rows_from_target_yaml(data: dict) -> Dict[str, List[Tuple[int, str]]]:
+    sequences = data.get("sequences") or {}
+    seq_map = sequences.get("pdb") or {}
+    if not isinstance(seq_map, dict):
+        return {}
+    number_map = sequences.get("cif_residue_numbers")
+    if not isinstance(number_map, dict):
+        number_map = sequences.get("pdb_residue_numbers")
+    if not isinstance(number_map, dict):
+        number_map = {}
+
+    output: Dict[str, List[Tuple[int, str]]] = {}
+    for raw_chain, raw_seq in seq_map.items():
+        chain = str(raw_chain or "").strip().upper()
+        seq = str(raw_seq or "").strip()
+        if not chain or not seq:
+            continue
+        raw_numbers = number_map.get(raw_chain)
+        if raw_numbers is None:
+            raw_numbers = number_map.get(chain)
+        numbers = _parse_residue_number_list(raw_numbers, len(seq))
+        residues: List[Tuple[int, str]] = []
+        for idx, aa in enumerate(seq):
+            res_index = int(numbers[idx]) if idx < len(numbers) else idx + 1
+            residues.append((res_index, aa.upper()))
+        output[chain] = residues
+    return output
+
+
+def _allowed_positions_from_range(raw: object) -> Dict[str, set[int]]:
+    entries: List[str] = []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            entries.append(text)
+    elif isinstance(raw, list):
+        entries = [str(item).strip() for item in raw if str(item).strip()]
+    if not entries:
+        return {}
+    joined = ";".join(entries)
+    mapping = _expand_binding_label(joined)
+    out: Dict[str, set[int]] = {}
+    for chain, residues in mapping.items():
+        chain_id = str(chain or "").strip().upper()
+        if not chain_id:
+            continue
+        out[chain_id] = {int(res) for res in residues if isinstance(res, int)}
+    return out
+
+
+def _canonical_residue_token(token: object) -> Optional[str]:
+    parsed = _parse_chain_res_token(token)
+    if not parsed:
+        return None
+    chain_id, resnum, _icode = parsed
+    if resnum <= 0:
+        return None
+    return f"{chain_id.upper()}:{int(resnum)}"
+
+
+def _sort_residue_tokens(tokens: Sequence[str]) -> List[str]:
+    parsed: List[Tuple[str, int, str]] = []
+    for token in tokens:
+        match = _parse_chain_res_token(token)
+        if not match:
+            continue
+        chain_id, resnum, _icode = match
+        parsed.append((chain_id.upper(), int(resnum), f"{chain_id.upper()}:{int(resnum)}"))
+    parsed.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in parsed]
+
+
+def _compact_residue_ranges(tokens: Sequence[str]) -> List[str]:
+    by_chain: Dict[str, List[int]] = defaultdict(list)
+    for token in tokens:
+        parsed = _parse_chain_res_token(token)
+        if not parsed:
+            continue
+        chain_id, resnum, _icode = parsed
+        by_chain[chain_id.upper()].append(int(resnum))
+
+    compact: List[str] = []
+    for chain_id in sorted(by_chain.keys()):
+        values = sorted(set(by_chain[chain_id]))
+        if not values:
+            continue
+        start = values[0]
+        end = start
+        for value in values[1:]:
+            if value == end + 1:
+                end = value
+                continue
+            compact.append(f"{chain_id}:{start}-{end}" if start != end else f"{chain_id}:{start}")
+            start = value
+            end = value
+        compact.append(f"{chain_id}:{start}-{end}" if start != end else f"{chain_id}:{start}")
+    return compact
+
+
+def _sanitize_epitope_stem(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", str(name or "").strip()).strip("_")
+    return stem or "manual_epitope"
+
+
+def _next_manual_epitope_name(existing: Sequence[dict]) -> str:
+    used = {
+        str(entry.get("name") or "").strip().lower()
+        for entry in existing
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+    }
+    idx = 1
+    while True:
+        candidate = f"manual_epitope_{idx}"
+        if candidate.lower() not in used:
+            return candidate
+        idx += 1
+
+
+def _utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _write_json_list_file(path: Path, values: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([str(v) for v in values], indent=2) + "\n", encoding="utf-8")
+
+
+def _hotspot_occupancy_counts(pdb_id: str) -> Dict[str, int]:
+    counts: Dict[str, int] = defaultdict(int)
+    for ep in _load_epitopes_for_target(pdb_id):
+        hotspots = ep.get("hotspots") if isinstance(ep, dict) else []
+        for token in hotspots or []:
+            canonical = _canonical_residue_token(token)
+            if canonical:
+                counts[canonical] += 1
+    return dict(counts)
+
+
+def _metrics_file_has_rows(path: Path, *, delimiter: str) -> bool:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for row in reader:
+                if any(str(value).strip() for value in row.values() if value is not None):
+                    return True
+    except Exception:
+        try:
+            return path.stat().st_size > 0
+        except OSError:
+            return False
+    return False
+
+
+def target_has_binders(pdb_id: str) -> bool:
+    design_root = _target_dir_for_pdb(pdb_id) / "designs"
+    if not design_root.exists():
+        return False
+
+    for metrics_path in design_root.rglob("all_designs_metrics.csv"):
+        if metrics_path.is_file() and _metrics_file_has_rows(metrics_path, delimiter=","):
+            return True
+    for rankings_path in design_root.rglob("af3_rankings.tsv"):
+        if rankings_path.is_file() and _metrics_file_has_rows(rankings_path, delimiter="\t"):
+            return True
+    return False
+
+
+def get_boltzgen_epitope_options(pdb_id: str) -> BoltzgenEpitopeOptionsResponse:
+    upper = str(pdb_id or "").strip().upper()
+    if not upper:
+        raise ValueError("Missing PDB ID.")
+    _target_dir, _target_yaml, data = _load_target_yaml_strict(upper)
+    residue_rows = _residue_rows_from_target_yaml(data)
+    if not residue_rows:
+        raise ValueError(f"No chain sequence data found in target.yaml for {upper}.")
+
+    allowed_raw = data.get("allowed_epitope_range") or data.get("allowed_range")
+    allowed_text = _coerce_allowed_range(allowed_raw)
+    allowed_map = _allowed_positions_from_range(allowed_raw)
+    has_allowed = bool(allowed_map)
+    occupancy = _hotspot_occupancy_counts(upper)
+
+    chains: List[BoltzgenEpitopeChainOption] = []
+    for chain_id in sorted(residue_rows.keys()):
+        residues: List[BoltzgenEpitopeResidueOption] = []
+        for res_index, aa in residue_rows[chain_id]:
+            token = f"{chain_id}:{int(res_index)}"
+            allowed = True
+            if has_allowed:
+                allowed = int(res_index) in allowed_map.get(chain_id, set())
+            occupied_count = int(occupancy.get(token, 0))
+            residues.append(
+                BoltzgenEpitopeResidueOption(
+                    token=token,
+                    chain_id=chain_id,
+                    res_index=int(res_index),
+                    aa=str(aa or "X")[:1].upper() or "X",
+                    allowed=allowed,
+                    occupied=occupied_count > 0,
+                    occupied_count=occupied_count,
+                )
+            )
+        chains.append(BoltzgenEpitopeChainOption(chain_id=chain_id, residues=residues))
+
+    message = f"Loaded {sum(len(chain.residues) for chain in chains)} residues across {len(chains)} chain(s)."
+    return BoltzgenEpitopeOptionsResponse(
+        pdb_id=upper,
+        allowed_epitope_range=allowed_text,
+        chains=chains,
+        message=message,
+    )
+
+
+def _resolve_epitope_index(
+    epitopes: Sequence[dict],
+    *,
+    epitope_id: Optional[str],
+    epitope_name: Optional[str],
+    include_inactive: bool = False,
+) -> Optional[int]:
+    scoped_entries = list(_iter_epitopes(epitopes, include_inactive=include_inactive))
+    id_text = _normalize(epitope_id)
+    name_text = _normalize(epitope_name)
+    if id_text:
+        match = re.search(r"epitope[_\-\s]*(\d+)", id_text, flags=re.IGNORECASE) or re.fullmatch(r"(\d+)", id_text)
+        if match:
+            idx = int(match.group(1))
+            if 1 <= idx <= len(scoped_entries):
+                return scoped_entries[idx - 1][0]
+        for raw_idx, entry in scoped_entries:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "display_name", "epitope_name"):
+                val = _normalize(entry.get(key))
+                if val and val.lower() == id_text.lower():
+                    return raw_idx
+    if name_text:
+        for raw_idx, entry in scoped_entries:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "display_name", "epitope_name"):
+                val = _normalize(entry.get(key))
+                if val and val.lower() == name_text.lower():
+                    return raw_idx
+    return None
+
+
+def _collect_epitope_file_names(entry: Optional[dict], ep_name: str) -> set[str]:
+    names: set[str] = set()
+    if isinstance(entry, dict):
+        files = entry.get("files")
+        if isinstance(files, dict):
+            for key in ("mask_json", "hotspots_json"):
+                raw = _normalize(files.get(key))
+                if raw:
+                    names.add(raw)
+                    if raw.endswith("_hotspotsA.json"):
+                        names.add(raw[:-len("A.json")] + ".json")
+                    if raw.endswith("_hotspots.json"):
+                        names.add(raw[:-len(".json")] + "A.json")
+    stem = _sanitize_epitope_stem(ep_name)
+    names.add(f"epitope_{stem}.json")
+    names.add(f"epitope_{stem}_hotspots.json")
+    names.add(f"epitope_{stem}_hotspotsA.json")
+    return {name for name in names if name}
+
+
+def add_manual_boltzgen_epitope(request: BoltzgenEpitopeAddRequest) -> BoltzgenEpitopeMutationResponse:
+    pdb_id = str(request.pdb_id or "").strip().upper()
+    if not pdb_id:
+        raise ValueError("Missing PDB ID.")
+
+    options = get_boltzgen_epitope_options(pdb_id)
+    token_options: Dict[str, BoltzgenEpitopeResidueOption] = {}
+    for chain in options.chains:
+        for residue in chain.residues:
+            token_options[residue.token] = residue
+
+    normalized_tokens: List[str] = []
+    seen_tokens: set[str] = set()
+    for raw in request.residue_tokens or []:
+        canonical = _canonical_residue_token(raw)
+        if not canonical or canonical in seen_tokens:
+            continue
+        seen_tokens.add(canonical)
+        normalized_tokens.append(canonical)
+    normalized_tokens = _sort_residue_tokens(normalized_tokens)
+    if not normalized_tokens:
+        raise ValueError("No valid residue tokens provided.")
+
+    invalid = [token for token in normalized_tokens if token not in token_options]
+    if invalid:
+        raise ValueError(f"Unsupported residue token(s): {', '.join(invalid[:12])}")
+    disallowed = [token for token in normalized_tokens if not token_options[token].allowed]
+    if disallowed:
+        raise ValueError(
+            "Selected residues outside allowed_epitope_range: "
+            + ", ".join(disallowed[:12])
+        )
+
+    target_dir, target_yaml, data = _load_target_yaml_strict(pdb_id)
+    epitopes = data.get("epitopes")
+    if not isinstance(epitopes, list):
+        epitopes = []
+        data["epitopes"] = epitopes
+
+    requested_name = _normalize(request.epitope_name)
+    if requested_name:
+        existing_names = {
+            str(entry.get("name") or "").strip().lower()
+            for entry in epitopes
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        }
+        if requested_name.lower() in existing_names:
+            raise ValueError(f"Epitope name already exists: {requested_name}")
+        epitope_name = requested_name
+    else:
+        epitope_name = _next_manual_epitope_name(epitopes)
+
+    epitope_index = sum(1 for _idx, _entry in _iter_epitopes(epitopes, include_inactive=False)) + 1
+    stem = _sanitize_epitope_stem(epitope_name)
+    mask_name = f"epitope_{stem}.json"
+    hotspots_name = f"epitope_{stem}_hotspotsA.json"
+    hotspots_compat_name = f"epitope_{stem}_hotspots.json"
+    residues_compact = _compact_residue_ranges(normalized_tokens)
+
+    prep_dir = target_dir / "prep"
+    prep_dir.mkdir(parents=True, exist_ok=True)
+    _write_json_list_file(prep_dir / mask_name, normalized_tokens)
+    _write_json_list_file(prep_dir / hotspots_name, normalized_tokens)
+    _write_json_list_file(prep_dir / hotspots_compat_name, normalized_tokens)
+
+    ep_record = {
+        "name": epitope_name,
+        "display_name": epitope_name.replace("_", " "),
+        "residues": residues_compact,
+        "rationale": "Manual hotspot selection from Bulk UI.",
+        "hotspots": normalized_tokens,
+        "hotspot_count": len(normalized_tokens),
+        "mask_residues": normalized_tokens,
+        "active": True,
+        "archived_at": None,
+        "archived_reason": None,
+        "files": {
+            "mask_json": mask_name,
+            "hotspots_json": hotspots_name,
+        },
+    }
+    epitopes.append(ep_record)
+    target_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    meta_path = prep_dir / "epitopes_metadata.json"
+    meta_data: dict = {}
+    if meta_path.exists():
+        try:
+            parsed = json.loads(meta_path.read_text())
+            if isinstance(parsed, dict):
+                meta_data = parsed
+        except Exception:
+            meta_data = {}
+    if not isinstance(meta_data, dict):
+        meta_data = {}
+    meta_eps = meta_data.get("epitopes")
+    if not isinstance(meta_eps, list):
+        meta_eps = []
+    meta_data["metadata_version"] = int(meta_data.get("metadata_version") or 3)
+    meta_data["generated_at"] = _utc_now_iso()
+    meta_data["pdb_id"] = pdb_id
+    config_block = meta_data.get("config")
+    if not isinstance(config_block, dict):
+        config_block = {}
+    if not config_block.get("chains"):
+        config_block["chains"] = sorted({token.split(":", 1)[0] for token in normalized_tokens})
+    config_block.setdefault("mode", "manual")
+    config_block.setdefault("sasa_cutoff", None)
+    meta_data["config"] = config_block
+    meta_eps.append(
+        {
+            "name": epitope_name,
+            "display_name": epitope_name.replace("_", " "),
+            "residues": residues_compact,
+            "mask_residues": normalized_tokens,
+            "hotspots": normalized_tokens,
+            "declared_count": len(normalized_tokens),
+            "exposed_count": None,
+            "exposed_fraction": None,
+            "hotspot_count": len(normalized_tokens),
+            "active": True,
+            "archived_at": None,
+            "archived_reason": None,
+            "files": {
+                "mask_json": mask_name,
+                "hotspots_json": hotspots_name,
+            },
+        }
+    )
+    meta_data["epitopes"] = meta_eps
+    meta_path.write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
+
+    regen = regenerate_boltzgen_configs(
+        [pdb_id],
+        request.design_count,
+        crop_radius=request.boltzgen_crop_radius,
+    )
+    regen_result = next((row for row in (regen.results or []) if row.pdb_id == pdb_id), None)
+    configs_written = int(regen_result.configs_written) if regen_result else 0
+    regen_msg = (regen_result.message if regen_result else "") or f"Regenerated {configs_written} configs"
+    return BoltzgenEpitopeMutationResponse(
+        pdb_id=pdb_id,
+        action="added",
+        epitope_id=f"epitope_{epitope_index}",
+        epitope_name=epitope_name,
+        configs_written=configs_written,
+        message=f"Added {epitope_name}. {regen_msg}",
+    )
+
+
+def remove_manual_boltzgen_epitope(request: BoltzgenEpitopeRemoveRequest) -> BoltzgenEpitopeMutationResponse:
+    pdb_id = str(request.pdb_id or "").strip().upper()
+    if not pdb_id:
+        raise ValueError("Missing PDB ID.")
+    if not _normalize(request.epitope_id) and not _normalize(request.epitope_name):
+        raise ValueError("Provide epitope_id or epitope_name.")
+
+    target_dir, target_yaml, data = _load_target_yaml_strict(pdb_id)
+    epitopes = data.get("epitopes")
+    if not isinstance(epitopes, list) or not epitopes:
+        raise ValueError(f"No epitopes available for {pdb_id}.")
+    active_entries = list(_iter_epitopes(epitopes, include_inactive=False))
+    if not active_entries:
+        raise ValueError(f"No active epitopes available for {pdb_id}.")
+
+    remove_idx = _resolve_epitope_index(
+        epitopes,
+        epitope_id=request.epitope_id,
+        epitope_name=request.epitope_name,
+        include_inactive=False,
+    )
+    if remove_idx is None:
+        existing_idx = _resolve_epitope_index(
+            epitopes,
+            epitope_id=request.epitope_id,
+            epitope_name=request.epitope_name,
+            include_inactive=True,
+        )
+        if existing_idx is not None:
+            raise ValueError("Epitope already deactivated.")
+        raise ValueError("Epitope not found.")
+    if remove_idx < 0 or remove_idx >= len(epitopes):
+        raise ValueError("Epitope not found.")
+
+    active_pos = None
+    for ord_idx, (raw_idx, _entry) in enumerate(active_entries, start=1):
+        if raw_idx == remove_idx:
+            active_pos = ord_idx
+            break
+    if active_pos is None:
+        raise ValueError("Epitope not found.")
+
+    removed_entry = epitopes[remove_idx]
+    removed_name = (
+        _normalize(removed_entry.get("name") if isinstance(removed_entry, dict) else None)
+        or _normalize(removed_entry.get("display_name") if isinstance(removed_entry, dict) else None)
+        or f"epitope_{active_pos}"
+    )
+    archived_at = _utc_now_iso()
+    if isinstance(removed_entry, dict):
+        _mark_epitope_inactive(removed_entry, timestamp=archived_at, reason="manual_deactivate")
+    data["epitopes"] = epitopes
+    target_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    prep_dir = target_dir / "prep"
+    meta_path = prep_dir / "epitopes_metadata.json"
+    if meta_path.exists():
+        try:
+            meta_data = json.loads(meta_path.read_text()) or {}
+        except Exception:
+            meta_data = {}
+        if isinstance(meta_data, dict):
+            meta_eps = meta_data.get("epitopes")
+            if isinstance(meta_eps, list):
+                remove_ep_id = _normalize(request.epitope_id) or f"epitope_{active_pos}"
+                meta_idx = _resolve_epitope_index(
+                    meta_eps,
+                    epitope_id=remove_ep_id,
+                    epitope_name=removed_name,
+                    include_inactive=False,
+                )
+                if (
+                    meta_idx is None
+                    and remove_idx < len(meta_eps)
+                    and isinstance(meta_eps[remove_idx], dict)
+                    and _is_epitope_active(meta_eps[remove_idx])
+                ):
+                    meta_idx = remove_idx
+                if meta_idx is not None and 0 <= meta_idx < len(meta_eps):
+                    entry = meta_eps[meta_idx]
+                    if isinstance(entry, dict):
+                        _mark_epitope_inactive(entry, timestamp=archived_at, reason="manual_deactivate")
+                meta_data["epitopes"] = meta_eps
+                meta_data["generated_at"] = archived_at
+                meta_path.write_text(json.dumps(meta_data, indent=2) + "\n", encoding="utf-8")
+
+    regen = regenerate_boltzgen_configs(
+        [pdb_id],
+        request.design_count,
+        crop_radius=request.boltzgen_crop_radius,
+    )
+    regen_result = next((row for row in (regen.results or []) if row.pdb_id == pdb_id), None)
+    configs_written = int(regen_result.configs_written) if regen_result else 0
+    regen_msg = (regen_result.message if regen_result else "") or f"Regenerated {configs_written} configs"
+    return BoltzgenEpitopeMutationResponse(
+        pdb_id=pdb_id,
+        action="deactivated",
+        epitope_id=f"epitope_{active_pos}",
+        epitope_name=removed_name,
+        configs_written=configs_written,
+        message=f"Deactivated {removed_name}. Existing prep/design files were retained. {regen_msg}",
+    )
 
 
 def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse:
@@ -2346,7 +2998,9 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
         allowed_range = None
         allowed_length = None
         epitope_count = None
+        archived_epitopes: List[dict] = []
         sasa_cutoff = _HOTSPOT_SASA_CUTOFF_DEFAULT
+        has_binders = target_has_binders(pdb)
         try:
             cfg = load_config()
             target_yaml = (cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")) / pdb.upper() / "target.yaml"
@@ -2360,6 +3014,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 allowed_length = _allowed_range_length(allowed_raw)
                 expressed_range, expressed_length = _extract_expressed_range(data)
                 epitope_count = _epitope_count_from_yaml(data)
+                archived_epitopes = _archived_epitopes_from_yaml(data)
                 sasa_cutoff = _hotspot_sasa_cutoff_from_target(data)
         except Exception:
             antigen_url = None
@@ -2368,6 +3023,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
             allowed_range = None
             allowed_length = None
             epitope_count = None
+            archived_epitopes = []
             sasa_cutoff = _HOTSPOT_SASA_CUTOFF_DEFAULT
         has_prep = _has_pymol_assets(pdb)
         configs = _discover_boltzgen_configs(pdb)
@@ -2377,6 +3033,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 BoltzgenTargetConfig(
                     pdb_id=pdb.upper(),
                     configs=[],
+                    has_binders=has_binders,
                     antigen_url=antigen_url,
                     has_prep=has_prep,
                     antigen_expressed_range=expressed_range,
@@ -2384,6 +3041,8 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                     allowed_epitope_range=allowed_range,
                     allowed_epitope_length=allowed_length,
                     epitope_count=epitope_count,
+                    archived_epitope_count=len(archived_epitopes),
+                    archived_epitopes=archived_epitopes,
                 )
             )
             continue
@@ -2427,6 +3086,7 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
             BoltzgenTargetConfig(
                 pdb_id=pdb.upper(),
                 configs=enriched,
+                has_binders=has_binders,
                 target_job_id=target_run.get("job_id") if target_run else None,
                 target_job_status=_job_status_for(job_store, target_run.get("job_id")) if target_run else None,
                 antigen_url=antigen_url,
@@ -2436,6 +3096,8 @@ def list_boltzgen_config_state(pdb_ids: List[str]) -> BoltzgenConfigListResponse
                 allowed_epitope_range=allowed_range,
                 allowed_epitope_length=allowed_length,
                 epitope_count=epitope_count,
+                archived_epitope_count=len(archived_epitopes),
+                archived_epitopes=archived_epitopes,
             )
         )
     return BoltzgenConfigListResponse(targets=targets)
@@ -2478,18 +3140,6 @@ def regenerate_boltzgen_configs(
             )
             continue
 
-        epitopes = _load_epitopes_for_target(pdb_id)
-        if not epitopes:
-            results.append(
-                BoltzgenConfigRegenerateResult(
-                    pdb_id=pdb_id,
-                    status="skipped",
-                    configs_written=0,
-                    message="No epitope metadata found.",
-                )
-            )
-            continue
-
         config_root = targets_dir / pdb_id / "configs"
         removed = 0
         if config_root.exists():
@@ -2501,6 +3151,21 @@ def regenerate_boltzgen_configs(
                     removed += 1
                 except Exception as exc:  # pragma: no cover - defensive
                     _log(f"[boltzgen-config] warn: failed to remove {ep_dir}: {exc}")
+
+        epitopes = _load_epitopes_for_target(pdb_id)
+        if not epitopes:
+            msg = "No active epitope metadata found."
+            if removed:
+                msg = f"{msg} Removed {removed} old epitope folder{'' if removed == 1 else 's'}."
+            results.append(
+                BoltzgenConfigRegenerateResult(
+                    pdb_id=pdb_id,
+                    status="skipped",
+                    configs_written=0,
+                    message=msg,
+                )
+            )
+            continue
 
         design_counts = [design_count] * len(epitopes)
         
@@ -4682,7 +5347,7 @@ def _plots_dir(timestamp: str) -> Path:
 
 
 _DIVERSITY_CACHE_NAME = "boltzgen_diversity_cache.json"
-_DIVERSITY_CACHE_VERSION = 5
+_DIVERSITY_CACHE_VERSION = 6
 _BINDER_CACHE_NAME = "boltzgen_binder_cache.json"
 _BINDER_CACHE_VERSION = 5
 _DIVERSITY_SOURCE_FILES = (
@@ -4692,6 +5357,44 @@ _DIVERSITY_SOURCE_FILES = (
     "target.yaml",
     "af3_rankings.tsv",
 )
+
+
+def _normalize_scope_pdb_ids(pdb_ids: Optional[Sequence[object]]) -> List[str]:
+    if not pdb_ids:
+        return []
+    ids: List[str] = []
+    seen: set[str] = set()
+    for raw in pdb_ids:
+        text = str(raw or "").strip().upper()
+        if not text:
+            continue
+        cleaned = "".join(ch for ch in text if ch.isalnum())
+        if len(cleaned) != 4:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ids.append(cleaned)
+    ids.sort()
+    return ids
+
+
+def _scope_target_dirs(targets_dir: Path, scope_pdb_ids: Optional[Sequence[object]] = None) -> List[Path]:
+    if not targets_dir.exists():
+        return []
+    scope_ids = _normalize_scope_pdb_ids(scope_pdb_ids)
+    if not scope_ids:
+        return [entry for entry in sorted(targets_dir.iterdir()) if entry.is_dir()]
+    target_dirs: List[Path] = []
+    for pdb_id in scope_ids:
+        path = targets_dir / pdb_id
+        if path.exists() and path.is_dir():
+            target_dirs.append(path)
+    return target_dirs
+
+
+def _refresh_required_message() -> str:
+    return "No cached binder metrics CSV found. Run Designed binders -> Refresh (or Force rebuild) first."
 
 
 def _diversity_cache_path(out_dir: Path) -> Path:
@@ -4727,6 +5430,19 @@ def _clear_diversity_cache(out_dir: Path) -> None:
             continue
         except Exception as exc:
             print(f"[boltzgen-diversity] warn: failed to remove cache {path}: {exc}")
+
+
+def _get_cached_diversity_csv(out_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
+    cache = _load_diversity_cache(out_dir)
+    if not cache:
+        return None, _refresh_required_message()
+    cached_name = str(cache.get("csv_name") or "").strip()
+    if not cached_name:
+        return None, _refresh_required_message()
+    cached_path = out_dir / Path(cached_name).name
+    if cached_path.exists() and cached_path.is_file():
+        return cached_path, None
+    return None, _refresh_required_message()
 
 
 def _binder_cache_path(out_dir: Path) -> Path:
@@ -5033,28 +5749,32 @@ def _get_cached_binder_rows(
     return page_rows, total
 
 
-def _scan_boltzgen_sources(targets_dir: Path) -> Tuple[float, int]:
+def _scan_boltzgen_sources(
+    targets_dir: Path,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
+) -> Tuple[float, int]:
     latest_mtime = 0.0
     count = 0
-    if not targets_dir.exists():
-        return latest_mtime, count
-    for root, _, files in os.walk(targets_dir):
-        for name in files:
-            if name not in _DIVERSITY_SOURCE_FILES and not name.startswith("af3_rankings"):
-                continue
-            path = Path(root) / name
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            count += 1
-            if mtime > latest_mtime:
-                latest_mtime = mtime
+    target_dirs = _scope_target_dirs(targets_dir, scope_pdb_ids)
+    for target_dir in target_dirs:
+        for root, _, files in os.walk(target_dir):
+            for name in files:
+                if name not in _DIVERSITY_SOURCE_FILES and not name.startswith("af3_rankings"):
+                    continue
+                path = Path(root) / name
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                count += 1
+                if mtime > latest_mtime:
+                    latest_mtime = mtime
     return latest_mtime, count
 
 
 def _maybe_run_rfa_assessments(
     targets_dir: Path,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
     *,
     log: Callable[[str], None] = print,
 ) -> None:
@@ -5067,9 +5787,7 @@ def _maybe_run_rfa_assessments(
     binder_chain = (cfg.cluster.rfantibody.binder_chain_id or "H").strip().upper() or "H"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-    for pdb_dir in sorted(targets_dir.iterdir()):
-        if not pdb_dir.is_dir():
-            continue
+    for pdb_dir in _scope_target_dirs(targets_dir, scope_pdb_ids):
         pdb_id = pdb_dir.name.upper()
         designs_root = pdb_dir / "designs"
         rfa_root = designs_root / "rfantibody"
@@ -5117,14 +5835,12 @@ def _maybe_run_rfa_assessments(
                 log(res.stderr.strip())
 
 
-def _find_latest_rfa_rankings(targets_dir: Path) -> Dict[str, Path]:
+def _find_latest_rfa_rankings(
+    targets_dir: Path,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
+) -> Dict[str, Path]:
     latest_by_pdb: Dict[str, Path] = {}
-    if not targets_dir.exists():
-        return latest_by_pdb
-
-    for pdb_dir in sorted(targets_dir.iterdir()):
-        if not pdb_dir.is_dir():
-            continue
+    for pdb_dir in _scope_target_dirs(targets_dir, scope_pdb_ids):
         pdb_id = pdb_dir.name.upper()
         designs_root = pdb_dir / "designs"
         assess_roots = []
@@ -5162,9 +5878,12 @@ def _pick_rfa_design_path(row: Dict[str, object]) -> Optional[str]:
     return None
 
 
-def _collect_rfa_design_rows(targets_dir: Path) -> List[Dict[str, object]]:
+def _collect_rfa_design_rows(
+    targets_dir: Path,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
+) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
-    latest_by_pdb = _find_latest_rfa_rankings(targets_dir)
+    latest_by_pdb = _find_latest_rfa_rankings(targets_dir, scope_pdb_ids)
     rank_counters: Dict[str, int] = defaultdict(int)
     for pdb_id, latest in latest_by_pdb.items():
         run_label = latest.parent.name
@@ -5219,15 +5938,13 @@ def _collect_rfa_design_rows(targets_dir: Path) -> List[Dict[str, object]]:
 
 def _collect_rfa_scatter_metrics(
     targets_dir: Path,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
 ) -> tuple[Dict[str, Dict[str, Dict[str, List[float]]]], Dict[str, str]]:
     metrics: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(
         lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
     )
     run_labels: Dict[str, str] = {}
-    if not targets_dir.exists():
-        return metrics, run_labels
-
-    latest_by_pdb = _find_latest_rfa_rankings(targets_dir)
+    latest_by_pdb = _find_latest_rfa_rankings(targets_dir, scope_pdb_ids)
     for pdb_id, latest in latest_by_pdb.items():
         run_labels[pdb_id] = latest.parent.name
         try:
@@ -5255,6 +5972,7 @@ def _diversity_cache_is_fresh(
     latest_mtime: float,
     source_count: int,
     epitope_min_designs: int,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
 ) -> bool:
     if int(cache.get("cache_version") or 0) != _DIVERSITY_CACHE_VERSION:
         return False
@@ -5263,6 +5981,10 @@ def _diversity_cache_is_fresh(
         cached_count = int(cache.get("source_count") or 0)
         cached_epitope_min_designs = int(cache.get("epitope_min_designs") or 100)
     except (TypeError, ValueError):
+        return False
+    cached_scope = _normalize_scope_pdb_ids(cache.get("scope_pdb_ids"))
+    requested_scope = _normalize_scope_pdb_ids(scope_pdb_ids)
+    if cached_scope != requested_scope:
         return False
     if cached_epitope_min_designs != max(1, int(epitope_min_designs or 100)):
         return False
@@ -5282,6 +6004,7 @@ def _response_from_diversity_cache(
     binder_filter_epitope: Optional[str] = None,
     binder_filter_engine: Optional[str] = None,
     binder_order_by: Optional[str] = None,
+    scope_pdb_ids: Optional[Sequence[object]] = None,
 ) -> Optional[BoltzgenDiversityResponse]:
     csv_name = cache.get("csv_name") or None
     csv_path = out_dir / csv_name if csv_name else None
@@ -5295,6 +6018,10 @@ def _response_from_diversity_cache(
     plots = [entry for entry in (cache.get("plots") or []) if isinstance(entry, dict)]
     metrics_files = [entry for entry in (cache.get("metrics_files") or []) if isinstance(entry, dict)]
     binder_counts = cache.get("binder_counts") if isinstance(cache.get("binder_counts"), dict) else {}
+    scope_ids = _normalize_scope_pdb_ids(scope_pdb_ids)
+    if scope_ids:
+        scope_set = set(scope_ids)
+        binder_counts = {key: value for key, value in binder_counts.items() if str(key).upper() in scope_set}
 
     binder_rows: List[BoltzgenBinderRow] = []
     binder_total = 0
@@ -5304,7 +6031,7 @@ def _response_from_diversity_cache(
     if include_binders and csv_path:
         binder_rows, binder_total = _get_cached_binder_rows(
             csv_path,
-            ids=None,
+            ids=scope_ids or None,
             filter_pdb=binder_filter_pdb,
             filter_epitope=binder_filter_epitope,
             filter_engine=binder_filter_engine,
@@ -5916,16 +6643,28 @@ def build_boltzgen_diversity_report(
     binder_order_by: Optional[str] = None,
     force_refresh: bool = False,
     epitope_min_designs: int = 100,
+    pdb_ids: Optional[List[str]] = None,
 ) -> BoltzgenDiversityResponse:
     """Aggregate BoltzGen metrics and render diversity plots."""
 
     cfg = load_config()
     targets_dir = cfg.paths.targets_dir or (cfg.paths.workspace_root / "targets")
+    scope_ids = _normalize_scope_pdb_ids(pdb_ids)
+    target_dirs = _scope_target_dirs(targets_dir, scope_ids)
     epitope_min_designs = max(1, int(epitope_min_designs or 100))
-    print(f"[bulk-diversity] starting report; targets_dir={targets_dir}")
+    print(
+        f"[bulk-diversity] starting report; targets_dir={targets_dir}; "
+        f"scope={'all' if not scope_ids else ','.join(scope_ids)}"
+    )
     if not targets_dir.exists():
         return BoltzgenDiversityResponse(
             message=f"Targets directory missing: {targets_dir}",
+            output_dir=str(_output_dir()),
+            binder_counts={},
+        )
+    if scope_ids and not target_dirs:
+        return BoltzgenDiversityResponse(
+            message=f"No target directories found for requested scope: {', '.join(scope_ids)}",
             output_dir=str(_output_dir()),
             binder_counts={},
         )
@@ -5935,16 +6674,17 @@ def build_boltzgen_diversity_report(
     cache = None
     if force_refresh:
         _clear_diversity_cache(out_dir)
-        _maybe_run_rfa_assessments(targets_dir, log=print)
+        _maybe_run_rfa_assessments(targets_dir, scope_ids, log=print)
     else:
         cache = _load_diversity_cache(out_dir)
         if cache:
-            scan_result = _scan_boltzgen_sources(targets_dir)
+            scan_result = _scan_boltzgen_sources(targets_dir, scope_ids)
             if _diversity_cache_is_fresh(
                 cache,
                 scan_result[0],
                 scan_result[1],
                 epitope_min_designs=epitope_min_designs,
+                scope_pdb_ids=scope_ids,
             ):
                 cached = _response_from_diversity_cache(
                     cache,
@@ -5956,6 +6696,7 @@ def build_boltzgen_diversity_report(
                     binder_filter_epitope=binder_filter_epitope,
                     binder_filter_engine=binder_filter_engine,
                     binder_order_by=binder_order_by,
+                    scope_pdb_ids=scope_ids,
                 )
                 if cached:
                     return cached
@@ -5968,6 +6709,7 @@ def build_boltzgen_diversity_report(
             out_dir=out_dir,
             timestamp=timestamp,
             log=print,
+            pdb_ids=scope_ids or None,
         )
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[epitope-diversity] failed to build plots: {exc}")
@@ -5976,8 +6718,8 @@ def build_boltzgen_diversity_report(
     metrics: Dict[str, Dict[str, Dict[str, List[object]]]] = defaultdict(
         lambda: defaultdict(lambda: {"rmsd": [], "iptm": [], "pairs": []})
     )
-    rfa_metrics, rfa_run_labels = _collect_rfa_scatter_metrics(targets_dir)
-    rfa_rows = _collect_rfa_design_rows(targets_dir)
+    rfa_metrics, rfa_run_labels = _collect_rfa_scatter_metrics(targets_dir, scope_ids)
+    rfa_rows = _collect_rfa_design_rows(targets_dir, scope_ids)
     has_rfa_metrics = any(rfa_metrics.values())
     has_rfa_rows = bool(rfa_rows)
     print(
@@ -5993,9 +6735,7 @@ def build_boltzgen_diversity_report(
     cif_index_cache: Dict[str, Dict[str, Path]] = {}
     binding_cache: Dict[str, Dict[str, List[int]]] = {}
 
-    for pdb_dir in sorted(targets_dir.iterdir()):
-        if not pdb_dir.is_dir():
-            continue
+    for pdb_dir in target_dirs:
         pdb_id = pdb_dir.name.upper()
 
         # Collect epitope residue labels (shifted preferred) from epitope stats.
@@ -6207,7 +6947,7 @@ def build_boltzgen_diversity_report(
 
     binder_counts: Dict[str, int] = {}
     if not aggregate_rows and not has_rfa_metrics:
-        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir, scope_ids)
         if metrics_files:
             message = (
                 "Detected BoltzGen metrics files, but none could be parsed into rows "
@@ -6230,6 +6970,7 @@ def build_boltzgen_diversity_report(
             "metrics_files": metrics_files,
             "message": message,
             "binder_counts": binder_counts,
+            "scope_pdb_ids": scope_ids,
             "epitope_min_designs": epitope_min_designs,
             "source_mtime": source_mtime,
             "source_count": source_count,
@@ -6333,7 +7074,7 @@ def build_boltzgen_diversity_report(
         print("[boltzgen-diversity] matplotlib unavailable; generated CSV only.")
         print(exc)
         traceback.print_exc()
-        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+        source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir, scope_ids)
         csv_name = all_csv_path.name if all_csv_path else None
         if aggregate_rows and has_rfa_metrics:
             message = (
@@ -6363,6 +7104,7 @@ def build_boltzgen_diversity_report(
             "metrics_files": metrics_files,
             "message": message,
             "binder_counts": binder_counts,
+            "scope_pdb_ids": scope_ids,
             "epitope_min_designs": epitope_min_designs,
             "source_mtime": source_mtime,
             "source_count": source_count,
@@ -6996,7 +7738,7 @@ def build_boltzgen_diversity_report(
         ]
     )
     html_path.write_text(html_content, encoding="utf-8")
-    source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir)
+    source_mtime, source_count = scan_result or _scan_boltzgen_sources(targets_dir, scope_ids)
     rfa_scatter_designs = sum(
         len(ep_vals.get("pairs") or [])
         for target_vals in rfa_metrics.values()
@@ -7043,6 +7785,7 @@ def build_boltzgen_diversity_report(
         "metrics_files": metrics_files,
         "message": message,
         "binder_counts": binder_counts,
+        "scope_pdb_ids": scope_ids,
         "epitope_min_designs": epitope_min_designs,
         "source_mtime": source_mtime,
         "source_count": source_count,
@@ -7191,6 +7934,63 @@ def _binder_config_map(entries: List[dict]) -> Dict[str, dict]:
     return mapping
 
 
+def _epitope_activity_lookup_for_pdb(pdb_id: str) -> Dict[str, bool]:
+    target_yaml = _target_dir_for_pdb(pdb_id) / "target.yaml"
+    if not target_yaml.exists():
+        return {}
+    try:
+        data = yaml.safe_load(target_yaml.read_text()) or {}
+    except Exception:
+        return {}
+    epitopes = data.get("epitopes")
+    if not isinstance(epitopes, list):
+        return {}
+    lookup: Dict[str, bool] = {}
+    for raw_idx, entry in enumerate(epitopes, start=1):
+        if not isinstance(entry, dict):
+            continue
+        active = _is_epitope_active(entry)
+        candidates = [
+            entry.get("epitope_id"),
+            entry.get("name"),
+            entry.get("display_name"),
+            entry.get("epitope_name"),
+            f"epitope_{raw_idx}",
+        ]
+        for candidate in candidates:
+            text = _normalize(candidate)
+            if not text:
+                continue
+            token = _normalize_epitope_token(text)
+            if token and token not in lookup:
+                lookup[token] = active
+            lower = text.lower()
+            if lower and lower not in lookup:
+                lookup[lower] = active
+    return lookup
+
+
+def _resolve_epitope_active_flag(
+    lookup: Dict[str, bool],
+    *,
+    epitope_id: Optional[str],
+    epitope_name: Optional[str],
+) -> Optional[bool]:
+    if not lookup:
+        return None
+    for raw in (epitope_id, epitope_name):
+        text = _normalize(raw)
+        if not text:
+            continue
+        token = _normalize_epitope_token(text)
+        if token and token in lookup:
+            return lookup[token]
+        lower = text.lower()
+        if lower in lookup:
+            return lookup[lower]
+    return None
+
+
 def _load_binder_rows_from_csv(
     csv_path: Path,
     *,
@@ -7201,6 +8001,7 @@ def _load_binder_rows_from_csv(
     wanted_set = set(wanted)
     by_pdb_counter: Dict[str, int] = defaultdict(int)
     config_cache: Dict[str, Dict[str, dict]] = {}
+    epitope_activity_cache: Dict[str, Dict[str, bool]] = {}
     all_rows: List[BoltzgenBinderRow] = []
 
     with csv_path.open("r", encoding="utf-8-sig") as handle:
@@ -7291,11 +8092,18 @@ def _load_binder_rows_from_csv(
                     cfg_entries = _discover_boltzgen_configs(pdb_id)
                     config_cache[pdb_id] = _binder_config_map(cfg_entries)
                 cfg_meta = config_cache.get(pdb_id, {}).get(epitope or "") or {}
+            if pdb_id not in epitope_activity_cache:
+                epitope_activity_cache[pdb_id] = _epitope_activity_lookup_for_pdb(pdb_id)
             epitope_id = cfg_meta.get("epitope_id")
             if not epitope_id and epitope:
                 ep_norm = str(epitope).strip()
                 if re.match(r"^epitope_\\d+$", ep_norm, flags=re.IGNORECASE):
                     epitope_id = ep_norm
+            epitope_active = _resolve_epitope_active_flag(
+                epitope_activity_cache.get(pdb_id, {}),
+                epitope_id=str(epitope_id or "") if epitope_id is not None else None,
+                epitope_name=str(epitope or "") if epitope is not None else None,
+            )
             binding_label = cfg_meta.get("binding_label")
             include_label = cfg_meta.get("include_label")
             binder_seq = (
@@ -7339,6 +8147,7 @@ def _load_binder_rows_from_csv(
                     binding_label=cfg_meta.get("binding_label"),
                     include_label=cfg_meta.get("include_label"),
                     target_path=target_path,
+                    epitope_active=epitope_active,
                 )
             )
 
@@ -7890,20 +8699,13 @@ def export_selected_binders(
     # Flank request fields are accepted for backward compatibility, but ignored.
     _ = request.upstream_flank, request.downstream_flank
 
-    report = build_boltzgen_diversity_report()
-    csv_name = report.csv_name
-    if not csv_name:
+    out_dir = _output_dir()
+    csv_path, missing_msg = _get_cached_diversity_csv(out_dir)
+    if not csv_path:
         return BoltzgenBinderExportResponse(
             selection_count=len(entries),
             invalid=invalid,
-            message=report.message or "No binder metrics detected for the requested targets.",
-        )
-    csv_path = _output_dir() / csv_name
-    if not csv_path.exists():
-        return BoltzgenBinderExportResponse(
-            selection_count=len(entries),
-            invalid=invalid,
-            message=f"Aggregated metrics CSV missing: {csv_path}",
+            message=missing_msg or _refresh_required_message(),
         )
 
     pdb_ids = sorted({pdb_id for pdb_id, _ in entries})
@@ -8146,7 +8948,6 @@ def export_selected_binders(
             message="No binders matched the requested selections.",
         )
 
-    out_dir = _output_dir()
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     export_name = f"selected_binders_{timestamp}.csv"
     export_path = out_dir / export_name
@@ -8201,20 +9002,15 @@ def list_boltzgen_binders(
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
 
-    report = build_boltzgen_diversity_report()
-    csv_name = report.csv_name
-    if not csv_name:
+    out_dir = _output_dir()
+    csv_path, missing_msg = _get_cached_diversity_csv(out_dir)
+    if not csv_path:
         return BoltzgenBinderResponse(
-            message=report.message or "No binder metrics detected for the requested targets.",
+            message=missing_msg or _refresh_required_message(),
             page=page,
             page_size=page_size,
         )
-
-    csv_path = _output_dir() / csv_name
-    if not csv_path.exists():
-        return BoltzgenBinderResponse(
-            message=f"Aggregated metrics CSV missing: {csv_path}", page=page, page_size=page_size
-        )
+    csv_name = csv_path.name
 
     page_rows, total_rows = _get_cached_binder_rows(
         csv_path,
@@ -8225,16 +9021,16 @@ def list_boltzgen_binders(
         order_by=order_by,
         page=page,
         page_size=page_size,
-        out_dir=_output_dir(),
+        out_dir=out_dir,
     )
 
-    message = report.message
+    message: Optional[str] = None
     filters_active = bool((filter_pdb or "").strip() or (filter_epitope or "").strip())
     if total_rows == 0:
         if filters_active:
             message = "No binders match current filters."
         else:
-            message = report.message or "No binder metrics detected for the requested targets."
+            message = "No binder metrics detected for the requested targets in cached CSV."
     else:
         message = f"Showing {len(page_rows)} of {total_rows} binders"
 

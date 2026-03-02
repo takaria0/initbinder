@@ -49,6 +49,10 @@ from .models import (
     BoltzgenConfigRegenerateResponse,
     BoltzgenConfigRunRequest,
     BoltzgenConfigRunResponse,
+    BoltzgenEpitopeOptionsResponse,
+    BoltzgenEpitopeAddRequest,
+    BoltzgenEpitopeRemoveRequest,
+    BoltzgenEpitopeMutationResponse,
     BoltzGenRunListResponse,
     BoltzGenSyncResponse,
     BulkCommandDefaultsResponse,
@@ -125,6 +129,9 @@ from .bulk import (
     export_selected_binders,
     list_boltzgen_binders,
     list_boltzgen_config_state,
+    get_boltzgen_epitope_options,
+    add_manual_boltzgen_epitope,
+    remove_manual_boltzgen_epitope,
     regenerate_boltzgen_configs,
     load_boltzgen_config_content,
     list_rfa_pipeline_configs,
@@ -1118,12 +1125,14 @@ async def api_bulk_file(name: str) -> FileResponse:
 async def api_boltzgen_diversity(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=200),
+    pdb_ids: Optional[str] = Query(None, description="Optional comma-separated PDB IDs to scope aggregation"),
     filter_pdb: Optional[str] = Query(None),
     filter_epitope: Optional[str] = Query(None),
     filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
     epitope_min_designs: int = Query(100, ge=1),
 ) -> BoltzgenDiversityResponse:
+    scoped_ids = [p.strip().upper() for p in (pdb_ids or "").split(",") if p.strip()]
     return build_boltzgen_diversity_report(
         include_binders=True,
         binder_page=page,
@@ -1133,6 +1142,7 @@ async def api_boltzgen_diversity(
         binder_filter_engine=filter_engine,
         binder_order_by=order_by,
         epitope_min_designs=epitope_min_designs,
+        pdb_ids=scoped_ids or None,
     )
 
 
@@ -1140,12 +1150,14 @@ async def api_boltzgen_diversity(
 async def api_boltzgen_diversity_refresh(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=200),
+    pdb_ids: Optional[str] = Query(None, description="Optional comma-separated PDB IDs to scope aggregation"),
     filter_pdb: Optional[str] = Query(None),
     filter_epitope: Optional[str] = Query(None),
     filter_engine: Optional[str] = Query(None),
     order_by: Optional[str] = Query(None),
     epitope_min_designs: int = Query(100, ge=1),
 ) -> BoltzgenDiversityResponse:
+    scoped_ids = [p.strip().upper() for p in (pdb_ids or "").split(",") if p.strip()]
     return build_boltzgen_diversity_report(
         include_binders=True,
         binder_page=page,
@@ -1156,6 +1168,7 @@ async def api_boltzgen_diversity_refresh(
         binder_order_by=order_by,
         force_refresh=True,
         epitope_min_designs=epitope_min_designs,
+        pdb_ids=scoped_ids or None,
     )
 
 
@@ -1352,6 +1365,44 @@ async def api_boltzgen_config_list(
 ) -> BoltzgenConfigListResponse:
     ids = [p.strip().upper() for p in pdb_ids.split(",") if p.strip()]
     return list_boltzgen_config_state(ids)
+
+
+@app.get("/api/bulk/boltzgen/epitopes/options", response_model=BoltzgenEpitopeOptionsResponse)
+async def api_boltzgen_epitope_options(
+    pdb_id: str = Query(..., description="PDB ID to inspect for manual epitope residue options"),
+) -> BoltzgenEpitopeOptionsResponse:
+    try:
+        return get_boltzgen_epitope_options(pdb_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/bulk/boltzgen/epitopes/add", response_model=BoltzgenEpitopeMutationResponse)
+async def api_boltzgen_epitope_add(
+    payload: BoltzgenEpitopeAddRequest,
+) -> BoltzgenEpitopeMutationResponse:
+    try:
+        return add_manual_boltzgen_epitope(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/bulk/boltzgen/epitopes/remove", response_model=BoltzgenEpitopeMutationResponse)
+async def api_boltzgen_epitope_remove(
+    payload: BoltzgenEpitopeRemoveRequest,
+) -> BoltzgenEpitopeMutationResponse:
+    try:
+        return remove_manual_boltzgen_epitope(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/bulk/boltzgen/configs/regenerate", response_model=BoltzgenConfigRegenerateResponse)

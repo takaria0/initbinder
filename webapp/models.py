@@ -429,6 +429,13 @@ class BoltzgenBinderRow(BaseModel):
     binding_label: Optional[str] = None
     include_label: Optional[str] = None
     target_path: Optional[str] = None
+    epitope_active: Optional[bool] = None
+
+
+class BoltzgenArchivedEpitope(BaseModel):
+    epitope_id: Optional[str] = None
+    epitope_name: Optional[str] = None
+    archived_at: Optional[str] = None
 
 
 class BoltzgenBinderResponse(BaseModel):
@@ -601,6 +608,7 @@ class BoltzgenTargetConfig(BaseModel):
     pdb_id: str
     preset_name: Optional[str] = None
     configs: List[BoltzgenEpitopeConfig] = Field(default_factory=list)
+    has_binders: bool = False
     target_job_id: Optional[str] = None
     target_job_status: Optional[str] = None
     antigen_url: Optional[str] = None
@@ -610,10 +618,67 @@ class BoltzgenTargetConfig(BaseModel):
     allowed_epitope_range: Optional[str] = None
     allowed_epitope_length: Optional[int] = None
     epitope_count: Optional[int] = None
+    archived_epitope_count: int = 0
+    archived_epitopes: List[BoltzgenArchivedEpitope] = Field(default_factory=list)
 
 
 class BoltzgenConfigListResponse(BaseModel):
     targets: List[BoltzgenTargetConfig] = Field(default_factory=list)
+
+
+class BoltzgenEpitopeResidueOption(BaseModel):
+    token: str
+    chain_id: str
+    res_index: int
+    aa: str
+    allowed: bool = True
+    occupied: bool = False
+    occupied_count: int = 0
+
+
+class BoltzgenEpitopeChainOption(BaseModel):
+    chain_id: str
+    residues: List[BoltzgenEpitopeResidueOption] = Field(default_factory=list)
+
+
+class BoltzgenEpitopeOptionsResponse(BaseModel):
+    pdb_id: str
+    allowed_epitope_range: Optional[str] = None
+    chains: List[BoltzgenEpitopeChainOption] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
+class BoltzgenEpitopeAddRequest(BaseModel):
+    pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$")
+    residue_tokens: List[str] = Field(default_factory=list)
+    epitope_name: Optional[str] = Field(None, max_length=160)
+    design_count: int = Field(100, ge=1, le=50000)
+    boltzgen_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Optional BoltzGen crop radius (Å) around hotspots for res_index.",
+    )
+
+
+class BoltzgenEpitopeRemoveRequest(BaseModel):
+    pdb_id: str = Field(..., pattern=r"^[0-9A-Za-z]{4}$")
+    epitope_id: Optional[str] = Field(None, max_length=160)
+    epitope_name: Optional[str] = Field(None, max_length=160)
+    design_count: int = Field(100, ge=1, le=50000)
+    boltzgen_crop_radius: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Optional BoltzGen crop radius (Å) around hotspots for res_index.",
+    )
+
+
+class BoltzgenEpitopeMutationResponse(BaseModel):
+    pdb_id: str
+    action: Literal["added", "removed", "deactivated"]
+    epitope_id: Optional[str] = None
+    epitope_name: Optional[str] = None
+    configs_written: int = 0
+    message: str
 
 
 class BoltzgenConfigContent(BaseModel):

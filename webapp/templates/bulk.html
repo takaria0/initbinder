@@ -188,6 +188,10 @@
                   <button type="button" id="boltz-rerun-range" class="ghost">Select epitopes (LLM)</button>
                   <button type="button" id="boltz-config-regenerate" class="ghost">Rebuild configs</button>
                   <button type="button" id="boltz-plot-diversity" class="ghost">Plot antigen diversity</button>
+                  <label class="bulk-modal-inline-label">
+                    <input type="checkbox" id="boltz-show-archived-epitopes">
+                    Show archived epitopes
+                  </label>
                 </div>
                 <div class="bulk-control-row">
                   <label>Antigen:Epitope selection
@@ -262,6 +266,10 @@
                       <option value="rank">Rank</option>
                       <option value="hotspot">Hotspot dist</option>
                     </select>
+                  </label>
+                  <label class="bulk-modal-inline-label">
+                    <input type="checkbox" id="binder-include-archived" checked>
+                    Include archived
                   </label>
                 </div>
                 <div class="bulk-control-row">
@@ -354,6 +362,39 @@
           <button type="button" id="boltz-run-close" class="ghost">Close</button>
         </div>
         <div id="boltz-run-body" class="scrollable">Loading manual run steps…</div>
+      </div>
+    </div>
+
+    <div id="manual-epitope-modal" class="modal wide-modal" hidden>
+      <div class="modal-backdrop" data-close="manual-epitope"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="manual-epitope-title">Manual hotspot editor</h3>
+          <button type="button" id="manual-epitope-close" class="ghost">Close</button>
+        </div>
+        <div class="bulk-modal-body manual-epitope-body">
+          <div class="bulk-control-row">
+            <label>Epitope name (optional)
+              <input type="text" id="manual-epitope-name" placeholder="manual_epitope_1" maxlength="160">
+            </label>
+            <label class="bulk-modal-inline-label manual-epitope-toggle">
+              <input type="checkbox" id="manual-epitope-allowed-only" checked>
+              <span>Show allowed residues only</span>
+            </label>
+          </div>
+          <p id="manual-epitope-allowed-range" class="help-text">Allowed range: loading residue options…</p>
+          <div id="manual-epitope-chain-tabs" class="manual-chain-tabs" role="tablist" aria-label="Chain selector"></div>
+          <div id="manual-epitope-sequence-grid" class="manual-sequence-grid" aria-live="polite"></div>
+          <div class="manual-selected-header">
+            <strong>Selected residues</strong>
+            <span id="manual-epitope-selection-count" class="help-text">0 selected</span>
+          </div>
+          <div id="manual-epitope-selected" class="manual-selected-chips"></div>
+        </div>
+        <div class="bulk-modal-actions">
+          <button type="button" id="manual-epitope-cancel" class="ghost">Cancel</button>
+          <button type="button" id="manual-epitope-confirm">Add epitope</button>
+        </div>
       </div>
     </div>
 

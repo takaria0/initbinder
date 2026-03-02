@@ -143,6 +143,7 @@ def _collect_epitope_compositions(
     residue_key: str = "residues",
     label_suffix: str = "",
     include_residue_details: bool = False,
+    include_inactive: bool = False,
 ) -> List[dict]:
     try:
         data = yaml.safe_load(target_yaml.read_text()) or {}
@@ -166,6 +167,13 @@ def _collect_epitope_compositions(
     rows: List[dict] = []
     for ep_idx, entry in enumerate(epitopes, start=1):
         if not isinstance(entry, dict):
+            continue
+        raw_active = entry.get("active")
+        if (
+            not include_inactive
+            and raw_active is not None
+            and str(raw_active).strip().lower() in {"0", "false", "no", "n", "off"}
+        ):
             continue
         full_name = (entry.get("display_name") or entry.get("name") or "").strip()
         if not full_name:
@@ -592,16 +600,28 @@ def build_epitope_diversity_plots(
     out_dir: Path,
     timestamp: str,
     log: Optional[Callable[[str], None]] = None,
+    pdb_ids: Optional[Sequence[object]] = None,
 ) -> Tuple[List[EpitopeDiversityPlotSpec], Optional[Path], int]:
     """Render epitope diversity plots based on target.yaml epitope residues."""
     if not targets_dir.exists():
         return [], None, 0
+
+    scope_ids: Optional[set[str]] = None
+    if pdb_ids:
+        scope_ids = set()
+        for raw in pdb_ids:
+            text = str(raw or "").strip().upper()
+            cleaned = "".join(ch for ch in text if ch.isalnum())
+            if len(cleaned) == 4:
+                scope_ids.add(cleaned)
 
     rows: List[dict] = []
     for entry in sorted(targets_dir.iterdir()):
         if not entry.is_dir():
             continue
         pdb_id = entry.name.upper()
+        if scope_ids is not None and pdb_id not in scope_ids:
+            continue
         target_yaml = entry / "target.yaml"
         if not target_yaml.exists():
             continue

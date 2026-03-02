@@ -63,13 +63,21 @@ After Selecting Targets
 Practical next steps:
 
 1) Run `Select epitopes (LLM)` and then `Rebuild configs`.
-2) Validate epitopes using `Config` and `PyMOL`.
-3) Open `Generate commands` (or per-row `Command`) to get `Cluster run steps`.
-4) Execute generated commands manually in order, with local-vs-cluster boundaries:
+   - `Rebuild configs` updates only BoltzGen config files for active targets (LLM-picked first; otherwise currently visible rows).
+   - Binder stats/CSV are not regenerated here.
+2) Add manual hotspot epitopes when needed:
+   - open a target row and click `Manual hotspot`,
+   - click residues in the sequence editor,
+   - submit to append a new epitope and auto-regenerate BoltzGen configs.
+3) Validate epitopes using `Config` and `PyMOL`.
+4) Optional cleanup: use per-epitope `Deactivate epitope`.
+   - deactivation is non-destructive: epitope metadata is archived, configs are regenerated from active epitopes, and existing `prep/` + `designs/` folders are retained for historical compatibility.
+5) Open `Generate commands` (or per-row `Command`) to get `Cluster run steps`.
+6) Execute generated commands manually in order, with local-vs-cluster boundaries:
    - `rsync`/`mkdir`/`ssh ...` monitor checks from local terminal
    - BoltzGen launch block in cluster shell
    - RFA launch block can run from local terminal as generated
-5) Pull results, click `Refresh` in `Designed binders`, and review binder metrics (`ipTM`, `RMSD`, `Hotspot dist`, `ipSAE`).
+7) Pull results, click `Refresh` in `Designed binders` (or `Force rebuild` in diversity), and review binder metrics (`ipTM`, `RMSD`, `Hotspot dist`, `ipSAE`).
 
 For the full operator runbook, see `README_GUI.md`.
 

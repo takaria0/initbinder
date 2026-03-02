@@ -75,21 +75,31 @@ Action:
 - Refresh epitope proposals when needed:
   - `Select epitopes (LLM)` for row ranges.
   - Per-target `Select epitopes (LLM)` in table commands.
+- Add manual hotspot epitopes when needed:
+  - click per-target `Manual hotspot`,
+  - choose chain tabs and click residue buttons,
+  - optionally name the epitope, then click `Add epitope`.
 - Click `Rebuild configs` after epitope updates or design-count changes.
+  - This rebuild is target-scoped (LLM-picked first; otherwise visible rows).
+  - Binder stats/CSV are unchanged until you run `Designed binders -> Refresh` (or diversity `Force rebuild`).
 
 Expect:
 - `BoltzGen configs` populates by target.
-- Clicking a target row reveals epitope-level actions (`Config`, `Debug`, `Command`, `PyMOL`).
+- Clicking a target row reveals epitope-level actions (`Config`, `Debug`, `Command`, `PyMOL`, `Deactivate epitope`).
+- Use `Show archived epitopes` to inspect archived rows (read-only).
 
 ## Step 4: Check Epitopes Before Submit
 
 Action:
 - Open per-target/per-epitope `Config` and verify selected ranges/hotspots look correct.
 - Use `PyMOL` to visually inspect hotspot placement and residue context when needed.
+- Use `Deactivate epitope` for cleanup when needed.
 
 Expect:
 - `Config` shows the exact generated YAML/script content for the selected row.
 - `PyMOL` launches or prepares a hotspot bundle when prep/hotspot artifacts are available.
+- Deactivated epitopes are removed from active config rows but remain visible via archived view.
+- Existing `prep/` and `designs/` folders are preserved after deactivation.
 
 If not:
 - If `PyMOL` is unavailable, prep/hotspot artifacts are likely missing for that target.
@@ -145,7 +155,7 @@ Diversity outputs:
 - Use `Export HTML` and `Download CSV` when available.
 
 Binder table:
-- In `Designed binders`, click `Refresh` after pulling results.
+- In `Designed binders`, click `Refresh` after pulling results (this is the explicit stats/CSV refresh step).
 - If summary tables are stale, use `Force rebuild` in diversity, then `Refresh`.
 - Check binder quality fields directly in the table:
   - `ipTM`
