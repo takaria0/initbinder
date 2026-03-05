@@ -243,6 +243,7 @@ const el = {
   binderCsvNote: document.querySelector('#boltz-binders-csv'),
   binderRefresh: document.querySelector('#boltz-binders-refresh'),
   binderExportBtn: document.querySelector('#boltz-binders-export'),
+  binderCopyLabels: document.querySelector('#boltz-binders-copy-labels'),
   binderDownload: document.querySelector('#boltz-binders-download'),
   binderPagination: document.querySelector('#boltz-binders-pagination'),
   binderPageLabel: document.querySelector('#boltz-binders-page-label'),
@@ -1256,6 +1257,23 @@ function parseBinderExportSelections(raw) {
     entries.push({ pdbId, epitope, raw: token });
   });
   return { entries, invalid };
+}
+
+function binderSelectionLabel(row = {}) {
+  const pdbId = normalizePdbId(row?.pdb_id);
+  const epitope = normalizeEpitopeToken(row?.epitope_id || row?.epitope || '');
+  if (!pdbId || !epitope) return null;
+  return `${pdbId}:${epitope}`;
+}
+
+function visibleBinderRows(rows = []) {
+  const rawList = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const includeArchived = el.binderIncludeArchived
+    ? Boolean(el.binderIncludeArchived.checked)
+    : Boolean(state.binderIncludeArchived);
+  return includeArchived
+    ? rawList
+    : rawList.filter((row) => row?.epitope_active !== false);
 }
 
 function parseResidueToken(token) {
@@ -2430,9 +2448,7 @@ function renderBinderRows(rows = []) {
     ? Boolean(el.binderIncludeArchived.checked)
     : Boolean(state.binderIncludeArchived);
   state.binderIncludeArchived = includeArchived;
-  const list = includeArchived
-    ? rawList
-    : rawList.filter((row) => row?.epitope_active !== false);
+  const list = visibleBinderRows(rawList);
   const archivedHiddenCount = includeArchived
     ? 0
     : rawList.filter((row) => row?.epitope_active === false).length;
@@ -2557,8 +2573,26 @@ function renderBinderRows(rows = []) {
     const csvName = state.binderCsvName || state.diversityCsv;
     el.binderDownload.hidden = !csvName;
   }
+  if (el.binderCopyLabels) {
+    const labels = Array.from(new Set(list.map((row) => binderSelectionLabel(row)).filter(Boolean)));
+    el.binderCopyLabels.disabled = !labels.length;
+    el.binderCopyLabels.title = labels.length
+      ? 'Copy visible labels as PDB_ID:epitope_N'
+      : 'No visible PDB:epitope labels on this page.';
+  }
 
   el.binderPanel.hidden = false;
+}
+
+async function copyVisibleBinderLabels(triggerBtn = null) {
+  const rows = visibleBinderRows(state.binderRows || []);
+  const labels = Array.from(new Set(rows.map((row) => binderSelectionLabel(row)).filter(Boolean)));
+  if (!labels.length) {
+    showAlert('No visible PDB:epitope labels to copy.');
+    return;
+  }
+  await copyTextToClipboard(labels.join('\n'), triggerBtn);
+  showAlert(`Copied ${labels.length} PDB:epitope label${labels.length === 1 ? '' : 's'}.`, false);
 }
 
 async function loadBinderTable({ page = 1, silent = false, force = false } = {}) {
@@ -5607,6 +5641,7 @@ function renderLlmMatchPanels() {
         actionBtn.className = 'mini-btn';
         actionBtn.dataset.action = 'discover-unmatched-target';
         actionBtn.dataset.unmatchedKey = key;
+        actionBtn.title = 'Best-effort vendor discovery. Most available antigens may already be in the current catalog.';
         if (actionStatus === 'running' || actionStatus === 'queued') {
           actionBtn.textContent = 'Running...';
           actionBtn.disabled = true;
@@ -6471,6 +6506,7 @@ function init() {
   if (el.binderPagination) el.binderPagination.addEventListener('click', handleBinderPagination);
   if (el.binderRefresh) el.binderRefresh.addEventListener('click', () => refreshDiversity({ silent: false, page: state.binderPage || 1 }));
   if (el.binderExportBtn) el.binderExportBtn.addEventListener('click', () => toggleModal(el.binderExportModal, true));
+  if (el.binderCopyLabels) el.binderCopyLabels.addEventListener('click', () => copyVisibleBinderLabels(el.binderCopyLabels));
   if (el.binderDownload) el.binderDownload.addEventListener('click', downloadBinderCsv);
   if (el.bulkReadmeBtn) el.bulkReadmeBtn.addEventListener('click', openBulkReadmeModal);
   if (el.bulkAlgorithmBtn) el.bulkAlgorithmBtn.addEventListener('click', () => toggleModal(el.bulkAlgorithmModal, true));

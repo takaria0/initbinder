@@ -106,6 +106,9 @@
                     <div id="llm-unmatched-list" class="llm-list">
                       <div class="llm-empty">No unmatched suggestions.</div>
                     </div>
+                    <p class="help-text">
+                      <code>Discover</code> is best-effort and may be low-yield because most currently available antigens are already in the active catalog.
+                    </p>
                   </div>
                 </div>
               </div>
@@ -274,6 +277,7 @@
                 </div>
                 <div class="bulk-control-row">
                   <button type="button" id="boltz-binders-export" class="ghost">Export selected binders</button>
+                  <button type="button" id="boltz-binders-copy-labels" class="ghost">Copy PDB:epitope labels</button>
                   <button type="button" id="boltz-binders-download" class="ghost">Download CSV</button>
                   <button type="button" id="boltz-binders-refresh" class="ghost">Refresh</button>
                 </div>
@@ -621,6 +625,81 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
             <p><strong>Notation.</strong> Let <code>S</code> be the vendor-expressed antigen sequence (accession or expressed-sequence override), and let
               <code>C_j</code> be candidate PDB chains extracted from mmCIF. An epitope is a set of residue spans
               <code>E = { (chain, start, end) }</code>. Hotspots are a subset of residues <code>H</code> sampled from <code>E</code>. All ranges are inclusive.</p>
+            <p><strong>LLM Target Discovery (Suggest + Discover).</strong> The discovery UI has two linked pipelines:
+              <code>Suggest targets</code> (catalog matching only) and <code>Discover</code> (unmatched recovery that may append one row into the active catalog
+              before rematching). The active catalog comes from <code>Config -&gt; Input TSV defaults -&gt; Default input file path</code> and must resolve to a
+              <code>.tsv</code> or <code>.csv</code> inside <code>targets_catalog/</code>.</p>
+            <p><strong>Suggest targets flow (<code>POST /api/bulk/llm-targets/suggest</code>).</strong></p>
+            <ol class="bulk-doc-list">
+              <li><strong>Frontend request defaults (bulk.js).</strong> <code>submitLlmTargetSuggest</code> requires a non-empty prompt and sends
+                <code>{catalog_name, prompt, history, max_candidates}</code> with <code>max_candidates=24</code>. The API history window is the last
+                <code>30</code> messages (<code>LLM_HISTORY_WINDOW_FOR_API</code>), while local UI history keeps up to <code>200</code> messages.</li>
+              <li><strong>Backend candidate generation (bulk.py:suggest_bulk_targets_with_llm).</strong> The backend loads and validates catalog rows,
+                builds exact-match lookup indices (PDB/UniProt/gene/catalog/accession), then calls OpenAI to produce
+                <code>assistant_message + candidates[]</code>. Candidate fields are coerced/normalized into
+                <code>BulkLlmCandidate</code> (<code>target_name, protein_name, gene, uniprot, pdb_id, antigen_catalog, accession, rationale</code>).</li>
+              <li><strong>Candidate dedupe + grouping.</strong> Candidates are deduplicated by canonical group signatures (favoring biological identifiers
+                over free-text labels), so repeated aliases collapse before catalog matching.</li>
+              <li><strong>Catalog matching precedence + confidence.</strong> Matching proceeds in strict order:
+                exact PDB (<code>0.99</code>), exact UniProt (<code>0.98</code>), exact gene (<code>0.97</code>), exact catalog/SKU (<code>0.97</code>),
+                exact accession (<code>0.96</code>), then fuzzy name (<code>SequenceMatcher &gt;= 0.74</code>). Unmatched candidates still carry nearest-name
+                hints where similarity is <code>&gt;= 0.58</code>. If one alias in a semantic group matches directly, related aliases can merge to the same row
+                as <code>semantic_alias</code> (confidence <code>0.80</code>) to avoid duplicate unmatched entries.</li>
+              <li><strong>Response and UI merge.</strong> The API returns <code>BulkLlmTargetSuggestResponse</code> with <code>matched_rows</code>,
+                <code>matches</code>, and <code>unmatched</code>. The UI stores this per conversation, merges matched rows into
+                <code>Selected targets</code>, and initializes per-unmatched action state for optional recovery.</li>
+            </ol>
+            <p><strong>Unmatched Discover flow (<code>POST /api/bulk/llm-targets/unmatched/discover</code> + status polling).</strong></p>
+            <ol class="bulk-doc-list">
+              <li><strong>Queue/start/poll path.</strong> Clicking <code>Discover</code> on one unmatched entry sends
+                <code>{catalog_name, unmatched_key, candidate, history, vendor_scope, planning_mode, max_targets, launch_browser}</code>.
+                Current frontend defaults are <code>vendor_scope='both'</code>, <code>planning_mode='balanced'</code>, <code>max_targets=3</code>,
+                <code>launch_browser=true</code>, with history truncated to the last <code>6</code> messages.</li>
+              <li><strong>Async job and status API.</strong> The request is queued by the workflow job store, then polled via
+                <code>GET /api/bulk/llm-targets/unmatched/discover/{job_id}</code>. Returned status payload follows
+                <code>BulkLlmUnmatchedDiscoverStatusResponse</code> and includes <code>phase</code>, <code>planned_queries</code>,
+                <code>attempts</code>, <code>matched_row</code>, and optional <code>failure_reason</code>.</li>
+              <li><strong>Phase 1: planning.</strong> Backend resolves <code>planning_mode</code> and <code>vendor_scope</code>, then plans query terms.
+                With an OpenAI key, it requests structured plan JSON (<code>canonical_target, species, query_terms, aliases, ...</code>).
+                Without a key, or on planner failure, it falls back to deterministic identifier terms from the candidate.
+                Query-term limits by mode: <code>fast=1</code>, <code>balanced=3</code>, <code>aggressive=5</code>.</li>
+              <li><strong>Phase 2: catalog_rematch (short-circuit path).</strong> Before external discovery, backend rematches the original candidate plus
+                planned aliases against the current catalog. If an exact match type is found (<code>exact_pdb/uniprot/gene/catalog/accession</code>),
+                discovery succeeds immediately with <code>catalog_appended=false</code> and no subprocess execution.</li>
+              <li><strong>Phase 3: vendor_search subprocess.</strong> If rematch fails, backend runs
+                <code>target_generation.py</code> with the planned instruction and query terms. Vendor scope is applied to Sino/Acro/both.
+                Candidate cap by planning mode is <code>20/40/80</code> for fast/balanced/aggressive (<code>--max_vendor_candidates</code>).
+                Generated files are expected in <code>targets_catalog/</code> as <code>{prefix}_all.tsv</code> and/or <code>{prefix}_biotin.tsv</code>.</li>
+              <li><strong>Phase 4: parsing + row ranking.</strong> Generated rows are normalized and scored against the unmatched candidate:
+                <pre class="bulk-doc-pre tight">score = 8*(uniprot/accession exact)
+      + 6*(gene exact)
+      + 6*(pdb exact)
+      + 4*(catalog exact)
+      + 4*name_similarity
+      + 1*(row has pdb)
+      + 1*(row has accession)</pre>
+                The top row must pass <code>best_score &gt;= 3.0</code>; otherwise discovery fails as weak evidence.</li>
+              <li><strong>Phase 5: appending (dedupe + rank).</strong> The selected row is compared against existing catalog signatures under a process lock
+                (<code>_CATALOG_APPEND_LOCK</code>). Duplicate signatures skip append; otherwise one row is appended with computed next rank
+                (<code>max(existing rank)+1</code>, or fallback row-count logic).</li>
+              <li><strong>Phase 6: rematching.</strong> Backend rebuilds catalog lookup and rematches the original unmatched candidate.
+                Completion requires a successful match + matched row; otherwise the job ends failed even if vendor discovery produced rows.</li>
+            </ol>
+            <p><strong>Frontend discovery state and what users see.</strong></p>
+            <ol class="bulk-doc-list">
+              <li><strong>Per-conversation persistence.</strong> Discovery state is stored per conversation in localStorage
+                (<code>initbinder.bulk.llm.state.v1</code>) including <code>history</code>, <code>matched_rows</code>, <code>unmatched</code>,
+                and <code>unmatched_actions</code>.</li>
+              <li><strong>Action statuses + polling.</strong> Each unmatched target tracks
+                <code>idle/queued/running/success/failed</code>. Polling runs every <code>2500 ms</code>; status text shows current phase,
+                query preview, and attempt count when available.</li>
+              <li><strong>Success behavior.</strong> On success, <code>matched_row</code> merges into <code>llmMatchedRows</code> and preview rows,
+                the unmatched entry is removed, picked-PDB filters are recomputed, Boltz config list refreshes, and the job badge becomes
+                <code>Discovery complete</code>.</li>
+              <li><strong>Failure behavior.</strong> On failure or polling error, the unmatched entry persists with
+                <code>status=failed</code> and a retained message (<code>failure_reason</code> or transport error); the button switches to
+                <code>Retry</code> so the same unmatched key can be re-queued.</li>
+            </ol>
             <ol class="bulk-doc-list">
               <li><strong>Target intake.</strong> Parse target rows (from the configured catalog and/or manual table import) into PDB ID, antigen URL, accession/range overrides, and run parameters. Rows with multi-accession values in the accession field (for example containing <code>&amp;</code>, <code>,</code>, <code>;</code>, <code>/</code>, or <code>and</code>) are excluded from detected targets and execution.</li>
               <li><strong>target_generation.py (catalog PDB selection).</strong> For each antigen option with an accession and expressed range,
