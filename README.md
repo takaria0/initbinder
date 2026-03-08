@@ -138,7 +138,3 @@ Security and data use
 - If any API key was previously committed or stored in tracked files, rotate it immediately.
 - See `SECURITY.md` for the local-mode security posture and the expectations if remote access is enabled.
 
-Citation
---------
-
-Bioinformatics Application Note submission in preparation. Until formal citation metadata is available, please cite the repository URL and the corresponding manuscript submission materials.
