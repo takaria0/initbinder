@@ -50,7 +50,7 @@ Quickstart
 ----------
 
 1. Open `Config`.
-2. In `Input TSV defaults`, set `Default input file path` to your catalog TSV/CSV and optionally enable `Auto-load default input`.
+2. In `Input TSV defaults`, set `Default input file path` to your catalog TSV/CSV and optionally enable `Auto-load default input`. To follow the paper's default reproduction path in this repository, use `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`; it already includes the required entries, including the Sino Biological human TIM-3 antigen (`10390-H08H-B`).
 3. In `LLM`, add an `OpenAI API key` if you want to use `Suggest targets` or `Select epitopes (LLM)`.
 4. In `LLM Target Discovery`, create or select a conversation, describe the targets you want, and click `Suggest targets`.
 5. Curate `Matched targets` with `Delete` / `Undelete`, then confirm the retained rows in `Selected targets`.
@@ -137,4 +137,3 @@ Security and data use
 - Keep secrets and machine-specific overrides out of git. `cfg/webapp.local.yaml` is ignored for that reason.
 - If any API key was previously committed or stored in tracked files, rotate it immediately.
 - See `SECURITY.md` for the local-mode security posture and the expectations if remote access is enabled.
-
