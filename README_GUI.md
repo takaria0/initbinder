@@ -1,6 +1,6 @@
-# InitBinder Bulk GUI README
+# InitBinder GUI README
 
-This guide is for first-time users of the Bulk page. It walks through the current LLM-first workflow from target discovery to binder export.
+This document is the operator runbook for InitBinder. Use `README.md` for the public overview, installation, and reproducibility notes; use this guide for the screen-by-screen workflow in the application.
 
 ## Start Here (30 seconds)
 
@@ -16,7 +16,7 @@ Before starting, have these ready:
 Page map:
 - `LLM Target Discovery` -> `Selected targets` -> `BoltzGen configs` -> `Designed binder diversity` -> `Designed binders` -> `Job log`.
 
-Use `README` for quickstart/context and `Algorithm` for method details.
+Use `README.md` for setup/context. Use the in-app `Algorithm` modal for inline workflow details and filtering/scoring notes.
 
 ## Step 0: Configure Once
 
@@ -196,7 +196,7 @@ Binder table:
 
 ## Quick Happy Path Checklist
 
-- [ ] Open Bulk page and click `Config`.
+- [ ] Open InitBinder and click `Config`.
 - [ ] Verify cluster settings, LLM key/model, and default catalog path; click `Save settings`.
 - [ ] Use `LLM Target Discovery` and click `Suggest targets`.
 - [ ] Curate matched targets with `Delete`/`Undelete` and verify `Selected targets` are ready.

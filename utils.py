@@ -67,15 +67,15 @@ DEFAULT_NANOBODY_FRAMEWORK = os.path.join(
 # /path/to/RFantibody/scripts/examples/example_inputs/h-NbBCII10.pdb
 # --- SLURM Configuration ---
 # Default SLURM partition/queue for GPU jobs
-SLURM_GPU_PARTITION = "gpu"
+SLURM_GPU_PARTITION = os.environ.get("INITBINDER_SLURM_GPU_PARTITION", "gpu")
 # Default SLURM account
-SLURM_ACCOUNT = "ccl_lab_gpu"
+SLURM_ACCOUNT = os.environ.get("INITBINDER_SLURM_ACCOUNT", "project_gpu_account")
 # Default GPU type to request
-SLURM_GPU_TYPE = "A30:1"
+SLURM_GPU_TYPE = os.environ.get("INITBINDER_SLURM_GPU_TYPE", "A30:1")
 
 # Default SLURM settings for CPU-only jobs (used by assessment scripts, etc.)
 SLURM_CPU_PARTITION = os.environ.get("SLURM_CPU_PARTITION", "standard")
-SLURM_CPU_ACCOUNT = os.environ.get("SLURM_CPU_ACCOUNT", 'ccl_lab')
+SLURM_CPU_ACCOUNT = os.environ.get("SLURM_CPU_ACCOUNT", "project_cpu_account")
 
 
 # --- AlphaFold 3 Configuration (NEW) ---
@@ -187,8 +187,10 @@ def _resolve_targets_root() -> Path:
 TARGETS_ROOT = _resolve_targets_root()
 TARGETS_ROOT_LOCAL = ROOT / "targets"
 
-print(f"[info] Running manage_rfa_eco.py from {ROOT}")
-print(f"[info] Using targets root: {TARGETS_ROOT}")
+_VERBOSE_IMPORTS = os.getenv("INITBINDER_VERBOSE_IMPORTS", "").strip().lower() in {"1", "true", "yes"}
+if _VERBOSE_IMPORTS:
+    print(f"[info] InitBinder utils loaded from {ROOT}")
+    print(f"[info] Using targets root: {TARGETS_ROOT}")
 SCHEMA = json.loads((ROOT/"cfg"/"target.schema.json").read_text())
 
 

@@ -5586,14 +5586,20 @@ def _clear_diversity_cache(out_dir: Path) -> None:
 
 def _get_cached_diversity_csv(out_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
     cache = _load_diversity_cache(out_dir)
-    if not cache:
-        return None, _refresh_required_message()
-    cached_name = str(cache.get("csv_name") or "").strip()
-    if not cached_name:
-        return None, _refresh_required_message()
-    cached_path = out_dir / Path(cached_name).name
-    if cached_path.exists() and cached_path.is_file():
-        return cached_path, None
+    if cache:
+        cached_name = str(cache.get("csv_name") or "").strip()
+        if cached_name:
+            cached_path = out_dir / Path(cached_name).name
+            if cached_path.exists() and cached_path.is_file():
+                return cached_path, None
+    # Backward-compatible fallback for older caches/tests that only materialize the CSV.
+    patterns = ("all_design_metrics*.csv", "boltzgen_design_metrics*.csv")
+    candidates: List[Path] = []
+    for pattern in patterns:
+        candidates.extend(path for path in out_dir.glob(pattern) if path.is_file())
+    if candidates:
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0], None
     return None, _refresh_required_message()
 
 

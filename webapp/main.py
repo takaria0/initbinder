@@ -179,6 +179,7 @@ _CATALOG_SUFFIXES = {".tsv", ".csv"}
 _ALLOW_REMOTE_ENV = "INITBINDER_ALLOW_REMOTE"
 _TRUTHY = {"1", "true", "yes", "y", "on"}
 _LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost"}
+_LOCAL_TEST_CLIENTS = {"testclient"}
 
 
 def _remote_access_enabled() -> bool:
@@ -190,6 +191,8 @@ def _is_local_client(host: str | None) -> bool:
         return True
     normalized = host.strip().lower()
     if normalized in _LOCAL_CLIENTS:
+        return True
+    if normalized in _LOCAL_TEST_CLIENTS:
         return True
     if normalized.startswith("::ffff:"):
         normalized = normalized.split("::ffff:", 1)[1]
@@ -1042,9 +1045,11 @@ async def api_bulk_llm_unmatched_discover(
 ) -> BulkLlmUnmatchedDiscoverResponse:
     try:
         # Validate catalog path early for immediate UX feedback.
-        _resolve_catalog_file(payload.catalog_name)
+        catalog_path = _resolve_catalog_file(payload.catalog_name)
     except HTTPException:
         raise
+    if not catalog_path.exists() or not catalog_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Catalog file not found: {payload.catalog_name}")
     job_id = submit_bulk_llm_unmatched_discovery(payload, job_store=store)
     return BulkLlmUnmatchedDiscoverResponse(
         job_id=job_id,

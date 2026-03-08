@@ -1,198 +1,144 @@
-InitBinder Bulk (Local Laptop Mode)
-===================================
+InitBinder
+==========
 
-This repository includes the InitBinder web UI. For public GitHub usage, the recommended default is local laptop mode focused on:
+InitBinder is a local-first web application for catalog-guided antigen selection, epitope curation, cluster command generation, and binder review/export in antibody design workflows. The public entrypoint in this repository is served at `http://127.0.0.1:8000/`, with local-safe defaults that avoid live cluster probing and reject remote clients unless explicitly enabled.
 
-- `http://127.0.0.1:8000/`
-- If `8000` is already in use, `run_bulk_local.sh` automatically selects the next free local port
-- LLM-first target discovery from a configured catalog
-- Copy/paste command generation (no live cluster probing required)
-- Optional advanced cluster execution handled by the user outside the app
+The current implementation emphasizes interactive target triage: users can discover purchasable targets from a configured catalog, select epitopes with LLM-assisted or manual workflows, regenerate BoltzGen inputs, generate copy/paste cluster commands, and export ranked binders with DNA/adaptor annotations. For the detailed operator runbook, see `README_GUI.md`.
 
-Quickstart (macOS / Ubuntu)
----------------------------
+Availability and implementation
+-------------------------------
 
-Requires Python 3.10+.
+- Language: Python 3.10+
+- Application shape: FastAPI backend with a browser-based interface
+- License: MIT (`LICENSE`)
+- Default runtime mode: localhost-only, single-user, local laptop workflow
+- Default catalog in this repository: `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`
 
-1) Bootstrap a local environment:
+Installation
+------------
+
+Bootstrap the runtime environment:
 
 ```bash
 ./scripts/bootstrap_local.sh
 ```
 
-This installs Python dependencies and Playwright Chromium used by vendor page parsing.
+This creates `.venv`, installs the runtime dependencies from `requirements-webapp.txt`, and installs Playwright Chromium used by the local tooling.
 
-2) Optional preflight check:
+Optional checks and add-on installs:
 
 ```bash
+# Preflight check for the runtime
 ./.venv/bin/python ./scripts/doctor_bulk_local.py
+
+# Test dependencies
+./.venv/bin/python -m pip install -r requirements-dev.txt
+
+# Optional utility dependencies for catalog refresh / diversity extras
+./.venv/bin/python -m pip install -r requirements-optional.txt
 ```
 
-3) Run the server:
+Start the server:
 
 ```bash
 ./scripts/run_bulk_local.sh
 ```
 
-4) Open:
+Then open `http://127.0.0.1:<selected_port>/`. The launcher defaults to port `8000` and automatically shifts to the next free local port if needed.
 
-- `http://127.0.0.1:<selected_port>/` (defaults to `8000`, auto-shifts if occupied)
+Quickstart
+----------
 
-Bulk Workflow (LLM-First, Catalog-Backed)
------------------------------------------
+1. Open `Config`.
+2. In `Input TSV defaults`, set `Default input file path` to your catalog TSV/CSV and optionally enable `Auto-load default input`.
+3. In `LLM`, add an `OpenAI API key` if you want to use `Suggest targets` or `Select epitopes (LLM)`.
+4. In `LLM Target Discovery`, create or select a conversation, describe the targets you want, and click `Suggest targets`.
+5. Curate `Matched targets` with `Delete` / `Undelete`, then confirm the retained rows in `Selected targets`.
+6. In `BoltzGen configs`, set `Epitope design num`, `Max runtime (hours)`, and `Crop radius`.
+7. Run `Select epitopes (LLM)` when needed, or add manual epitopes from the per-target `Select epitopes` modal.
+8. Click `Rebuild configs`.
+9. Use `Generate commands` or per-row `Command` to open `Cluster run steps`.
+10. Execute the generated command blocks manually, sync results back, click `Refresh` in `Designed binders`, and export the selected binders when ready.
 
-Recommended quick path:
+Inputs and outputs
+------------------
 
-1) In the Bulk page, open `Config`.
-2) Set `Input TSV defaults` -> `Default input file path` to your catalog file.
-3) Optionally enable `Auto-load default input`.
-4) Use `LLM Target Discovery`:
-   - choose/create a conversation,
-   - describe the targets you want,
-   - click `Suggest targets`.
-5) Curate `Matched targets` with `Delete` / `Undelete`, and switch `View` (`LLM-picked` / `All targets`) plus `Catalog` filter (`Biotin only` / `All`) as needed.
-6) Continue into `BoltzGen configs`, command generation, and binder review/export.
+Typical inputs:
 
-Notes:
+- Catalog TSV/CSV containing `chosen_pdb` or `pdb_id`
+- Optional vendor metadata such as `antigen_url`, `vendor_accession`, and `vendor_range`
+- Optional OpenAI credentials for LLM-assisted actions
+- Optional cluster settings for actual remote execution
 
-- Default catalog used in this repo: `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`.
+Primary outputs:
 
-After Selecting Targets
------------------------
+- Regenerated BoltzGen configuration files for active targets/epitopes
+- Copy/paste cluster execution commands
+- Epitope and diversity reports (`HTML` / `CSV`)
+- Binder review tables with ranking metrics such as `ipTM`, `RMSD`, `Hotspot dist`, and `ipSAE`
+- `Export selected binders` artifacts, including ranked binder CSV rows, codon-optimized DNA, deterministic adapter annotations, and per-engine scatter plots
 
-Practical next steps:
+LLM and cluster requirements
+----------------------------
 
-1) Run `Select epitopes (LLM)` and then `Rebuild configs`.
-   - `Rebuild configs` updates only BoltzGen config files for active targets (LLM-picked first; otherwise currently visible rows).
-   - Binder stats/CSV are not regenerated here.
-2) Add manual epitopes when needed:
-   - open a target row and click `Select epitopes`,
-   - switch to the `Select epitope (manual)` tab,
-   - click residues in the sequence editor,
-   - submit to append a new epitope and auto-regenerate BoltzGen configs.
-3) Validate epitopes using `Config` and `PyMOL`.
-4) Optional cleanup: use per-epitope `Deactivate epitope`.
-   - deactivation is non-destructive: epitope metadata is archived, configs are regenerated from active epitopes, and existing `prep/` + `designs/` folders are retained for historical compatibility.
-5) Open `Generate commands` (or per-row `Command`) to get `Cluster run steps`.
-6) Execute generated commands manually in order, with local-vs-cluster boundaries:
-   - `rsync`/`mkdir`/`ssh ...` monitor checks from local terminal
-   - BoltzGen launch block in cluster shell
-   - RFA launch block can run from local terminal as generated
-7) Pull results, click `Refresh` in `Designed binders` (or `Force rebuild` in diversity), and review binder metrics (`ipTM`, `RMSD`, `Hotspot dist`, `ipSAE`).
+LLM-backed actions include:
 
-For the full operator runbook, see `README_GUI.md`.
+- `LLM Target Discovery` -> `Suggest targets`
+- `Select epitopes (LLM)` in the default workflow
 
-Catalog Refresh (Optional)
---------------------------
+These features require a valid OpenAI API key configured in `Config` -> `LLM`. Non-LLM operations, including config regeneration, command rendering, local review, and most export flows, can still run without LLM credentials.
 
-If you want to rebuild catalog files (AcroBio + Sino + merge):
+Cluster access is optional for command generation but required for actual remote design execution. The UI generates commands from the saved config and current UI state; it does not need a live SSH connection just to render the command blocks.
+
+Reproducibility and testing
+---------------------------
+
+Runtime installation is defined by `requirements-webapp.txt`. Test execution is defined by `requirements-dev.txt`. Optional catalog-refresh and plotting extras are separated into `requirements-optional.txt` so the default install remains lightweight.
+
+Recommended local verification commands:
 
 ```bash
-# Sino biotin catalog (raw + unique + manual)
-python targets_catalog/webscraper/sino_biotin_pipeline.py
+# Runtime import / syntax sanity
+python3 -m py_compile webapp/*.py lib/scripts/*.py *.py targets_catalog/webscraper/*.py
 
-# AcroBio biotin catalog
-python targets_catalog/webscraper/acrobio_biotin_pipeline.py \
-  --url "https://www.acrobiosystems.com/search?keywords=biotinylated" \
-  --mode playwright
-
-# Merge two catalog TSVs into one bulk-ready file
-python targets_catalog/webscraper/merge_target_catalogs.py \
-  --input1 targets_catalog/webscraper/sino_biotinylated_unique.tsv \
-  --input2 targets_catalog/webscraper/acrobio_biotinylated_unique.tsv \
-  --output targets_catalog/acrobio_plus_sino_biotin_merged.tsv \
-  --key uniprot
+# Test suite
+./.venv/bin/python -m pytest -q
 ```
 
-Notes on inputs/outputs:
+The runtime launcher uses:
 
-- Inputs for generation are in `targets_catalog/webscraper/` (vendor scrape artifacts).
-- Main merged output for bulk usage is `targets_catalog/acrobio_plus_sino_biotin_merged.tsv`.
-- If you publish or redistribute scraped catalog data, verify vendor terms and applicable data-use policies first.
+- `INITBINDER_UI_CONFIG=cfg/webapp.local.yaml` if present, otherwise `cfg/webapp.yaml`
+- `INITBINDER_ALLOW_REMOTE=false` by default
 
-LLM API Requirements
---------------------
-
-LLM-backed features include both target discovery and epitope actions, including:
-
-- `LLM Target Discovery` (`Suggest targets`)
-- `Select epitopes (LLM)` actions in Bulk tables/modals
-
-Setup:
-
-1) Open `Config` in the Bulk page.
-2) Under `LLM`, set:
-   - `OpenAI API key`
-   - `OpenAI model` (optional, defaults to `gpt-4.1-mini`)
-3) Save settings. These values persist to `cfg/webapp.local.yaml`.
-4) Non-LLM actions (preview, config generation, command generation, and local table review) can still run without LLM keys.
-
-Export Selected Binders (Current Behavior)
-------------------------------------------
-
-`Export selected binders` now produces more than a plain binder CSV:
-
-- Selects top binders per `PDB:epitope` using combined `ipTM + RMSD` ranking.
-- Adds yeast-codon DNA plus deterministic constrained adapters.
-  - Binders sharing the same `PDB + hotspot` use the same adapter seed/barcode.
-- Runs BsaI checks on `adapter + binder` combined sequence.
-  - Automatically retries codon optimization to reduce extra BsaI sites.
-  - Unresolved rows are still exported and flagged with `bsai_site_check_ok=False`.
-- Exports scatter artifacts per engine (`ipTM` vs `RMSD`) with antigen:epitope color grouping.
-
-Prompt Examples
----------------
-
-For ready-to-use LLM discovery prompt ideas, see:
-
-- `example_prompts.md`
-
-Local-Safe Defaults
--------------------
-
-The run script uses:
-
-- `INITBINDER_UI_CONFIG=cfg/webapp.local.yaml` (if present) or `cfg/webapp.yaml`
-- `INITBINDER_ALLOW_REMOTE=false`
-
-This profile sets cluster mode to mock/offline defaults so command generation and local workflows do not depend on active SSH or remote root checks.
-
-Remote Access Behavior
+Remote access behavior
 ----------------------
 
-By default, non-local clients are rejected (HTTP 403).
-To allow remote clients explicitly:
+By default, non-local clients receive HTTP `403`. To allow remote clients explicitly:
 
 ```bash
 export INITBINDER_ALLOW_REMOTE=true
 ./scripts/run_bulk_local.sh
 ```
 
-Use this only if you understand the network/security implications.
+Use this only if you are prepared to provide your own network isolation, authentication, and TLS termination.
 
-Command Generation (Bulk)
--------------------------
+Limitations
+-----------
 
-`Generate commands` and related command actions in Bulk are config-driven and offline-friendly:
+- The public workflow is local-first and assumes a trusted single-user workstation.
+- Command execution is manual; the application prepares commands but does not fully orchestrate remote jobs end-to-end.
+- Actual design execution depends on external cluster access, installed design software, and user-managed credentials.
+- LLM suggestions are constrained by the configured catalog and by the quality of the prompt.
+- If you rebuild or redistribute scraped catalog content, verify vendor terms and local data-use requirements first.
 
-- Source = local config defaults + current UI overrides
-- No cluster connection required to render commands
-- Missing values use placeholders like `<cluster>` / `<remote_root>`
+Security and data use
+---------------------
 
-Configuration Precedence
-------------------------
+- Keep secrets and machine-specific overrides out of git. `cfg/webapp.local.yaml` is ignored for that reason.
+- If any API key was previously committed or stored in tracked files, rotate it immediately.
+- See `SECURITY.md` for the local-mode security posture and the expectations if remote access is enabled.
 
-1. `cfg/webapp.yaml`
-2. `cfg/webapp.local.yaml` (if present)
-3. `INITBINDER_*` environment variables
-4. If `INITBINDER_UI_CONFIG` is set, it overrides config path selection directly
+Citation
+--------
 
-For public/local mode, use `cfg/webapp.yaml` plus optional local overrides in `cfg/webapp.local.yaml`.
-
-Notes
------
-
-- Bulk UI can run without PyMOL and without remote cluster access.
-- LLM features require valid OpenAI credentials. For Bulk UI, set key/model in `Config` -> `LLM` (saved in `cfg/webapp.local.yaml`).
-- Keep secrets and machine-specific overrides out of git (`cfg/webapp.local.yaml` is ignored).
-- If any API key was committed or entered into tracked files, rotate it immediately.
+Bioinformatics Application Note submission in preparation. Until formal citation metadata is available, please cite the repository URL and the corresponding manuscript submission materials.

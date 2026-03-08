@@ -355,6 +355,12 @@ class BoltzgenMetricsFile(BaseModel):
     datetime: str
     path: str
 
+    def __getitem__(self, key: str) -> object:
+        return getattr(self, key)
+
+    def get(self, key: str, default: object = None) -> object:
+        return getattr(self, key, default)
+
 
 class BoltzgenDiversityResponse(BaseModel):
     csv_name: Optional[str] = None

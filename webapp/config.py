@@ -105,7 +105,7 @@ class BoltzGenClusterConfig:
 @dataclass(slots=True)
 class RfaPipelineConfig:
     slurm_partition: str = "gpu"
-    slurm_account: str = "ccl_lab_gpu"
+    slurm_account: Optional[str] = None
     slurm_gpu_type: str = "A30:1"
     rfa_repo_path: Optional[Path] = None
     singularity_image: Optional[Path] = None
@@ -172,7 +172,7 @@ class RfaPipelineConfig:
 
 @dataclass(slots=True)
 class ClusterConfig:
-    host: str = "rfacluster"
+    host: str = "cluster.example.edu"
     user: Optional[str] = None
     remote_root: Optional[Path] = None
     target_root: Optional[Path] = None

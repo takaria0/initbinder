@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>InitBinder Bulk Processing</title>
+    <title>InitBinder</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/static/css/app.css">
   </head>
@@ -614,7 +614,7 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
       <div class="modal-backdrop" data-close="bulk-algorithm"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3>Bulk pipeline algorithm</h3>
+          <h3>Pipeline algorithm</h3>
           <button type="button" id="bulk-algorithm-close" class="ghost">Close</button>
         </div>
         <div class="bulk-doc-body">
@@ -727,9 +727,9 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
               <li><strong>Config + run.</strong> Generate BoltzGen configs (and optional RFAntibody scripts), submit jobs, and store designs under
                 <code>targets/&lt;PDB&gt;/designs/</code>.</li>
               <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> and RFAntibody produces
-                <code>af3_rankings.tsv</code>. Bulk diversity merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
+                <code>af3_rankings.tsv</code>. Diversity reporting merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
             </ol>
-            <p><strong>SASA filtering by stage (summary).</strong> SASA is computed only during <code>prep_target.py --check</code>. The bulk UI can
+            <p><strong>SASA filtering by stage (summary).</strong> SASA is computed only during <code>prep_target.py --check</code>. The interface can
               optionally <em>remove</em> epitopes from manual run command generation if any stored hotspot falls below the SASA cutoff; this is a UI-level
               filter and does not delete epitope spans from <code>target.yaml</code>.</p>
             <p><strong>Hotspot selection (prep_target.py).</strong> For an epitope with spans <code>E</code>, define total length
@@ -743,7 +743,7 @@ for i = 1..n_eff:
             <p>When <code>--check</code> is enabled, restrict candidates to <code>A = { (chain, pos) : SASA(chain,pos) >= tau }</code> and sample evenly
               from <code>A</code>. If <code>L</code> is large, the algorithm probes up to <code>n_probe = min(200, max(20, 20*n))</code> ranks rather than
               expanding all positions (cap <code>MAX_EXPAND_POSITIONS = 20000</code>). If filtering yields no candidates, fall back to unfiltered picks.</p>
-            <p><strong>GUI SASA filtering (no regeneration).</strong> The bulk UI can optionally screen existing hotspot residues against a fresh SASA
+            <p><strong>GUI SASA filtering (no regeneration).</strong> The interface can optionally screen existing hotspot residues against a fresh SASA
               calculation on the prepared/raw mmCIF without regenerating epitope definitions. For each epitope, the GUI checks the stored hotspot
               residue list and flags the epitope when any hotspot falls below the SASA cutoff (default 20 Å<sup>2</sup>, or the value recorded under
               <code>prep_target.sasa_cutoff</code> in <code>target.yaml</code> if present). Filtered epitopes are labeled “SASA filtered” in the BoltzGen
@@ -1345,7 +1345,7 @@ top_exposed_residues:
       <div class="modal-backdrop" data-close="bulk-settings"></div>
       <div class="modal-content">
         <div class="modal-header">
-          <h3>Bulk settings</h3>
+          <h3>Settings</h3>
           <button type="button" id="bulk-settings-close" class="ghost">Close</button>
         </div>
         <div class="bulk-settings-body">
@@ -1355,22 +1355,22 @@ top_exposed_residues:
             <h4>Cluster base</h4>
             <div class="settings-grid">
               <label>SSH alias
-                <input type="text" id="bulk-settings-ssh-alias" placeholder="e.g. rfacluster">
+                <input type="text" id="bulk-settings-ssh-alias" placeholder="e.g. cluster-alias">
               </label>
               <label>Remote root
-                <input type="text" id="bulk-settings-remote-root" placeholder="/pub/.../initbinder">
+                <input type="text" id="bulk-settings-remote-root" placeholder="/path/to/initbinder">
               </label>
               <label>Target root
-                <input type="text" id="bulk-settings-target-root" placeholder="/pub/.../initbinder/targets">
+                <input type="text" id="bulk-settings-target-root" placeholder="/path/to/initbinder/targets">
               </label>
               <label>conda env (BoltzGen installed)
-                <input type="text" id="bulk-settings-conda" placeholder="conda activate ...">
+                <input type="text" id="bulk-settings-conda" placeholder="conda activate boltzgen">
               </label>
               <label>PyMOL executable path
                 <input type="text" id="bulk-settings-pymol-path" placeholder="pymol or /Applications/PyMOL.app">
               </label>
               <label>PyMOL conda env (local)
-                <input type="text" id="bulk-settings-pymol-conda-env" placeholder="takashi">
+                <input type="text" id="bulk-settings-pymol-conda-env" placeholder="pymol-env">
               </label>
             </div>
           </section>
@@ -1382,7 +1382,7 @@ top_exposed_residues:
                 <input type="text" id="bulk-settings-boltz-partition" placeholder="gpu">
               </label>
               <label>Account
-                <input type="text" id="bulk-settings-boltz-account" placeholder="ccl_lab_gpu">
+                <input type="text" id="bulk-settings-boltz-account" placeholder="project_gpu_account">
               </label>
               <label>GPUs
                 <input type="text" id="bulk-settings-boltz-gpus" placeholder="A30:1">

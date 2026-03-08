@@ -11,5 +11,7 @@ python -m pip install --upgrade pip
 python -m pip install -r "${ROOT_DIR}/requirements-webapp.txt"
 python -m playwright install chromium
 
-echo "Bootstrap complete."
+echo "Bootstrap complete (bulk runtime)."
+echo "Optional test dependencies: ${VENV_DIR}/bin/python -m pip install -r ${ROOT_DIR}/requirements-dev.txt"
+echo "Optional utility dependencies: ${VENV_DIR}/bin/python -m pip install -r ${ROOT_DIR}/requirements-optional.txt"
 echo "Next: ${ROOT_DIR}/scripts/run_bulk_local.sh"
