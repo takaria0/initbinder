@@ -2730,6 +2730,9 @@ async function exportSelectedBinders() {
         await downloadNamedFile(String(name));
       }
     }
+    if (body.idt_zip_name) {
+      await downloadNamedFile(String(body.idt_zip_name));
+    }
     showAlert(body.message || `Export ready: ${body.csv_name}`, false);
   } catch (err) {
     showAlert(err.message || 'Failed to export selected binders.');

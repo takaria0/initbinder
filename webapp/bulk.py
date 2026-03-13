@@ -11,6 +11,7 @@ import time
 import shutil
 import base64
 import hashlib
+import zipfile
 import traceback
 import statistics
 import math
@@ -8829,6 +8830,110 @@ _BINDER_EXPORT_SUMMARY_COLUMNS = [
 ]
 
 
+_IDT_EBLOCKS_PLATE_SIZE = 96
+_IDT_EBLOCKS_DATA_ROW_START = 2
+_IDT_EBLOCKS_TEMPLATE_NAME = "eblocks-plate-upload-template-96.xlsx"
+_IDT_EBLOCKS_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "static" / "templates" / _IDT_EBLOCKS_TEMPLATE_NAME
+)
+
+
+def _idt_eblocks_template_path() -> Path:
+    return _IDT_EBLOCKS_TEMPLATE_PATH
+
+
+def _sanitize_idt_name_token(value: object, *, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", str(value or "").strip()).strip("_")
+    return cleaned or fallback
+
+
+def _build_idt_plate_name(row: Dict[str, object], *, fallback_rank: int) -> str:
+    pdb_token = _sanitize_idt_name_token(row.get("pdb_id"), fallback="PDB")
+    epitope_token = _sanitize_idt_name_token(
+        row.get("epitope") or row.get("epitope_id"),
+        fallback="epitope",
+    )
+    raw_rank = row.get("rank_within_epitope")
+    if raw_rank is None:
+        raw_rank = row.get("rank")
+    try:
+        rank_value = int(float(raw_rank))
+    except (TypeError, ValueError):
+        rank_value = int(fallback_rank)
+    rank_value = max(1, rank_value)
+    return f"{pdb_token}_{epitope_token}_r{rank_value:02d}"
+
+
+def _build_idt_eblocks_zip(
+    export_rows: Sequence[Dict[str, object]],
+    *,
+    out_dir: Path,
+    timestamp: str,
+) -> Tuple[Optional[str], int, List[str]]:
+    notes: List[str] = []
+    rows = [row for row in export_rows if isinstance(row, dict)]
+    if not rows:
+        return None, 0, ["IDT plate export skipped (no binders selected)."]
+
+    template_path = _idt_eblocks_template_path()
+    if not template_path.exists():
+        return None, 0, [f"IDT plate export skipped (template missing: {template_path})."]
+
+    try:
+        from openpyxl import load_workbook
+    except Exception as exc:  # pragma: no cover - runtime guard
+        return None, 0, [f"IDT plate export skipped (openpyxl unavailable: {exc})."]
+
+    plate_paths: List[Path] = []
+    missing_sequences = 0
+    try:
+        for plate_idx, offset in enumerate(range(0, len(rows), _IDT_EBLOCKS_PLATE_SIZE), start=1):
+            plate_rows = rows[offset:offset + _IDT_EBLOCKS_PLATE_SIZE]
+            workbook = load_workbook(template_path)
+            try:
+                worksheet = workbook.active
+                for row_offset in range(_IDT_EBLOCKS_PLATE_SIZE):
+                    row_num = _IDT_EBLOCKS_DATA_ROW_START + row_offset
+                    worksheet.cell(row=row_num, column=2, value=None)
+                    worksheet.cell(row=row_num, column=3, value=None)
+                for row_offset, row in enumerate(plate_rows):
+                    row_num = _IDT_EBLOCKS_DATA_ROW_START + row_offset
+                    plate_label = _build_idt_plate_name(row, fallback_rank=row_offset + 1)
+                    sequence = str(row.get("dna_with_adapters") or "").strip()
+                    if not sequence:
+                        missing_sequences += 1
+                    worksheet.cell(row=row_num, column=2, value=plate_label)
+                    worksheet.cell(row=row_num, column=3, value=sequence or None)
+                plate_name = f"idt_eblocks_plate_{plate_idx:03d}_{timestamp}.xlsx"
+                plate_path = out_dir / plate_name
+                workbook.save(plate_path)
+                plate_paths.append(plate_path)
+            finally:
+                workbook.close()
+    except Exception as exc:
+        print(f"[binder-export] failed to build IDT plate workbook(s): {exc}")
+        traceback.print_exc()
+        return None, 0, [f"IDT plate export skipped (workbook generation failed: {exc})."]
+
+    if not plate_paths:
+        return None, 0, ["IDT plate export skipped (no workbooks generated)."]
+
+    zip_name = f"idt_eblocks_plates_{timestamp}.zip"
+    zip_path = out_dir / zip_name
+    try:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for plate_path in plate_paths:
+                archive.write(plate_path, arcname=plate_path.name)
+    except Exception as exc:
+        print(f"[binder-export] failed to build IDT plate zip: {exc}")
+        traceback.print_exc()
+        return None, 0, [f"IDT plate export skipped (zip creation failed: {exc})."]
+
+    if missing_sequences:
+        notes.append(f"IDT plate export: {missing_sequences} row(s) had empty dna_with_adapters.")
+    return zip_name, len(plate_paths), notes
+
+
 def _normalize_epitope_token(value: object) -> str:
     text = str(value or "").strip()
     if not text:
@@ -9167,6 +9272,11 @@ def export_selected_binders(
         out_dir=out_dir,
         timestamp=timestamp,
     )
+    idt_zip_name, idt_plate_count, idt_notes = _build_idt_eblocks_zip(
+        export_rows,
+        out_dir=out_dir,
+        timestamp=timestamp,
+    )
 
     message = f"Exported {total_selected} binders across {len(entries)} selections."
     if invalid:
@@ -9178,9 +9288,15 @@ def export_selected_binders(
         )
     if plot_notes:
         message = f"{message} Scatter exports -> {'; '.join(plot_notes)}"
+    if idt_zip_name:
+        message = f"{message} IDT plate ZIP ready: {idt_zip_name} ({idt_plate_count} plate(s))."
+    if idt_notes:
+        message = f"{message} {' '.join(idt_notes)}"
     return BoltzgenBinderExportResponse(
         csv_name=export_name,
         summary_csv_name=summary_name,
+        idt_zip_name=idt_zip_name,
+        idt_plate_count=idt_plate_count,
         selection_count=len(entries),
         invalid=invalid,
         plot_exports=plot_exports,

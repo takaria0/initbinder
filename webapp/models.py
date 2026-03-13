@@ -486,6 +486,8 @@ class BoltzgenBinderExportPlot(BaseModel):
 class BoltzgenBinderExportResponse(BaseModel):
     csv_name: Optional[str] = None
     summary_csv_name: Optional[str] = None
+    idt_zip_name: Optional[str] = None
+    idt_plate_count: int = 0
     selection_count: int = 0
     invalid: List[str] = Field(default_factory=list)
     plot_exports: List[BoltzgenBinderExportPlot] = Field(default_factory=list)
