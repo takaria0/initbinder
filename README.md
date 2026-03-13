@@ -1,6 +1,8 @@
 InitBinder
 ==========
 
+
+
 InitBinder is a local-first web application for catalog-guided antigen selection, epitope curation, cluster command generation, and binder review/export in antibody design workflows. The public entrypoint in this repository is served at `http://127.0.0.1:8000/`, with local-safe defaults that avoid live cluster probing and reject remote clients unless explicitly enabled.
 
 The current implementation emphasizes interactive target triage: users can discover purchasable targets from a configured catalog, select epitopes with LLM-assisted or manual workflows, regenerate BoltzGen inputs, generate copy/paste cluster commands, and export ranked binders with DNA/adaptor annotations. For the detailed operator runbook, see `README_GUI.md`.
