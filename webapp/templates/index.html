@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>InitBinder Pipeline UI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="main-content">
+        <div id="cluster-status" class="cluster-status warn">Checking cluster…</div>
+        <header class="page-header">
+          <div>
+            <h1>InitBinder</h1>
+            <p>End-to-end orchestration of target preparation, de novo VHH design submission, and assessment with visual QA.</p>
+            <nav class="page-nav">
+              <a href="/target-generation">Open target generation workspace</a>
+              <a href="/antigen-dms">Antigen DMS library</a>
+              <a href="/">Bulk processing</a>
+            </nav>
+          </div>
+          <label class="debug-toggle">
+            <input type="checkbox" id="debug-toggle">
+            <span>Enable debug controls</span>
+          </label>
+        </header>
+
+        <section id="target-setup">
+        <h2>Target Setup</h2>
+        <div class="target-actions">
+          <button type="button" id="open-catalog-browser" class="secondary">Browse target catalog</button>
+          <span class="help-text">Copy PDB IDs and antigen URLs from discovery TSV/CSV files without leaving the dashboard.</span>
+        </div>
+        <div class="preset-strip">
+          <div class="preset-strip-header">
+            <span>Saved target pairs</span>
+            <button type="button" id="presets-refresh" class="debug-only">Refresh</button>
+          </div>
+          <div id="preset-list" class="chip-row" role="list"></div>
+        </div>
+        <form id="target-form">
+          <input type="hidden" id="preset-id">
+          <div class="form-row">
+            <label for="pdb-id">PDB ID
+              <input id="pdb-id" name="pdb_id" type="text" maxlength="4" required placeholder="e.g. 6M17" autocomplete="off">
+            </label>
+            <label for="antigen-url">Antigen URL
+              <input id="antigen-url" name="antigen_url" type="text" placeholder="https://vendor/product">
+            </label>
+          </div>
+          <div class="form-row">
+            <label for="target-name">Preset name
+              <input id="target-name" type="text" placeholder="e.g. RBD">
+            </label>
+            <label for="target-epitopes">Number of epitopes
+              <input id="target-epitopes" type="number" min="1" max="32" value="3" autocomplete="off">
+            </label>
+          </div>
+          <div class="form-row">
+            <label for="decide-scope-prompt">Epitope guidance (optional)
+              <textarea id="decide-scope-prompt" name="decide_scope_prompt" rows="3" placeholder="Add hints for decide-scope, e.g. focus on receptor binding loop."></textarea>
+            </label>
+          </div>
+          <div class="flex-row advanced-row debug-only">
+            <label><input type="checkbox" id="force-refresh"> Force refresh</label>
+            <label><input type="checkbox" id="skip-decide" checked> Run decide-scope</label>
+            <label><input type="checkbox" id="skip-prep" checked> Run prep-target</label>
+          </div>
+        <div class="flex-row" style="margin-top: 16px;">
+          <button type="submit" id="target-submit">Run again</button>
+          <span class="badge" id="target-status-badge" hidden>Idle</span>
+        </div>
+      </form>
+      </section>
+
+        <section id="target-insights">
+        <div class="insights-header">
+          <h2>Epitope &amp; Target Insights</h2>
+          <button type="button" id="pymol-hotspots" disabled>Visualize hotspots in PyMOL</button>
+        </div>
+        <div class="insights-grid">
+          <div class="insights-column">
+            <h3>Epitopes</h3>
+            <ul id="epitope-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>PDB Chains</h3>
+            <ul id="chain-list" class="insight-list"></ul>
+          </div>
+          <div class="insights-column">
+            <h3>Antigen Details</h3>
+            <dl id="antigen-details" class="insight-details"></dl>
+          </div>
+        </div>
+      </section>
+
+        <section id="alignment-section">
+        <div class="flex-row" style="justify-content: space-between; align-items: baseline;">
+          <h2>Vendor antigen and PDB sequence alignment</h2>
+          <button type="button" id="refresh-alignment">Refresh alignment</button>
+        </div>
+        <div id="alignment-meta" class="badge" hidden></div>
+        <div id="alignment-view" class="alignments" hidden></div>
+      </section>
+
+        <section id="design-config">
+        <h2>Design Run Configuration</h2>
+        <p style="margin-top: 0;">Configure multi-engine jobs (RFdiffusion → ProteinMPNN → AlphaFold3, BoltzGen diffusion, and future pipelines). Arms and hotspot variants are detected automatically from the prepared target.</p>
+        <form id="design-form">
+          <div class="form-row">
+            <label>Design engine
+              <select id="design-engine"></select>
+              <span class="help-text" id="design-engine-hint" hidden></span>
+            </label>
+          </div>
+          <div class="form-row">
+            <label data-engine-field="total_designs">
+              <span class="field-label" data-engine-label="total_designs">Total designs</span>
+              <input type="number" id="design-total" value="90" min="1">
+              <span class="help-text" data-engine-help="total_designs" hidden></span>
+            </label>
+            <label data-engine-field="num_sequences">
+              <span class="field-label" data-engine-label="num_sequences">Sequences per backbone</span>
+              <input type="number" id="design-num-seq" value="1" min="1">
+              <span class="help-text" data-engine-help="num_sequences" hidden></span>
+            </label>
+            <label data-engine-field="temperature">
+              <span class="field-label" data-engine-label="temperature">Temperature</span>
+              <input type="number" id="design-temp" value="0.1" min="0" max="1" step="0.05">
+              <span class="help-text" data-engine-help="temperature" hidden></span>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Run label
+              <input type="text" id="design-run-label" placeholder="optional tag">
+            </label>
+            <label class="debug-only" data-engine-field="binder_chain_id">
+              <span class="field-label" data-engine-label="binder_chain_id">Binder chain ID</span>
+              <input type="text" id="design-binder-chain" value="H" maxlength="1">
+              <span class="help-text" data-engine-help="binder_chain_id" hidden></span>
+            </label>
+            <label data-engine-field="af3_seed">
+              <span class="field-label" data-engine-label="af3_seed">AlphaFold 3 seed</span>
+              <input type="number" id="design-af3-seed" value="1" min="0">
+              <span class="help-text" data-engine-help="af3_seed" hidden></span>
+            </label>
+          </div>
+          <div class="form-row" id="design-boltz-binding-row" hidden>
+            <label>BoltzGen binding (chain:res list)
+              <input type="text" id="design-boltz-binding" placeholder="e.g. A:142,151,229;B:10..30">
+            </label>
+            <span class="help-text">Optional binding_types override for BoltzGen runs.</span>
+          </div>
+          <div class="flex-row advanced-row" data-engine-field-container="boltzgen_crop_radius">
+            <label data-engine-field="boltzgen_crop_radius">
+              <span class="field-label" data-engine-label="boltzgen_crop_radius">BoltzGen crop radius (Å)</span>
+              <input type="number" id="design-boltz-crop-radius" value="14" min="0" step="1">
+              <span class="help-text" data-engine-help="boltzgen_crop_radius" hidden></span>
+            </label>
+          </div>
+          <div class="flex-row advanced-row debug-only" data-engine-field-container="rfdiff_crop_radius">
+            <label data-engine-field="rfdiff_crop_radius">
+              <input type="checkbox" id="design-enable-rfdiff-crop">
+              <span class="field-label" data-engine-label="rfdiff_crop_radius">Enable RFdiffusion target crop (default off)</span>
+              <span class="help-text" data-engine-help="rfdiff_crop_radius" hidden></span>
+            </label>
+          </div>
+          <div class="flex-row" style="margin-top: 8px;">
+            <button type="button" id="design-submit" disabled>Submit to cluster</button>
+            <span class="badge" id="design-status" hidden>Coming soon</span>
+          </div>
+        </form>
+      </section>
+
+        <section id="assessment-section">
+        <h2>Assessment</h2>
+        <div class="assessment-controls">
+          <label>
+            Run label
+            <input type="text" id="results-run-label" placeholder="latest" list="run-label-options">
+          </label>
+          <button type="button" id="assess-submit">Submit assess-all</button>
+        </div>
+        <div class="assessment-advanced debug-only">
+          <button type="button" id="refresh-results" class="debug-only">Reload local data</button>
+          <p class="help-text">Use “Download assessments” in the Results panel to copy new assessments from the remote workspace, then “Reload local data” to update the table.</p>
+        </div>
+      </section>
+
+      <section id="results-section">
+        <div class="results-header">
+          <h2>Results</h2>
+          <div class="results-controls">
+            <span class="run-pill">Run <strong id="active-run-name">—</strong></span>
+            <label>
+              Source
+              <select id="results-source">
+                <option value="af3">AF3 assessments</option>
+                <option value="boltzgen">BoltzGen metrics</option>
+              </select>
+            </label>
+            <label id="boltz-spec-wrapper" hidden>
+              Spec
+              <input type="text" id="boltz-spec" placeholder="full_target">
+            </label>
+            <label>
+              Row Limit
+              <input type="number" id="results-limit" value="2000" min="1">
+            </label>
+            <button type="button" id="sync-results">Download assessments</button>
+            <button type="button" id="sync-boltz-results" hidden>Sync BoltzGen results</button>
+          </div>
+        </div>
+        <datalist id="run-label-options"></datalist>
+        <div id="run-history" class="run-history"></div>
+        <div id="boltz-run-list" class="run-history" hidden></div>
+        <div id="results-meta" class="badge" hidden></div>
+        <div id="binder-detail" class="alert success" hidden></div>
+        <div id="plot-container" class="scatter-panel" hidden>
+          <div class="scatter-controls">
+            <label>
+              X axis
+              <select id="scatter-axis-x">
+                <option value="rmsd_diego">Binder RMSD (Å)</option>
+                <option value="iptm">ipTM</option>
+                <option value="ipsae_min">ipSAE_min</option>
+              </select>
+            </label>
+            <label>
+              Y axis
+              <select id="scatter-axis-y">
+                <option value="iptm">ipTM</option>
+                <option value="rmsd_diego">Binder RMSD (Å)</option>
+                <option value="ipsae_min">ipSAE_min</option>
+              </select>
+            </label>
+            <label>
+              <span id="scatter-threshold-x-label">X threshold</span>
+              <input type="number" id="scatter-threshold-x" step="0.1" min="0" value="3.7">
+            </label>
+            <label>
+              <span id="scatter-threshold-y-label">Y threshold</span>
+              <input type="number" id="scatter-threshold-y" step="0.01" min="0" max="1" value="0.8">
+            </label>
+            <div class="scatter-threshold-count" id="scatter-threshold-count" aria-live="polite"></div>
+            <div class="scatter-actions">
+              <button type="button" id="scatter-refresh" class="ghost">Refresh scatter</button>
+            </div>
+          </div>
+          <div class="scatter-legend" id="scatter-legend" hidden aria-live="polite"></div>
+          <div class="scatter-grid">
+            <canvas id="scatter-hist-x" width="600" height="120" aria-hidden="true"></canvas>
+            <canvas id="scatter-plot" width="600" height="600"></canvas>
+            <canvas id="scatter-hist-y" width="120" height="600" aria-hidden="true"></canvas>
+          </div>
+        </div>
+        <div id="analysis-panel" class="analysis-panel" hidden>
+          <div class="analysis-header">
+            <h3>Ranking Diagnostics</h3>
+            <span id="analysis-status" class="badge" hidden></span>
+          </div>
+          <div id="analysis-plots" class="analysis-plot-grid"></div>
+          <div id="analysis-matrix" class="analysis-matrix-wrapper"></div>
+          <div id="analysis-logs" class="analysis-logs"></div>
+        </div>
+        <div class="table-scroll" style="margin-top: 16px;" hidden id="results-table-wrapper">
+          <div class="table-toolbar">
+            <button type="button" id="pymol-top" disabled>PyMOL top 96</button>
+            <button type="button" id="pymol-movie" disabled>Render PyMOL movie</button>
+            <button type="button" id="export-open" disabled>Export…</button>
+            <button type="button" id="analysis-run" disabled>Analyze rankings</button>
+          </div>
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th data-key="design_name">Design</th>
+                <th data-key="iptm" data-type="number">ipTM</th>
+                <th data-key="rmsd_diego" data-type="number">RMSD</th>
+                <th data-key="ipsae_min" data-type="number">ipSAE<sub>min</sub></th>
+                <th data-key="hotspot_min_distance" data-type="number">Hotspot min (Å)</th>
+                <th data-key="metadata">Metadata</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="table-footer" id="results-truncate" hidden>
+            <div class="truncate-note">
+              <span id="results-truncate-text" aria-live="polite"></span>
+              <button type="button" id="results-truncate-toggle" class="ghost">Show all rows</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="library-section">
+        <h2>Golden Gate Assembly Planner</h2>
+        <p style="margin-top: 0;">Split constant VHH frameworks and variable CDRs into BsaI-flanked fragments ready for single-pot cloning, and export an order-ready spreadsheet.</p>
+        <div class="library-controls">
+          <label>Top designs
+            <input type="number" id="library-topn" value="48" min="1">
+          </label>
+          <label>Codon host
+            <select id="library-codon-host">
+              <option value="yeast">Yeast</option>
+              <option value="e_coli">E. coli</option>
+              <option value="human">Human</option>
+            </select>
+          </label>
+          <label>Sequence column (optional)
+            <input type="text" id="library-sequence-column" placeholder="binder_sequence_aa">
+          </label>
+          <label>5′ flank
+            <input type="text" id="library-upstream" value="GGAG">
+          </label>
+          <label>3′ flank
+            <input type="text" id="library-downstream" value="CGCT">
+          </label>
+          <button type="button" id="library-run" disabled>Plan Golden Gate library</button>
+          <span class="badge" id="library-status" hidden>Idle</span>
+        </div>
+        <div class="library-summary" id="library-summary"></div>
+        <div class="library-downloads" id="library-downloads" hidden></div>
+        <div class="library-alignment" id="library-alignment" hidden>
+          <div class="alignment-toolbar">
+            <div class="alignment-toggle" id="library-alignment-toggle">
+              <button type="button" data-mode="aa" class="active">Amino acids</button>
+              <button type="button" data-mode="dna">Nucleotides</button>
+            </div>
+            <div class="alignment-legend" id="library-alignment-legend"></div>
+          </div>
+          <div class="alignment-table" id="library-alignment-table"></div>
+        </div>
+        <div class="gg-assembly" id="library-assembly"></div>
+        <div class="library-preview" id="library-preview"></div>
+      </section>
+
+      <section id="counter-selection-section">
+        <h2>Counter Selection Planner</h2>
+        <p class="counter-description" id="counter-selection-description">Select a primary selection workflow to surface counter selections and pitfalls to keep OrthoRep affinity maturation on track.</p>
+        <div class="counter-controls">
+          <label for="counter-selection-method">Primary selection method
+            <select id="counter-selection-method">
+              <option value="">Select a primary selection…</option>
+              <option value="macs_streptavidin">MACS streptavidin microbeads + biotinylated antigen</option>
+              <option value="facs_anti_biotin">FACS anti-biotin AF647 sorting with biotinylated antigen</option>
+              <option value="custom">Custom / other selection workflow</option>
+            </select>
+          </label>
+        </div>
+        <div class="counter-context" id="counter-selection-context" hidden>
+          <div class="counter-context-chips" id="counter-selection-chips"></div>
+          <ul id="counter-selection-context-list"></ul>
+        </div>
+        <div class="counter-panels">
+          <div class="counter-card">
+            <h3>Recommended counter selections</h3>
+            <ul id="counter-selection-list"></ul>
+          </div>
+          <div class="counter-card">
+            <h3>Things to note</h3>
+            <ul id="counter-selection-notes"></ul>
+          </div>
+        </div>
+      </section>
+
+      </div>
+
+      <aside id="jobs-sidebar">
+        <section class="sidebar-card selection-card" id="current-selection-card">
+          <h2>Current Target</h2>
+          <div class="selection-pill" id="current-selection-pdb">—</div>
+          <div class="selection-meta" id="current-selection-name">Preset: —</div>
+          <div class="selection-meta" id="current-selection-antigen">Antigen URL: —</div>
+        </section>
+        <section class="sidebar-card">
+          <div class="sidebar-header">
+            <h2>Job Activity</h2>
+            <button type="button" id="refresh-jobs">Refresh</button>
+          </div>
+          <div id="job-alert" class="alert" hidden></div>
+          <div class="status-log" id="job-log">Waiting for commands...</div>
+        </section>
+        <section class="sidebar-card" id="recent-jobs-card">
+          <h3>Recent Jobs</h3>
+          <ul id="job-list"></ul>
+        </section>
+      </aside>
+    </main>
+
+    <div id="export-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close="export"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Export Options</h3>
+          <button type="button" id="export-close" class="ghost">Close</button>
+        </div>
+        <form id="export-form">
+          <div class="form-row">
+            <label>Top N designs
+              <input type="number" id="export-topn" value="48" min="1">
+            </label>
+            <label>Codon host
+              <select id="export-codon-host">
+                <option value="yeast" selected>Yeast</option>
+                <option value="ecoli">E. coli</option>
+                <option value="human">Human</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>GC target
+              <input type="number" id="export-gc" value="0.45" min="0" max="1" step="0.05">
+            </label>
+            <label>GC window
+              <input type="number" id="export-gc-window" value="100" min="1">
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Prefix overhang
+              <input type="text" id="export-prefix" placeholder="optional">
+            </label>
+            <label>Suffix overhang
+              <input type="text" id="export-suffix" placeholder="optional">
+            </label>
+          </div>
+          <div class="modal-actions">
+            <label class="checkbox-inline"><input type="checkbox" id="export-dnachisel" checked> Codon optimize with DNA Chisel</label>
+            <button type="button" id="export-run" disabled>Generate exports</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="catalog-modal" class="modal catalog-modal" hidden>
+      <div class="modal-backdrop" data-close="catalog"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Target catalog browser</h3>
+          <button type="button" id="catalog-close" class="ghost">Close</button>
+        </div>
+        <div class="catalog-layout">
+          <div class="catalog-column">
+            <div class="catalog-header">
+              <h4>Catalog files</h4>
+              <button type="button" id="catalog-browser-refresh">Refresh</button>
+            </div>
+            <p class="help-text">Located in <code>targets_catalog/</code></p>
+            <ul id="catalog-browser-list" class="catalog-list" role="list"></ul>
+          </div>
+          <div class="catalog-column">
+            <div class="catalog-header">
+              <h4>Preview</h4>
+              <div class="catalog-meta">
+                <span id="catalog-browser-selected-name" class="catalog-selected">Select a file to preview</span>
+                <span id="catalog-browser-selected-info" class="badge" hidden></span>
+                <span id="catalog-browser-status" class="badge" hidden></span>
+              </div>
+            </div>
+            <div class="catalog-controls">
+              <label>
+                Rows to preview
+                <input type="number" id="catalog-browser-limit" value="200" min="10" max="2000">
+              </label>
+              <button type="button" id="catalog-browser-download" class="secondary" disabled>Download file</button>
+            </div>
+            <p class="help-text">Click a row to send its PDB ID and antigen URL to the Target Setup form.</p>
+            <div id="catalog-browser-viewer" class="catalog-viewer" role="region" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>
