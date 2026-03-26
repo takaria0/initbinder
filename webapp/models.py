@@ -575,6 +575,7 @@ class BulkUiConfigResponse(BaseModel):
     boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
     input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
     llm: BulkUiLlmConfig = Field(default_factory=BulkUiLlmConfig)
+    developer_mode: bool = False
 
 
 class BulkUiConfigUpdateRequest(BaseModel):
@@ -582,6 +583,7 @@ class BulkUiConfigUpdateRequest(BaseModel):
     boltzgen: BulkUiBoltzgenConfig = Field(default_factory=BulkUiBoltzgenConfig)
     input: BulkUiInputConfig = Field(default_factory=BulkUiInputConfig)
     llm: BulkUiLlmConfig = Field(default_factory=BulkUiLlmConfig)
+    developer_mode: bool = False
 
 
 class BulkDefaultInputResponse(BaseModel):

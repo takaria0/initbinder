@@ -266,6 +266,7 @@ def _build_bulk_ui_config_response(cfg_obj) -> BulkUiConfigResponse:
             openai_api_key=bulk_cfg.openai_api_key,
             openai_model=bulk_cfg.openai_model,
         ),
+        developer_mode=bool(getattr(bulk_cfg, "developer_mode", False)),
     )
 
 
@@ -1270,6 +1271,7 @@ async def api_bulk_ui_config_save(payload: BulkUiConfigUpdateRequest) -> BulkUiC
     bulk_block["auto_load_default_input"] = bool(payload.input.auto_load_default_input)
     bulk_block["openai_api_key"] = _normalize_optional_text(payload.llm.openai_api_key)
     bulk_block["openai_model"] = _normalize_optional_text(payload.llm.openai_model)
+    bulk_block["developer_mode"] = bool(payload.developer_mode)
 
     _write_local_config_mapping(local_path, data)
 

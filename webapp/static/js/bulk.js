@@ -108,6 +108,10 @@ function isBoltzEngine(engine) {
   return !raw || raw.includes('boltz');
 }
 
+function isDeveloperModeEnabled() {
+  return Boolean(state.uiSettings?.developer_mode);
+}
+
 const el = {
   bulkStatus: document.querySelector('#bulk-status'),
   llmTargetPanel: document.querySelector('#llm-target-panel'),
@@ -219,6 +223,7 @@ const el = {
   bulkSettingsOpenaiModel: document.querySelector('#bulk-settings-openai-model'),
   bulkSettingsInputPath: document.querySelector('#bulk-settings-input-path'),
   bulkSettingsAutoLoad: document.querySelector('#bulk-settings-auto-load'),
+  bulkSettingsDeveloperMode: document.querySelector('#bulk-settings-developer-mode'),
   bulkSettingsLoadDefault: document.querySelector('#bulk-settings-load-default'),
   boltzRunRangeModal: document.querySelector('#boltz-run-range-modal'),
   boltzRunRangeStart: document.querySelector('#boltz-run-range-start'),
@@ -302,6 +307,31 @@ const el = {
   pipelineRerunCancel: document.querySelector('#pipeline-rerun-cancel'),
   pipelineRerunClose: document.querySelector('#epitope-select-close'),
 };
+
+function syncDeveloperModeUi({ refreshDiversityView = false } = {}) {
+  const enabled = isDeveloperModeEnabled();
+  document.querySelectorAll('[data-dev-mode-only]').forEach((node) => {
+    node.hidden = !enabled;
+  });
+  if (el.bulkSettingsDeveloperMode) {
+    el.bulkSettingsDeveloperMode.checked = enabled;
+  }
+  if (!enabled) {
+    if (el.binderFilterEngine) el.binderFilterEngine.value = 'boltzgen';
+    if (el.boltzConfigEngine) el.boltzConfigEngine.value = 'boltzgen';
+    setRunEngine('boltzgen');
+  } else if (el.binderFilterEngine && el.binderFilterEngine.value === 'boltzgen') {
+    el.binderFilterEngine.value = '';
+  }
+  if (Array.isArray(state.binderRows)) {
+    renderBinderRows(state.binderRows);
+  }
+  renderDiversityPlots(state.diversityPlots || []);
+  if (refreshDiversityView) {
+    state.binderPage = 1;
+    refreshDiversity({ silent: true, page: 1 });
+  }
+}
 
 function formatRangeLabel(value) {
   if (Array.isArray(value) && value.length) {
@@ -940,10 +970,11 @@ function scheduleBulkPreview() {
 }
 
 function getBinderFilters() {
+  const engine = (el.binderFilterEngine?.value || '').trim();
   return {
     pdb: (el.binderFilterPdb?.value || '').trim(),
     epitope: (el.binderFilterEpitope?.value || '').trim(),
-    engine: (el.binderFilterEngine?.value || '').trim(),
+    engine: isDeveloperModeEnabled() ? engine : 'boltzgen',
     orderBy: (el.binderOrderBy?.value || '').trim(),
   };
 }
@@ -1266,14 +1297,21 @@ function binderSelectionLabel(row = {}) {
   return `${pdbId}:${epitope}`;
 }
 
-function visibleBinderRows(rows = []) {
+function filterBinderRowsForMode(rows = []) {
   const rawList = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  return isDeveloperModeEnabled()
+    ? rawList
+    : rawList.filter((row) => isBoltzEngine(row?.engine));
+}
+
+function visibleBinderRows(rows = []) {
+  const engineScoped = filterBinderRowsForMode(rows);
   const includeArchived = el.binderIncludeArchived
     ? Boolean(el.binderIncludeArchived.checked)
     : Boolean(state.binderIncludeArchived);
   return includeArchived
-    ? rawList
-    : rawList.filter((row) => row?.epitope_active !== false);
+    ? engineScoped
+    : engineScoped.filter((row) => row?.epitope_active !== false);
 }
 
 function parseResidueToken(token) {
@@ -2126,7 +2164,9 @@ function renderDiversityPlots(items = []) {
     const message = (state.diversityMessage || '').trim();
     empty.textContent =
       message ||
-      'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs). For RFAntibody, sync af3_rankings.tsv under targets/<PDB>/designs/rfantibody/_assessments/<run_label>/ (legacy: designs/_assessments), then click Refresh to rebuild all_design_metrics.';
+      (isDeveloperModeEnabled()
+        ? 'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs). For RFAntibody, sync af3_rankings.tsv under targets/<PDB>/designs/rfantibody/_assessments/<run_label>/ (legacy: designs/_assessments), then click Refresh to rebuild all_design_metrics.'
+        : 'No diversity plots yet. For BoltzGen, download metrics to targets/<PDB>/designs/boltzgen/epitope_*/final_ranked_designs/all_designs_metrics.csv (or designs/boltzgen/<run_label>/epitope_*/final_ranked_designs), then click Refresh to rebuild all_design_metrics.');
     el.diversityGrid.appendChild(empty);
   }
   state.diversityPlots = list;
@@ -2345,7 +2385,7 @@ async function refreshDiversity({ silent = false, page = null, force = false } =
     state.diversityPlots = Array.isArray(data.plots) ? data.plots : [];
     state.boltzDesignCounts = normalizeBoltzCounts(data.binder_counts);
     const pdbIds = new Set();
-    const binderRows = Array.isArray(data.binder_rows) ? data.binder_rows : [];
+    const binderRows = filterBinderRowsForMode(Array.isArray(data.binder_rows) ? data.binder_rows : []);
     (state.diversityPlots || []).forEach((plot) => {
       const val = (plot.pdb_id || '').trim().toUpperCase();
       if (val) pdbIds.add(val);
@@ -2443,7 +2483,8 @@ function renderBinderRows(rows = []) {
   if (!el.binderTable || !el.binderPanel) return;
   const tbody = el.binderTable;
   tbody.innerHTML = '';
-  const rawList = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const rawList = filterBinderRowsForMode(rows);
+  const developerMode = isDeveloperModeEnabled();
   const includeArchived = el.binderIncludeArchived
     ? Boolean(el.binderIncludeArchived.checked)
     : Boolean(state.binderIncludeArchived);
@@ -2456,7 +2497,7 @@ function renderBinderRows(rows = []) {
   const noteRow = () => {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 9;
+    td.colSpan = developerMode ? 9 : 7;
     td.className = 'bulk-empty-row';
     if (archivedHiddenCount > 0 && !includeArchived) {
       td.textContent = 'No active binders on this page (archived rows are hidden).';
@@ -2478,12 +2519,14 @@ function renderBinderRows(rows = []) {
       const values = [
         row.pdb_id || '—',
         epLabel,
-        engineLabel,
         row.iptm !== null && row.iptm !== undefined ? Number(row.iptm).toFixed(3) : '—',
         row.rmsd !== null && row.rmsd !== undefined ? Number(row.rmsd).toFixed(3) : '—',
         row.hotspot_dist !== null && row.hotspot_dist !== undefined ? Number(row.hotspot_dist).toFixed(2) : '—',
-        row.ipsae_min !== null && row.ipsae_min !== undefined ? Number(row.ipsae_min).toFixed(3) : '—',
       ];
+      if (developerMode) {
+        values.splice(2, 0, engineLabel);
+        values.push(row.ipsae_min !== null && row.ipsae_min !== undefined ? Number(row.ipsae_min).toFixed(3) : '—');
+      }
       values.forEach((val, colIdx) => {
         const td = document.createElement('td');
         if (colIdx === 1) {
@@ -2620,7 +2663,7 @@ async function loadBinderTable({ page = 1, silent = false, force = false } = {})
       throw new Error(detail.detail || `Failed to load binders (${res.status})`);
     }
     const body = await res.json();
-    state.binderRows = Array.isArray(body.rows) ? body.rows : [];
+    state.binderRows = filterBinderRowsForMode(Array.isArray(body.rows) ? body.rows : []);
     state.binderTotal = Number(body.total_rows || state.binderRows.length || 0);
     state.binderPage = Number(body.page || page || 1);
     state.binderPageSize = Number(body.page_size || state.binderPageSize || 100);
@@ -3659,6 +3702,7 @@ function applyBulkUiSettingsToForm(payload = {}) {
   setTextInputValue(el.bulkSettingsInputPath, input.default_input_path);
   state.activeCatalogName = getConfiguredLlmCatalogName();
   if (el.bulkSettingsAutoLoad) el.bulkSettingsAutoLoad.checked = Boolean(input.auto_load_default_input);
+  if (el.bulkSettingsDeveloperMode) el.bulkSettingsDeveloperMode.checked = Boolean(payload.developer_mode);
 
   if (el.bulkSettingsMeta) {
     const path = payload.local_config_path || 'cfg/webapp.local.yaml';
@@ -3700,6 +3744,7 @@ function buildBulkUiSettingsPayload() {
       openai_api_key: normalizeOptionalText(el.bulkSettingsOpenaiKey?.value),
       openai_model: normalizeOptionalText(el.bulkSettingsOpenaiModel?.value),
     },
+    developer_mode: Boolean(el.bulkSettingsDeveloperMode?.checked),
     input: {
       default_input_path: normalizeOptionalText(el.bulkSettingsInputPath?.value),
       auto_load_default_input: Boolean(el.bulkSettingsAutoLoad?.checked),
@@ -3708,12 +3753,14 @@ function buildBulkUiSettingsPayload() {
 }
 
 async function loadBulkUiSettings({ autoLoadInput = true } = {}) {
+  const previousDeveloperMode = isDeveloperModeEnabled();
   try {
     const res = await fetch('/api/bulk/ui-config');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     state.uiSettings = payload;
     applyBulkUiSettingsToForm(payload);
+    syncDeveloperModeUi({ refreshDiversityView: previousDeveloperMode !== isDeveloperModeEnabled() });
     if (autoLoadInput) {
       const configuredInput = normalizeOptionalText(payload?.input?.default_input_path);
       if (configuredInput) {
@@ -3722,10 +3769,12 @@ async function loadBulkUiSettings({ autoLoadInput = true } = {}) {
     }
   } catch (err) {
     state.uiSettings = null;
+    syncDeveloperModeUi();
   }
 }
 
 async function saveBulkUiSettings(triggerEl = null) {
+  const previousDeveloperMode = isDeveloperModeEnabled();
   const payload = buildBulkUiSettingsPayload();
   if (triggerEl) triggerEl.disabled = true;
   try {
@@ -3741,6 +3790,7 @@ async function saveBulkUiSettings(triggerEl = null) {
     }
     state.uiSettings = body;
     applyBulkUiSettingsToForm(body);
+    syncDeveloperModeUi({ refreshDiversityView: previousDeveloperMode !== isDeveloperModeEnabled() });
     state.commandDefaults = null;
     await loadCommandDefaults();
     const configuredInput = normalizeOptionalText(body?.input?.default_input_path);
@@ -4074,11 +4124,13 @@ async function fetchTargetYaml(pdbId) {
 }
 
 function getConfigEngine() {
+  if (!isDeveloperModeEnabled()) return 'boltzgen';
   const value = (el.boltzConfigEngine?.value || 'boltzgen').trim().toLowerCase();
   return value || 'boltzgen';
 }
 
 function getRunEngine() {
+  if (!isDeveloperModeEnabled()) return 'boltzgen';
   const control = el.boltzRunEngine;
   if (!control) return 'boltzgen';
   if (control.tagName === 'SELECT') {
@@ -4092,7 +4144,9 @@ function getRunEngine() {
 
 function setRunEngine(engine) {
   const control = el.boltzRunEngine;
-  const value = (engine || 'boltzgen').trim().toLowerCase() || 'boltzgen';
+  const value = !isDeveloperModeEnabled()
+    ? 'boltzgen'
+    : ((engine || 'boltzgen').trim().toLowerCase() || 'boltzgen');
   if (!control) return value;
   if (control.tagName === 'SELECT') {
     control.value = value;
@@ -6353,6 +6407,7 @@ function setupExampleTabs() {
 }
 
 function init() {
+  syncDeveloperModeUi();
   restoreLlmState();
   ensureActiveConversation();
   syncStateFromConversation(getActiveConversation());

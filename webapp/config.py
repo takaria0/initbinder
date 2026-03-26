@@ -289,6 +289,7 @@ class BulkUiConfig:
     max_default_input_bytes: int = 2_000_000
     openai_api_key: Optional[str] = None
     openai_model: Optional[str] = None
+    developer_mode: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.default_input_path, str) and self.default_input_path.strip():
@@ -305,6 +306,10 @@ class BulkUiConfig:
             self.openai_api_key = self.openai_api_key.strip() or None
         if isinstance(self.openai_model, str):
             self.openai_model = self.openai_model.strip() or None
+        if isinstance(self.developer_mode, str):
+            self.developer_mode = self.developer_mode.lower() in {"1", "true", "yes"}
+        else:
+            self.developer_mode = bool(self.developer_mode)
 
 
 @dataclass(slots=True)

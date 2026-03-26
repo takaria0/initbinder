@@ -252,7 +252,7 @@
                     <span class="bulk-field-label">Filter epitope</span>
                     <input type="text" id="binder-filter-epitope" placeholder="e.g. epitope_1">
                   </label>
-                  <label class="help-text bulk-field">
+                  <label class="help-text bulk-field" data-dev-mode-only hidden>
                     <span class="bulk-field-label">Filter engine</span>
                     <select id="binder-filter-engine">
                       <option value="">All</option>
@@ -283,17 +283,20 @@
                 </div>
               </div>
               <div class="bulk-subcard">
-                <p class="help-text">Latest binders from the diversity roll-up (BoltzGen + RFAntibody). After rsync, click Refresh to rebuild all_design_metrics and update the table.</p>
+                <p class="help-text">
+                  Latest binders from the diversity roll-up. After rsync, click Refresh to rebuild <code>all_design_metrics</code> and update the table.
+                  <span data-dev-mode-only hidden>Developer mode also shows legacy RFAntibody rows when available.</span>
+                </p>
                 <table id="boltz-binders-table">
                   <thead>
                     <tr>
                       <th>PDB ID</th>
                       <th>Epitope</th>
-                      <th>Engine</th>
+                      <th data-dev-mode-only hidden>Engine</th>
                       <th>ipTM</th>
                       <th>RMSD</th>
                       <th>Hotspot dist (Å)</th>
-                      <th>ipSAE</th>
+                      <th data-dev-mode-only hidden>ipSAE</th>
                       <th>Design path</th>
                       <th>PyMOL</th>
                     </tr>
@@ -327,7 +330,7 @@
         <div class="modal-header">
           <div class="bulk-modal-header-group">
             <h3 id="boltz-config-title">BoltzGen config</h3>
-            <label class="help-text bulk-modal-inline-label">
+            <label class="help-text bulk-modal-inline-label" data-dev-mode-only hidden>
               <span>Engine</span>
               <select id="bulk-config-engine">
                 <option value="boltzgen">BoltzGen</option>
@@ -358,7 +361,7 @@
         <div class="modal-header">
           <div class="bulk-modal-header-group">
             <h3 id="boltz-run-title">Cluster run steps</h3>
-            <div class="alignment-toggle" id="bulk-run-engine" role="tablist" aria-label="Run engine">
+            <div class="alignment-toggle" id="bulk-run-engine" role="tablist" aria-label="Run engine" data-dev-mode-only hidden>
               <button type="button" data-engine="boltzgen" class="active" aria-selected="true">BoltzGen</button>
               <button type="button" data-engine="rfantibody" aria-selected="false">RFA pipeline</button>
             </div>
@@ -724,10 +727,11 @@ ranking_score = ipTM_norm + (1 - RMSD_norm)</pre>
                 Epitope_1 placeholder from <code>allowed_epitope_range</code> or the first chain fallback. SASA filtering is applied to
                 hotspot <em>selection</em> (not epitope deletion): hotspots are chosen from residues with SASA &gt;= cutoff, with a fallback
                 to unfiltered picks if no residues pass.</li>
-              <li><strong>Config + run.</strong> Generate BoltzGen configs (and optional RFAntibody scripts), submit jobs, and store designs under
-                <code>targets/&lt;PDB&gt;/designs/</code>.</li>
-              <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> and RFAntibody produces
-                <code>af3_rankings.tsv</code>. Diversity reporting merges both into <code>all_design_metrics_*.csv</code> and refreshes the Designed binders table.</li>
+              <li><strong>Config + run.</strong> Generate BoltzGen configs, submit jobs, and store designs under
+                <code>targets/&lt;PDB&gt;/designs/</code>.
+                <span data-dev-mode-only hidden>Developer mode also exposes legacy RFAntibody script generation.</span></li>
+              <li><strong>Assess + aggregate.</strong> BoltzGen produces <code>all_designs_metrics.csv</code> to refresh diversity reporting and the Designed binders table.
+                <span data-dev-mode-only hidden>Developer mode also includes legacy RFAntibody <code>af3_rankings.tsv</code> inputs in the aggregate view.</span></li>
             </ol>
             <p><strong>SASA filtering by stage (summary).</strong> SASA is computed only during <code>prep_target.py --check</code>. The interface can
               optionally <em>remove</em> epitopes from manual run command generation if any stored hotspot falls below the SASA cutoff; this is a UI-level
@@ -1431,6 +1435,16 @@ top_exposed_residues:
                 Auto-load this file on page open when input is empty
               </label>
               <button type="button" id="bulk-settings-load-default" class="ghost">Load default file now</button>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4>Interface</h4>
+            <div class="flex-row bulk-settings-toggle-row">
+              <label class="help-text bulk-autoload-label">
+                <input type="checkbox" id="bulk-settings-developer-mode">
+                Developer mode: show experimental RFdiffusion/RFAntibody/ipSAE UI
+              </label>
             </div>
           </section>
         </div>
