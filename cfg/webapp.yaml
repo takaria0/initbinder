@@ -1,0 +1,70 @@
+paths:
+  antigen_category_map: targets_catalog/antigen_category_map.tsv
+
+cluster:
+  # Default to real cluster mode; override via cfg/webapp.local.yaml or INITBINDER_* env vars.
+  mock: false
+  host: cluster.example.edu
+  ssh_config_alias: null
+  remote_root: null
+  target_root: null
+  control_path: null
+  control_persist: 600000
+  ensure_master: false
+  conda_activate: null
+  rsync_path: rsync
+  sbatch_path: sbatch
+  squeue_path: squeue
+  sacct_path: sacct
+  pymol_path: pymol
+  pymol_conda_env: null
+  assess_partition: null
+  assess_account: null
+  assess_time_minutes: 240
+  assess_mem_gb: 16
+  assess_cpus: 4
+  debug: false
+
+  boltzgen:
+    conda_activate: null
+    partition: null
+    account: null
+    gpus: A100:1
+    cpus: 8
+    mem_gb: 64
+    time_hours: 12
+    scripts_dir: lib/tools/boltzgen
+    launcher_dir: lib/tools/launchers
+    protocol: nanobody-anything
+    cache_dir: null
+    output_root: null
+    extra_run_args: []
+    nanobody_scaffolds:
+      - nanobody_scaffolds/7eow.yaml
+      - nanobody_scaffolds/7xl0.yaml
+      - nanobody_scaffolds/8coh.yaml
+      - nanobody_scaffolds/8z8v.yaml
+    default_num_designs: 1000
+    default_budget: null
+    slurm_log_dir: slurm_logs
+
+  rfantibody:
+    slurm_partition: null
+    slurm_account: null
+    slurm_gpu_type: A100:1
+    rfa_repo_path: null
+    singularity_image: null
+    af3_singularity_image: null
+    af3_model_params_dir: null
+    af3_databases_dir: null
+    af3_run_script: null
+    framework_pdb: null
+    designs_per_task: 200
+    mpnn_num_seq: 1
+    mpnn_temperature: 0.1
+    binder_chain_id: H
+    cdr_h1: "3-8"
+    cdr_h2: "3-8"
+    cdr_h3: "8-20"
+    model_seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    run_tag: null
